@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DataFusion Aggregation: AggregateExec &amp; Sort-Order Exploitation</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --panel2: #1d2230;
+    --ink: #d7dce5;
+    --muted: #8b94a7;
+    --accent: #5db0ff;
+    --accent2: #7ee2b8;
+    --warn: #ffcc66;
+    --danger: #ff7a7a;
+    --border: #2a3040;
+    --code-bg: #0b0d13;
+    --kw: #c792ea;
+    --fn: #82aaff;
+    --str: #c3e88d;
+    --com: #607080;
+    --num: #f78c6c;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { display: grid; grid-template-columns: 270px 1fr; max-width: 1400px; margin: 0 auto; }
+  /* sidebar */
+  nav {
+    position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto;
+    padding: 24px 18px; border-right: 1px solid var(--border); background: var(--panel);
+  }
+  nav h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 8px; }
+  nav a { display: block; color: var(--ink); text-decoration: none; padding: 4px 8px; border-radius: 6px; font-size: 14px; opacity: .85; }
+  nav a:hover { background: var(--panel2); color: var(--accent); opacity: 1; }
+  nav .lead { font-weight: 700; color: var(--accent2); font-size: 15px; letter-spacing: .02em; }
+  /* main */
+  main { padding: 40px 52px 120px; min-width: 0; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 6px; }
+  h1 .sub { display:block; font-size: 16px; color: var(--muted); font-weight: 400; margin-top: 8px; }
+  h2 { font-size: 24px; margin: 52px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 18px; margin: 30px 0 10px; color: var(--accent2); }
+  h4 { font-size: 15px; margin: 22px 0 8px; color: var(--accent); text-transform: uppercase; letter-spacing: .05em; }
+  p { margin: 12px 0; }
+  a.src { color: var(--muted); font-size: 12.5px; text-decoration: none; border-bottom: 1px dotted var(--muted); }
+  code { font-family: "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace; font-size: 13.5px; }
+  p code, li code, td code { background: var(--code-bg); padding: 1px 6px; border-radius: 5px; color: var(--accent2); border: 1px solid var(--border); }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px; overflow-x: auto; font-size: 13px; line-height: 1.55; margin: 16px 0;
+  }
+  pre code { background: none; border: none; padding: 0; color: #c8d0de; }
+  .filehdr { font-size: 12px; color: var(--muted); margin: 18px 0 -8px; font-family: "SF Mono", monospace; }
+  /* syntax */
+  .kw { color: var(--kw); } .fn { color: var(--fn); } .str { color: var(--str); }
+  .com { color: var(--com); font-style: italic; } .num { color: var(--num); } .ty { color: #ffd479; }
+  /* callouts */
+  .note, .key, .warnbox {
+    border-radius: 10px; padding: 14px 18px; margin: 18px 0; border-left: 4px solid; background: var(--panel);
+  }
+  .note { border-color: var(--accent); }
+  .key { border-color: var(--accent2); background: #14241c; }
+  .warnbox { border-color: var(--warn); background: #251f10; }
+  .note .tag, .key .tag, .warnbox .tag { font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .07em; display:block; margin-bottom: 4px; }
+  .note .tag { color: var(--accent); } .key .tag { color: var(--accent2); } .warnbox .tag { color: var(--warn); }
+  /* tables */
+  table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); color: var(--accent); font-size: 12.5px; text-transform: uppercase; letter-spacing: .04em; }
+  tr:nth-child(even) td { background: #14171f; }
+  /* diagram bits */
+  .flow { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; margin: 20px 0; }
+  .box { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; flex: 1; min-width: 150px; }
+  .box .t { font-weight: 700; color: var(--accent); font-size: 14px; }
+  .box .d { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+  .arrow { align-self: center; color: var(--muted); font-size: 22px; }
+  .pill { display: inline-block; background: var(--panel2); border: 1px solid var(--border); border-radius: 20px; padding: 2px 12px; font-size: 12.5px; margin: 2px 4px 2px 0; color: var(--accent2); font-family: monospace; }
+  .legend { font-size: 13px; color: var(--muted); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+  .toc-note { font-size: 12.5px; color: var(--muted); padding: 8px; }
+  .center { text-align: center; }
+  .small { font-size: 13px; color: var(--muted); }
+  /* ascii diagram */
+  .ascii { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px; overflow-x: auto; color: #aeb8cc; font-family: "SF Mono", monospace; font-size: 12.5px; line-height: 1.5; white-space: pre; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <div class="lead">Aggregation in DataFusion</div>
+  <div class="toc-note">crate <code>datafusion-physical-plan</code> 54.0.0 · <code>src/aggregates/</code></div>
+
+  <h2>Map</h2>
+  <a href="#overview">0 · The big picture</a>
+  <a href="#strategies">1 · Three execution paths</a>
+
+  <h2>The operator</h2>
+  <a href="#exec">2 · AggregateExec struct</a>
+  <a href="#modes">3 · AggregateMode &amp; 2-phase</a>
+  <a href="#groupby">4 · PhysicalGroupBy &amp; grouping sets</a>
+  <a href="#dispatch">5 · execute_typed dispatch</a>
+
+  <h2>The engine</h2>
+  <a href="#hashstream">6 · GroupedHashAggregateStream</a>
+  <a href="#groupvalues">7 · GroupValues (interning)</a>
+
+  <h2>★ Sort orders</h2>
+  <a href="#detect">8 · Detecting usable order</a>
+  <a href="#groupordering">9 · GroupOrdering</a>
+  <a href="#full">10 · Full (Sorted)</a>
+  <a href="#partial">11 · Partial (PartiallySorted)</a>
+  <a href="#emit">12 · EmitTo &amp; bounded memory</a>
+
+  <h2>Edges</h2>
+  <a href="#spill">13 · Spilling &amp; OOM</a>
+  <a href="#topk">14 · TopK &amp; no-grouping</a>
+  <a href="#summary">15 · Decision summary</a>
+</nav>
+
+<main>
+<h1>DataFusion Aggregation
+  <span class="sub">A walk through <code>AggregateExec</code> and the machinery that turns an existing sort order into bounded-memory streaming aggregation.</span>
+</h1>
+
+<p class="small">All references are to <code>datafusion-physical-plan</code> v54.0.0, under
+<code>src/aggregates/</code>. Line numbers are approximate and drawn directly from the crate source.</p>
+
+<!-- ===================================================================== -->
+<h2 id="overview">0 · The big picture</h2>
+
+<p>Aggregation answers queries like <code>SELECT k, SUM(v) FROM t GROUP BY k</code>. The physical operator is
+<code>AggregateExec</code>. Conceptually it must, for every distinct group key, maintain some running state
+(a sum, a count, a hash set for <code>DISTINCT</code>, …) and emit one output row per group.</p>
+
+<p>The naïve implementation is a hash table: <code>group key → accumulator state</code>, built up over the whole
+input, then drained at the end. That works but has one fatal property — <strong>it must hold every group in
+memory simultaneously</strong>, because any future row might belong to any group. For high-cardinality grouping
+this blows up.</p>
+
+<div class="key">
+  <span class="tag">The central idea of this document</span>
+  If the input is <em>already sorted</em> on the group keys (because some upstream operator produced that order,
+  or an index provided it), then <strong>rows for a given group arrive contiguously</strong>. The moment you see a
+  key change, every earlier group is provably finished — you can emit it and free its memory <em>immediately</em>.
+  Aggregation becomes a streaming, bounded-memory operation. DataFusion detects this opportunity at planning time
+  and exploits it at runtime through a small state machine called <code>GroupOrdering</code>.
+</div>
+
+<p>The rest of this document builds up to that mechanism: first the operator and its modes, then the general hash
+engine, and finally the ordering machinery (§8–§12) that is the real subject of your study.</p>
+
+<!-- ===================================================================== -->
+<h2 id="strategies">1 · Three execution paths</h2>
+
+<p>At <code>execute()</code> time, <code>AggregateExec</code> chooses one of three concrete stream implementations.
+Keep this fork in mind — everything later hangs off it.</p>
+
+<div class="flow">
+  <div class="box"><div class="t">AggregateStream</div><div class="d"><code>no_grouping.rs</code><br>No <code>GROUP BY</code>. One accumulator per aggregate, one output row total. Simplest possible.</div></div>
+  <div class="box"><div class="t">GroupedTopKAggregateStream</div><div class="d"><code>topk_stream.rs</code><br><code>ORDER BY agg LIMIT k</code> over a group-by. Keeps only the best <em>k</em> groups in a heap.</div></div>
+  <div class="box"><div class="t">GroupedHashAggregateStream</div><div class="d"><code>row_hash.rs</code><br>The general workhorse. Hash-based, but <strong>order-aware</strong> — this is where sort exploitation lives.</div></div>
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="exec">2 · The <code>AggregateExec</code> struct</h2>
+<p class="filehdr">src/aggregates/mod.rs:635</p>
+
+<pre><code><span class="kw">pub struct</span> <span class="ty">AggregateExec</span> {
+    mode: <span class="ty">AggregateMode</span>,                              <span class="com">// aggregation phase (see §3)</span>
+    group_by: <span class="ty">Arc</span>&lt;<span class="ty">PhysicalGroupBy</span>&gt;,                   <span class="com">// GROUP BY exprs / grouping sets (§4)</span>
+    aggr_expr: <span class="ty">Arc</span>&lt;[<span class="ty">Arc</span>&lt;<span class="ty">AggregateFunctionExpr</span>&gt;]&gt;,     <span class="com">// SUM, COUNT, ...</span>
+    filter_expr: <span class="ty">Arc</span>&lt;[<span class="ty">Option</span>&lt;...&gt;]&gt;,                 <span class="com">// per-aggregate FILTER (...)</span>
+    limit_options: <span class="ty">Option</span>&lt;<span class="ty">LimitOptions</span>&gt;,              <span class="com">// drives the TopK path</span>
+    input: <span class="ty">Arc</span>&lt;<span class="kw">dyn</span> <span class="ty">ExecutionPlan</span>&gt;,                    <span class="com">// child plan</span>
+    schema: <span class="ty">SchemaRef</span>,
+    input_schema: <span class="ty">SchemaRef</span>,
+    metrics: <span class="ty">ExecutionPlanMetricsSet</span>,
+    required_input_ordering: <span class="ty">Option</span>&lt;<span class="ty">OrderingRequirements</span>&gt;,  <span class="com">// ◀ what order it ASKS its input for</span>
+    input_order_mode: <span class="ty">InputOrderMode</span>,                 <span class="com">// ◀ how the actual order maps to group keys</span>
+    cache: <span class="ty">Arc</span>&lt;<span class="ty">PlanProperties</span>&gt;,                       <span class="com">// cached ordering/partitioning props</span>
+    dynamic_filter: <span class="ty">Option</span>&lt;<span class="ty">Arc</span>&lt;<span class="ty">AggrDynFilter</span>&gt;&gt;,         <span class="com">// runtime pruning pushdown</span>
+}</code></pre>
+
+<p>Two fields carry the entire sort story:</p>
+<ul>
+  <li><code>required_input_ordering</code> — the ordering <code>AggregateExec</code> <em>requests</em> from its child. The
+  planner can satisfy this by inserting a <code>SortExec</code>, or discover it is already satisfied for free.</li>
+  <li><code>input_order_mode</code> — the conclusion: given the order the input <em>actually</em> has, how much of it lines
+  up with the group keys? This is the knob that turns on streaming emission. (§8)</li>
+</ul>
+
+<!-- ===================================================================== -->
+<h2 id="modes">3 · <code>AggregateMode</code> and the two-phase model</h2>
+<p class="filehdr">src/aggregates/mod.rs:124</p>
+
+<p>An aggregation is often split across partitions for parallelism. DataFusion models the phases with
+<code>AggregateMode</code>:</p>
+
+<table>
+  <tr><th>Variant</th><th>Input</th><th>Output</th><th>Role</th></tr>
+  <tr><td><code>Partial</code></td><td>Raw</td><td>Partial state</td><td>Per-partition first pass. Emits intermediate state (e.g. <code>(sum, count)</code> for <code>AVG</code>).</td></tr>
+  <tr><td><code>Final</code></td><td>Partial</td><td>Final value</td><td>Merges partial states from a single combined partition.</td></tr>
+  <tr><td><code>FinalPartitioned</code></td><td>Partial</td><td>Final value</td><td>Merge when data was hash-partitioned by key, so each partition owns disjoint groups.</td></tr>
+  <tr><td><code>Single</code></td><td>Raw</td><td>Final value</td><td>One-shot, single partition. Equivalent to <code>Partial→Final</code> with no split.</td></tr>
+  <tr><td><code>SinglePartitioned</code></td><td>Raw</td><td>Final value</td><td>One-shot across multiple already-partitioned-by-key inputs.</td></tr>
+  <tr><td><code>PartialReduce</code></td><td>Partial</td><td>Partial state</td><td>Intermediate node in a tree-reduce of partial states.</td></tr>
+</table>
+
+<p>The <code>input_mode()</code> and <code>output_mode()</code> helpers (mod.rs:212–245) reduce each variant to two booleans:
+does it consume <em>raw</em> values or <em>partial</em> state, and does it produce <em>final</em> values or <em>partial</em>
+state? This is exactly what the engine checks to decide between calling <code>update_batch</code> vs
+<code>merge_batch</code> on accumulators (see §6).</p>
+
+<div class="ascii">  parallel plan:                        the Partial→Final split exists for parallelism
+
+   ┌─ part 0 ─┐   ┌─ part 1 ─┐   ┌─ part 2 ─┐
+   │ Partial  │   │ Partial  │   │ Partial  │     each emits partial state per group
+   └────┬─────┘   └────┬─────┘   └────┬─────┘
+        └──────────────┼──────────────┘
+                  Repartition(by key)  ──▶  groups land deterministically
+                       │
+                  ┌────┴─────┐
+                  │  Final   │   merges partial states ──▶ final values
+                  └──────────┘</div>
+
+<div class="note">
+  <span class="tag">Why it matters for ordering</span>
+  The two-phase split is the reason emission semantics depend on <code>mode</code>: a <code>Partial</code> stage may freely
+  emit early under memory pressure (downstream will merge anyway), whereas a <code>Final</code> stage cannot emit a group
+  until it is sure no more partial state for it will arrive. This asymmetry shows up again in §13 (spilling).
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="groupby">4 · <code>PhysicalGroupBy</code> — keys &amp; grouping sets</h2>
+<p class="filehdr">src/aggregates/mod.rs:265</p>
+
+<pre><code><span class="kw">pub struct</span> <span class="ty">PhysicalGroupBy</span> {
+    expr: <span class="ty">Vec</span>&lt;(<span class="ty">Arc</span>&lt;<span class="kw">dyn</span> <span class="ty">PhysicalExpr</span>&gt;, <span class="ty">String</span>)&gt;,       <span class="com">// the grouping expressions</span>
+    null_expr: <span class="ty">Vec</span>&lt;(<span class="ty">Arc</span>&lt;<span class="kw">dyn</span> <span class="ty">PhysicalExpr</span>&gt;, <span class="ty">String</span>)&gt;,  <span class="com">// NULL-typed stand-ins for GROUPING SETS</span>
+    groups: <span class="ty">Vec</span>&lt;<span class="ty">Vec</span>&lt;<span class="kw">bool</span>&gt;&gt;,                          <span class="com">// one null-mask per grouping set</span>
+    has_grouping_set: <span class="kw">bool</span>,                          <span class="com">// add the __grouping_id column?</span>
+}</code></pre>
+
+<p>A plain <code>GROUP BY a, b</code> has a single mask <code>[false, false]</code>. The other variants —
+<code>GROUPING SETS</code>, <code>ROLLUP</code>, <code>CUBE</code> — expand to <em>several</em> masks, and that expansion is
+what the rest of this section is about.</p>
+
+<h3>What grouping sets are, and why you'd want them</h3>
+
+<p>A <code>GROUP BY</code> normally computes aggregates at <em>one</em> level of detail. But reports often need several
+levels at once — a per-(region, product) total, plus a per-region subtotal, plus a grand total — and you'd like them
+in a single result set computed in a single pass over the data. That is what grouping sets give you. The three SQL
+forms are all sugar over an explicit list of sets:</p>
+
+<table>
+  <tr><th>SQL</th><th>Equivalent grouping sets</th><th>Typical use</th></tr>
+  <tr><td><code>GROUP BY GROUPING SETS ((a,b),(a),())</code></td><td>literally those three</td><td>Hand-pick exactly the levels you want.</td></tr>
+  <tr><td><code>GROUP BY ROLLUP(a, b)</code></td><td><code>(a,b), (a), ()</code></td><td>Hierarchical subtotals: detail → subtotal → grand total. Time drill-downs (year → month → day).</td></tr>
+  <tr><td><code>GROUP BY CUBE(a, b)</code></td><td><code>(a,b), (a), (b), ()</code></td><td>All 2<sup>n</sup> combinations — cross-tab / OLAP "slice and dice".</td></tr>
+</table>
+
+<p>The empty set <code>()</code> is the grand total (group the whole input into one row). Semantically the query is
+equivalent to <code>UNION ALL</code> of one <code>GROUP BY</code> per set — but writing it as a grouping set lets the
+engine read the input <strong>once</strong> and fan each row into every set simultaneously, instead of re-scanning
+the (often expensive) input N times.</p>
+
+<div class="note">
+  <span class="tag">Concrete example</span>
+  <pre style="margin:8px 0 0;"><code><span class="kw">SELECT</span> region, product, <span class="fn">SUM</span>(sales)
+<span class="kw">FROM</span> orders
+<span class="kw">GROUP BY</span> <span class="ty">ROLLUP</span>(region, product);</code></pre>
+  produces one row per (region, product), plus one subtotal row per region (with <code>product = NULL</code>), plus one
+  grand-total row (both <code>NULL</code>) — all from a single scan of <code>orders</code>.
+</div>
+
+<h3>How the planner represents them</h3>
+<p class="filehdr">src/aggregates/mod.rs:247 (doc comment)</p>
+
+<p>The logical sets are flattened into the <code>groups</code> matrix: one boolean mask per set, where
+<code>true</code> means "this column is <em>nulled out</em> (not part of this set)". For
+<code>GROUP BY GROUPING SETS ((a,b),(a),(b))</code> the planner builds:</p>
+
+<pre><code>expr      = [(col(a), <span class="str">"a"</span>), (col(b), <span class="str">"b"</span>)]
+null_expr = [(NULL, <span class="str">"a"</span>), (NULL, <span class="str">"b"</span>)]    <span class="com">// NULL-typed stand-in for each column</span>
+groups = [
+  [<span class="kw">false</span>, <span class="kw">false</span>],   <span class="com">// (a, b)   — neither nulled</span>
+  [<span class="kw">false</span>, <span class="kw">true</span> ],   <span class="com">// (a)      ≡ (a, NULL)</span>
+  [<span class="kw">true</span> , <span class="kw">false</span>],   <span class="com">// (b)      ≡ (NULL, b)</span>
+]</code></pre>
+
+<p><code>is_single()</code> is just <code>!has_grouping_set</code> — the fast path. With grouping sets present, the operator
+carries one extra synthetic key column, <code>__grouping_id</code> (more on that below).</p>
+
+<h3>Runtime: one batch fanned into every set</h3>
+<p class="filehdr">src/aggregates/mod.rs:2183 (evaluate_group_by)</p>
+
+<p>The expansion happens per input batch. <code>evaluate_group_by</code> evaluates the real expressions <em>and</em> the
+NULL stand-ins once, then assembles one set of group-key columns <em>per grouping set</em> — substituting the NULL
+array wherever the mask says <code>true</code>:</p>
+
+<pre><code><span class="kw">let</span> exprs      = <span class="fn">evaluate_expressions_to_arrays</span>(group_by.expr, batch)?;       <span class="com">// real columns</span>
+<span class="kw">let</span> null_exprs = <span class="fn">evaluate_expressions_to_arrays</span>(group_by.null_expr, batch)?;  <span class="com">// all-NULL columns</span>
+
+group_by.groups.<span class="fn">iter</span>().<span class="fn">map</span>(|group| {
+    <span class="kw">let</span> <span class="kw">mut</span> group_values = <span class="ty">Vec</span>::<span class="fn">new</span>();
+    group_values.<span class="fn">extend</span>(group.<span class="fn">iter</span>().<span class="fn">enumerate</span>().<span class="fn">map</span>(|(idx, is_null)| {
+        <span class="kw">if</span> *is_null { null_exprs[idx].<span class="fn">clone</span>() }   <span class="com">// column dropped from this set → NULL</span>
+        <span class="kw">else</span>        { exprs[idx].<span class="fn">clone</span>() }        <span class="com">// column active in this set</span>
+    }));
+    <span class="kw">if</span> !group_by.<span class="fn">is_single</span>() {
+        group_values.<span class="fn">push</span>(<span class="fn">group_id_array</span>(group, ordinal, max_ordinal, batch.<span class="fn">num_rows</span>())?);  <span class="com">// __grouping_id</span>
+    }
+    <span class="ty">Ok</span>(group_values)
+}).<span class="fn">collect</span>()   <span class="com">// → Vec&lt;Vec&lt;ArrayRef&gt;&gt;: one key-column-set per grouping set</span></code></pre>
+
+<p>The return type is the giveaway: <code>Vec&lt;Vec&lt;ArrayRef&gt;&gt;</code> — the outer vector has one entry per grouping
+set. Back in <code>group_aggregate_batch</code> (§6) the engine loops over these and calls <code>group_values.intern(...)</code>
+for each, so a single physical row contributes to <em>every</em> set's groups in the same hash table. A batch of
+<em>R</em> rows with <em>S</em> grouping sets effectively interns <em>R·S</em> logical rows.</p>
+
+<h3>The <code>__grouping_id</code> column: telling real NULLs from rolled-up NULLs</h3>
+<p class="filehdr">src/aggregates/mod.rs (group_id_array)</p>
+
+<p>There's a subtlety. A subtotal row from set <code>(a)</code> has <code>b = NULL</code> because <code>b</code> was rolled up.
+But a genuine row might have <code>b = NULL</code> in the data. Worse, the key vector <code>(a=5, b=NULL)</code> could
+collide in the hash table across two different sets. The fix is a synthetic key column,
+<code>__grouping_id</code>, appended whenever <code>has_grouping_set</code> is true. It encodes <em>which set</em> a row
+belongs to, so different sets never share a group even when their visible key columns are identical:</p>
+
+<pre><code><span class="com">// low n bits = the null mask itself; high bits = a "duplicate ordinal" tiebreaker</span>
+<span class="kw">let</span> semantic_id = group.<span class="fn">iter</span>().<span class="fn">fold</span>(0u64, |acc, &amp;is_null| (acc &lt;&lt; 1) | is_null <span class="kw">as</span> u64);
+<span class="kw">let</span> full_id     = semantic_id | ((ordinal <span class="kw">as</span> u64) &lt;&lt; n);
+<span class="com">// width is chosen to fit: UInt8 / UInt16 / UInt32 / UInt64 (n + ordinal_bits ≤ 64)</span></code></pre>
+
+<p>The <em>duplicate ordinal</em> (high bits) handles the legal-but-odd case where the same set is listed twice
+(e.g. <code>GROUPING SETS ((a),(a))</code>); identical masks would otherwise produce identical ids. SQL's
+<code>GROUPING(col)</code> function reads this same id to report whether a column was aggregated away in a given row.
+Grouping sets are capped at <strong>64 columns</strong> because the whole id must fit in a single 64-bit integer.</p>
+
+<h3>Carrying it through the Partial → Final split</h3>
+<p class="filehdr">src/aggregates/mod.rs (as_final)</p>
+
+<p>Once a <code>Partial</code> stage has fanned rows into sets, the synthetic id must survive the merge so the
+<code>Final</code> stage keeps the sets distinct. <code>as_final()</code> rebuilds the group-by for the merge phase by
+promoting <code>__grouping_id</code> to an ordinary grouping <em>column</em> alongside the original keys, collapsing
+everything back to a single non-grouping-set <code>GROUP BY</code> over <code>(a, b, __grouping_id)</code>. The fan-out
+already happened upstream; the final stage just merges partial states keyed by the explicit id.</p>
+
+<div class="warnbox">
+  <span class="tag">Consequence for sort exploitation</span>
+  Because a single sorted input is replicated across sets with different columns nulled, no input ordering lines up
+  with the keys of <em>all</em> sets at once. This is exactly why §8 filters out any column that is nulled in some set
+  (<code>groups.iter().all(|g| !g[idx])</code>) and why the <code>Sorted</code> mode additionally requires
+  <code>group_by.groups.len() == 1</code>. In practice <strong>grouping-set queries fall back to <code>Linear</code></strong>
+  (full hash aggregation) — they trade the streaming-emission optimization for single-pass multi-level output.
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="dispatch">5 · <code>execute_typed</code> — picking the stream</h2>
+<p class="filehdr">src/aggregates/mod.rs:947</p>
+
+<pre><code><span class="kw">fn</span> <span class="fn">execute_typed</span>(&amp;<span class="kw">self</span>, partition: <span class="ty">usize</span>, context: &amp;<span class="ty">Arc</span>&lt;<span class="ty">TaskContext</span>&gt;) -&gt; <span class="ty">Result</span>&lt;<span class="ty">StreamType</span>&gt; {
+    <span class="kw">if</span> <span class="kw">self</span>.group_by.<span class="fn">is_true_no_grouping</span>() {            <span class="com">// no GROUP BY at all</span>
+        <span class="kw">return</span> <span class="ty">Ok</span>(<span class="ty">StreamType</span>::<span class="ty">AggregateStream</span>(<span class="ty">AggregateStream</span>::<span class="fn">new</span>(...)?));
+    }
+    <span class="kw">if</span> <span class="kw">let</span> <span class="ty">Some</span>(config) = <span class="kw">self</span>.limit_options                 <span class="com">// ORDER BY agg LIMIT k</span>
+        &amp;&amp; !<span class="kw">self</span>.<span class="fn">is_unordered_unfiltered_group_by_distinct</span>()
+    {
+        <span class="kw">return</span> <span class="ty">Ok</span>(<span class="ty">StreamType</span>::<span class="ty">GroupedPriorityQueue</span>(
+            <span class="ty">GroupedTopKAggregateStream</span>::<span class="fn">new</span>(..., config.limit)?));
+    }
+    <span class="ty">Ok</span>(<span class="ty">StreamType</span>::<span class="ty">GroupedHash</span>(<span class="ty">GroupedHashAggregateStream</span>::<span class="fn">new</span>(...)?))   <span class="com">// general path</span>
+}</code></pre>
+
+<p>Three branches, matching §1. The general <code>GroupedHashAggregateStream</code> is where ordering becomes a
+runtime behavior rather than a planning fact, so we go there next.</p>
+
+<!-- ===================================================================== -->
+<h2 id="hashstream">6 · <code>GroupedHashAggregateStream</code> — the engine</h2>
+<p class="filehdr">src/aggregates/row_hash.rs:358</p>
+
+<p>This struct is the heart of grouped aggregation. The fields that matter for our story:</p>
+
+<table>
+  <tr><th>Field</th><th>Purpose</th></tr>
+  <tr><td><code>group_values: Box&lt;dyn GroupValues&gt;</code></td><td>Interns group keys → dense indices <code>0,1,2,…</code> (§7).</td></tr>
+  <tr><td><code>accumulators: Vec&lt;Box&lt;dyn GroupsAccumulator&gt;&gt;</code></td><td>One per aggregate. State is indexed by group index.</td></tr>
+  <tr><td><code>group_ordering: GroupOrdering</code></td><td><strong>The order-tracking state machine (§9). Drives early emission.</strong></td></tr>
+  <tr><td><code>current_group_indices: Vec&lt;usize&gt;</code></td><td>Scratch buffer: the group index of each row in the current batch.</td></tr>
+  <tr><td><code>exec_state: ExecutionState</code></td><td>State machine: <code>ReadingInput</code> / <code>ProducingOutput</code> / <code>SkippingAggregation</code> / <code>Done</code>.</td></tr>
+  <tr><td><code>spill_state: SpillState</code></td><td>Disk-spill bookkeeping for the unordered, memory-bound case (§13).</td></tr>
+  <tr><td><code>mode: AggregateMode</code></td><td>Selects <code>update_batch</code> vs <code>merge_batch</code>, and final vs partial output.</td></tr>
+</table>
+
+<h3>Per-batch processing: <code>group_aggregate_batch</code></h3>
+<p class="filehdr">src/aggregates/row_hash.rs:923</p>
+
+<p>Each input batch flows through three steps:</p>
+
+<pre><code><span class="com">// 1. Map every row of the batch to a dense group index.</span>
+<span class="kw">let</span> starting_num_groups = <span class="kw">self</span>.group_values.<span class="fn">len</span>();
+<span class="kw">self</span>.group_values.<span class="fn">intern</span>(group_values, &amp;<span class="kw">mut</span> <span class="kw">self</span>.current_group_indices)?;
+<span class="kw">let</span> group_indices = &amp;<span class="kw">self</span>.current_group_indices;
+<span class="kw">let</span> total_num_groups = <span class="kw">self</span>.group_values.<span class="fn">len</span>();
+
+<span class="com">// 2. ◀ If new groups appeared, tell the ordering tracker. THIS is the hook</span>
+<span class="com">//    that lets a sorted input know a key boundary was just crossed.</span>
+<span class="kw">if</span> total_num_groups &gt; starting_num_groups {
+    <span class="kw">self</span>.group_ordering.<span class="fn">new_groups</span>(group_values, group_indices, total_num_groups)?;
+}
+
+<span class="com">// 3. Update each accumulator, indexed by group. Raw vs Partial decides the call.</span>
+<span class="kw">if</span> <span class="kw">self</span>.mode.<span class="fn">input_mode</span>() == <span class="ty">AggregateInputMode</span>::<span class="ty">Raw</span> &amp;&amp; !<span class="kw">self</span>.spill_state.is_stream_merging {
+    acc.<span class="fn">update_batch</span>(values, group_indices, opt_filter, total_num_groups)?;
+} <span class="kw">else</span> {
+    acc.<span class="fn">merge_batch</span>(values, group_indices, <span class="ty">None</span>, total_num_groups)?;
+}</code></pre>
+
+<div class="note">
+  <span class="tag">Vectorized, not row-at-a-time</span>
+  Note that <code>intern</code> and <code>update_batch</code> operate on whole columns. A batch of 8192 rows is hashed,
+  interned, and folded into accumulator state in a handful of vectorized passes — there is no per-row virtual
+  dispatch. <code>GroupsAccumulator</code> is the columnar accumulator interface that makes this possible.
+</div>
+
+<h3>The poll loop and early-emission hook</h3>
+<p class="filehdr">src/aggregates/row_hash.rs:725 (ReadingInput state)</p>
+
+<p>After each batch is folded in, the stream asks the ordering tracker whether any groups are now safe to emit:</p>
+
+<pre><code><span class="com">// only when not mid-spill: consult the ordering state machine</span>
+<span class="kw">if</span> (<span class="kw">self</span>.spill_state.spills.<span class="fn">is_empty</span>() || <span class="kw">self</span>.spill_state.is_stream_merging)
+    &amp;&amp; <span class="kw">let</span> <span class="ty">Some</span>(to_emit) = <span class="kw">self</span>.group_ordering.<span class="fn">emit_to</span>()      <span class="com">// ◀ §12</span>
+{
+    <span class="kw">if</span> <span class="kw">let</span> <span class="ty">Some</span>(batch) = <span class="kw">self</span>.<span class="fn">emit</span>(to_emit, <span class="kw">false</span>)? {
+        <span class="kw">self</span>.exec_state = <span class="ty">ExecutionState</span>::<span class="ty">ProducingOutput</span>(batch);
+    }
+    <span class="kw">break</span> <span class="str">'reading_input</span>;
+}</code></pre>
+
+<p>For an unordered input <code>emit_to()</code> always returns <code>None</code> here, so output is produced only once the
+input is fully consumed — the classic full-materialization hash aggregate. For a sorted input it returns
+<code>Some(EmitTo::First(n))</code> mid-stream, and the engine flushes <code>n</code> finished groups and frees them.
+That single conditional is the entire payoff of sort-order exploitation. We'll dissect it in §9–§12.</p>
+
+<!-- ===================================================================== -->
+<h2 id="groupvalues">7 · <code>GroupValues</code> — interning group keys</h2>
+<p class="filehdr">src/aggregates/group_values/mod.rs:90</p>
+
+<pre><code><span class="kw">pub trait</span> <span class="ty">GroupValues</span>: <span class="ty">Send</span> {
+    <span class="kw">fn</span> <span class="fn">intern</span>(&amp;<span class="kw">mut</span> <span class="kw">self</span>, cols: &amp;[<span class="ty">ArrayRef</span>], groups: &amp;<span class="kw">mut</span> <span class="ty">Vec</span>&lt;<span class="ty">usize</span>&gt;) -&gt; <span class="ty">Result</span>&lt;()&gt;;
+    <span class="kw">fn</span> <span class="fn">emit</span>(&amp;<span class="kw">mut</span> <span class="kw">self</span>, emit_to: <span class="ty">EmitTo</span>) -&gt; <span class="ty">Result</span>&lt;<span class="ty">Vec</span>&lt;<span class="ty">ArrayRef</span>&gt;&gt;;
+    <span class="kw">fn</span> <span class="fn">size</span>(&amp;<span class="kw">self</span>) -&gt; <span class="ty">usize</span>;
+    <span class="kw">fn</span> <span class="fn">len</span>(&amp;<span class="kw">self</span>) -&gt; <span class="ty">usize</span>;
+    <span class="kw">fn</span> <span class="fn">clear_shrink</span>(&amp;<span class="kw">mut</span> <span class="kw">self</span>, num_rows: <span class="ty">usize</span>);
+}</code></pre>
+
+<p><code>intern</code> is the dense-indexer: it maps each row's group key to a stable integer, creating a new one for
+unseen keys. Those integers index both the stored keys and every accumulator's state — so the whole engine speaks
+in group indices, not key values.</p>
+
+<h3>Specialization by key type</h3>
+<p class="filehdr">src/aggregates/group_values/mod.rs:134 (new_group_values)</p>
+
+<p>DataFusion picks the fastest implementation it can for the actual key columns:</p>
+
+<table>
+  <tr><th>Key shape</th><th>Implementation</th></tr>
+  <tr><td>Single primitive (int, float, date, decimal, timestamp…)</td><td><code>GroupValuesPrimitive&lt;T&gt;</code> — hash table keyed directly on the value.</td></tr>
+  <tr><td>Single <code>Utf8</code>/<code>Binary</code> (+ <code>Large</code>)</td><td><code>GroupValuesBytes&lt;O&gt;</code></td></tr>
+  <tr><td>Single <code>Utf8View</code>/<code>BinaryView</code></td><td><code>GroupValuesBytesView</code></td></tr>
+  <tr><td>Single <code>Boolean</code></td><td><code>GroupValuesBoolean</code></td></tr>
+  <tr><td>Multi-column, all column types supported</td><td><code>GroupValuesColumn&lt;STREAMING&gt;</code> — vectorized, column-oriented. <code>STREAMING=true</code> when an ordering is tracked.</td></tr>
+  <tr><td>Anything else (mixed/nested types)</td><td><code>GroupValuesRows</code> — generic row-encoded fallback.</td></tr>
+</table>
+
+<h3>Why <code>emit(EmitTo::First(n))</code> needs cooperation</h3>
+<p class="filehdr">src/aggregates/group_values/row.rs:211 (GroupValuesRows::emit)</p>
+
+<p>When the first <code>n</code> groups are flushed, every <em>remaining</em> group must be renumbered down by
+<code>n</code> so indices stay dense and contiguous (the accumulators do the same shift in lock-step). In the
+row-encoded implementation this is a <code>HashTable::retain</code> pass that drops entries below <code>n</code> and
+decrements the rest:</p>
+
+<pre><code><span class="com">// remaining groups slide down: old index n → new index 0, n+1 → 1, ...</span>
+<span class="kw">self</span>.map.<span class="fn">retain</span>(|(_hash, group_idx)| {
+    <span class="kw">if</span> *group_idx &lt; n { <span class="kw">return</span> <span class="kw">false</span>; }   <span class="com">// emitted → drop</span>
+    *group_idx -= n;                          <span class="com">// kept → renumber</span>
+    <span class="kw">true</span>
+});</code></pre>
+
+<div class="key">
+  <span class="tag">The contract that makes streaming work</span>
+  <code>GroupValues::emit</code>, every accumulator's <code>emit</code>, and <code>GroupOrdering::remove_groups</code> must all
+  apply the <em>same</em> <code>EmitTo::First(n)</code> shift. After the call, group <code>n</code> is the new group
+  <code>0</code> everywhere. This three-way synchronization is what lets the engine drop finished groups mid-stream
+  without corrupting the in-flight ones.
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="detect">8 · ★ Detecting a usable sort order (planning time)</h2>
+<p class="filehdr">src/aggregates/mod.rs:779 (try_new_with_schema)</p>
+
+<p>When an <code>AggregateExec</code> is constructed, it inspects the child's
+<em>equivalence properties</em> (which encode the child's sort orderings) and asks: how much of my
+<code>GROUP BY</code> can be satisfied by an existing ordering?</p>
+
+<pre><code><span class="kw">let</span> input_eq_properties = input.<span class="fn">equivalence_properties</span>();
+<span class="kw">let</span> groupby_exprs = group_by.<span class="fn">input_exprs</span>();
+
+<span class="com">// Find the longest permutation of the GROUP BY exprs that the input is already sorted on.</span>
+<span class="com">// `indices` = positions (within groupby_exprs) of the columns covered by that ordering.</span>
+<span class="kw">let</span> (new_sort_exprs, indices) =
+    input_eq_properties.<span class="fn">find_longest_permutation</span>(&amp;groupby_exprs)?;</code></pre>
+
+<p>The key call is <code>find_longest_permutation</code>. Group-by columns are unordered as a set, so the input does not
+have to be sorted in the <em>same order</em> the user wrote the keys — any permutation of a prefix counts. The
+returned <code>indices</code> name the group-by columns that the existing order covers.</p>
+
+<p>Two adjustments follow. First, grouping-set columns that are ever nulled are removed (recall §4 — a column that
+disappears in some grouping set can't anchor an ordering):</p>
+
+<pre><code><span class="kw">let</span> indices: <span class="ty">Vec</span>&lt;<span class="ty">usize</span>&gt; = indices
+    .<span class="fn">into_iter</span>()
+    .<span class="fn">filter</span>(|idx| group_by.groups.<span class="fn">iter</span>().<span class="fn">all</span>(|group| !group[*idx]))
+    .<span class="fn">collect</span>();</code></pre>
+
+<p>Then the verdict — the <code>InputOrderMode</code> (defined in <code>src/ordering.rs:43</code>):</p>
+
+<pre><code><span class="kw">let</span> input_order_mode = <span class="kw">if</span> indices.<span class="fn">len</span>() == groupby_exprs.<span class="fn">len</span>()
+    &amp;&amp; !indices.<span class="fn">is_empty</span>()
+    &amp;&amp; group_by.groups.<span class="fn">len</span>() == 1                  <span class="com">// no grouping sets</span>
+{
+    <span class="ty">InputOrderMode</span>::<span class="ty">Sorted</span>             <span class="com">// every group key is covered by the order</span>
+} <span class="kw">else if</span> !indices.<span class="fn">is_empty</span>() {
+    <span class="ty">InputOrderMode</span>::<span class="ty">PartiallySorted</span>(indices)  <span class="com">// only a prefix is covered</span>
+} <span class="kw">else</span> {
+    <span class="ty">InputOrderMode</span>::<span class="ty">Linear</span>             <span class="com">// nothing usable</span>
+};</code></pre>
+
+<table>
+  <tr><th>Input order is <code>[a, b, c]</code> and you…</th><th>InputOrderMode</th><th>Meaning</th></tr>
+  <tr><td><code>GROUP BY a, b</code></td><td><code>Sorted</code></td><td>All keys covered → fully contiguous groups.</td></tr>
+  <tr><td><code>GROUP BY a, c</code></td><td><code>PartiallySorted([0])</code></td><td>Only <code>a</code> is sorted; <code>c</code> varies freely within an <code>a</code>-run.</td></tr>
+  <tr><td><code>GROUP BY b</code></td><td><code>Linear</code></td><td><code>b</code> is not a prefix of the order → no help.</td></tr>
+</table>
+
+<h3>Output ordering &amp; the emission type</h3>
+<p class="filehdr">src/aggregates/mod.rs:1019 (compute_properties), 1573 (maintains_input_order)</p>
+
+<p>The mode also feeds the operator's advertised properties. When the mode is not <code>Linear</code>, the operator can
+stream (it inherits the child's pipeline behavior) and reports that it preserves input order; when <code>Linear</code>
+it must buffer everything, so it advertises <code>EmissionType::Final</code>:</p>
+
+<pre><code><span class="kw">let</span> emission_type = <span class="kw">if</span> *input_order_mode == <span class="ty">InputOrderMode</span>::<span class="ty">Linear</span> {
+    <span class="ty">EmissionType</span>::<span class="ty">Final</span>            <span class="com">// can't emit until input is exhausted</span>
+} <span class="kw">else</span> {
+    input.<span class="fn">pipeline_behavior</span>()        <span class="com">// can stream group-by-group</span>
+};
+
+<span class="com">// maintains_input_order():</span>
+<span class="kw">vec</span>![<span class="kw">self</span>.input_order_mode != <span class="ty">InputOrderMode</span>::<span class="ty">Linear</span>]</code></pre>
+
+<!-- ===================================================================== -->
+<h2 id="groupordering">9 · ★ <code>GroupOrdering</code> — runtime tracker</h2>
+<p class="filehdr">src/aggregates/order/mod.rs:31</p>
+
+<p>At execution time the planning-time <code>InputOrderMode</code> is turned into a live state machine,
+<code>GroupOrdering</code>, owned by the hash stream:</p>
+
+<pre><code><span class="kw">pub enum</span> <span class="ty">GroupOrdering</span> {
+    <span class="ty">None</span>,                       <span class="com">// from InputOrderMode::Linear</span>
+    <span class="ty">Partial</span>(<span class="ty">GroupOrderingPartial</span>),  <span class="com">// from InputOrderMode::PartiallySorted</span>
+    <span class="ty">Full</span>(<span class="ty">GroupOrderingFull</span>),        <span class="com">// from InputOrderMode::Sorted</span>
+}
+
+<span class="kw">impl</span> <span class="ty">GroupOrdering</span> {
+    <span class="kw">pub fn</span> <span class="fn">try_new</span>(mode: &amp;<span class="ty">InputOrderMode</span>) -&gt; <span class="ty">Result</span>&lt;<span class="ty">Self</span>&gt; {
+        <span class="kw">match</span> mode {
+            <span class="ty">InputOrderMode</span>::<span class="ty">Linear</span>            =&gt; <span class="ty">Ok</span>(<span class="ty">GroupOrdering</span>::<span class="ty">None</span>),
+            <span class="ty">InputOrderMode</span>::<span class="ty">PartiallySorted</span>(ix) =&gt; <span class="ty">GroupOrderingPartial</span>::<span class="fn">try_new</span>(ix.<span class="fn">clone</span>()).<span class="fn">map</span>(<span class="ty">GroupOrdering</span>::<span class="ty">Partial</span>),
+            <span class="ty">InputOrderMode</span>::<span class="ty">Sorted</span>            =&gt; <span class="ty">Ok</span>(<span class="ty">GroupOrdering</span>::<span class="ty">Full</span>(<span class="ty">GroupOrderingFull</span>::<span class="fn">new</span>())),
+        }
+    }
+}</code></pre>
+
+<p>It exposes a tiny interface the engine calls (§6):</p>
+<ul>
+  <li><code>new_groups(values, indices, total)</code> — "this batch introduced new groups; update what you know."</li>
+  <li><code>emit_to() -&gt; Option&lt;EmitTo&gt;</code> — "given what I've seen, what is safe to flush right now?"</li>
+  <li><code>remove_groups(n)</code> — "I just emitted the first <code>n</code>; shift your state down."</li>
+  <li><code>input_done()</code> — "no more input; everything left is final."</li>
+  <li><code>oom_emit_to(n)</code> — memory-pressure variant (§13).</li>
+</ul>
+
+<div class="flow">
+  <div class="box"><div class="t">None</div><div class="d"><code>emit_to()</code> always <code>None</code>. Buffer all groups, emit at end. Memory ∝ #groups.</div></div>
+  <div class="arrow">→</div>
+  <div class="box"><div class="t">Partial</div><div class="d">Emit when the <em>sorted prefix</em> value changes. Memory ∝ groups within one prefix value.</div></div>
+  <div class="arrow">→</div>
+  <div class="box"><div class="t">Full</div><div class="d">Emit as soon as <em>any</em> new group index appears. Memory ∝ one group window.</div></div>
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="full">10 · ★ <code>GroupOrderingFull</code> — the fully-sorted case</h2>
+<p class="filehdr">src/aggregates/order/full.rs</p>
+
+<p>When the input is sorted on <em>all</em> group keys, group indices are produced in strictly increasing order:
+group 0's rows all arrive, then group 1's, then group 2's. So the rule is dead simple — <strong>the moment you see a
+higher group index, every lower index is finished.</strong> The whole tracker is a three-state machine holding a
+single integer:</p>
+
+<pre><code><span class="kw">enum</span> <span class="ty">State</span> {
+    <span class="ty">Start</span>,                         <span class="com">// no input yet</span>
+    <span class="ty">InProgress</span> { current: <span class="ty">usize</span> },   <span class="com">// `current` is the highest group index seen; can emit everything &lt; current</span>
+    <span class="ty">Complete</span>,                      <span class="com">// input exhausted; emit everything</span>
+}</code></pre>
+
+<h4>new_groups — just track the max index</h4>
+<pre><code><span class="kw">pub fn</span> <span class="fn">new_groups</span>(&amp;<span class="kw">mut</span> <span class="kw">self</span>, total_num_groups: <span class="ty">usize</span>) {
+    <span class="kw">let</span> max_group_index = total_num_groups - 1;
+    <span class="kw">self</span>.state = <span class="kw">match</span> <span class="kw">self</span>.state {
+        <span class="ty">State</span>::<span class="ty">Start</span>                  =&gt; <span class="ty">State</span>::<span class="ty">InProgress</span> { current: max_group_index },
+        <span class="ty">State</span>::<span class="ty">InProgress</span> { current } =&gt; <span class="ty">State</span>::<span class="ty">InProgress</span> { current: max_group_index },
+        <span class="ty">State</span>::<span class="ty">Complete</span>               =&gt; <span class="kw">panic!</span>(<span class="str">"Saw new group after input was complete"</span>),
+    };
+}</code></pre>
+
+<h4>emit_to — flush everything before the current group</h4>
+<pre><code><span class="kw">pub fn</span> <span class="fn">emit_to</span>(&amp;<span class="kw">self</span>) -&gt; <span class="ty">Option</span>&lt;<span class="ty">EmitTo</span>&gt; {
+    <span class="kw">match</span> &amp;<span class="kw">self</span>.state {
+        <span class="ty">State</span>::<span class="ty">Start</span> =&gt; <span class="ty">None</span>,
+        <span class="ty">State</span>::<span class="ty">InProgress</span> { current } =&gt; {
+            <span class="kw">if</span> *current == 0 { <span class="ty">None</span> }                 <span class="com">// still on the very first group</span>
+            <span class="kw">else</span> { <span class="ty">Some</span>(<span class="ty">EmitTo</span>::<span class="ty">First</span>(*current)) }   <span class="com">// groups 0..current-1 are done</span>
+        }
+        <span class="ty">State</span>::<span class="ty">Complete</span> =&gt; <span class="ty">Some</span>(<span class="ty">EmitTo</span>::<span class="ty">All</span>),
+    }
+}</code></pre>
+
+<p>And <code>remove_groups(n)</code> simply does <code>current -= n</code> to stay aligned after a flush. The entire tracker
+is <code>size_of::&lt;Self&gt;()</code> bytes — O(1) state for unbounded input.</p>
+
+<div class="ascii">  GROUP BY k, input sorted by k:        EmitTo decisions as batches stream in
+
+   batch 1:  k = A A A B B            interned indices 0 0 0 1 1   → current=1 → emit First(1)  (flush group A)
+   batch 2:  k = B C C C D            indices 1 2 2 2 3            → current=3 → emit First(3)  (flush B, C)
+   batch 3:  k = D D E   (EOF)        indices 3 3 4 → input_done   → emit All               (flush D, E)
+
+   at any instant only ONE group's state is held live.</div>
+
+<!-- ===================================================================== -->
+<h2 id="partial">11 · ★ <code>GroupOrderingPartial</code> — the partially-sorted case</h2>
+<p class="filehdr">src/aggregates/order/partial.rs</p>
+
+<p>This is the subtle one. The input is sorted on a <em>prefix</em> of the keys only — e.g. grouping by
+<code>(customer_id, state)</code> with input sorted by <code>state</code>. Within a single <code>state</code> value, the
+<code>customer_id</code>s arrive in arbitrary order and may interleave, so we <em>cannot</em> finish a group the moment
+a new index appears (the way Full does). But when the <strong>sorted prefix value itself changes</strong> — say
+<code>state</code> goes <code>'MA' → 'MD'</code> — every group belonging to the old prefix value is provably complete.</p>
+
+<h4>What it tracks</h4>
+<pre><code><span class="kw">pub struct</span> <span class="ty">GroupOrderingPartial</span> {
+    <span class="com">// positions, within the group-by list, of the columns that ARE sorted.</span>
+    <span class="com">// grouping by (id, state) sorted on state ⇒ order_indices = [1]</span>
+    order_indices: <span class="ty">Vec</span>&lt;<span class="ty">usize</span>&gt;,
+    state: <span class="ty">State</span>,
+}
+
+<span class="kw">enum</span> <span class="ty">State</span> {
+    <span class="ty">Taken</span>,                          <span class="com">// transient (borrow-checker dance)</span>
+    <span class="ty">Start</span>,
+    <span class="ty">InProgress</span> {
+        current_sort: <span class="ty">usize</span>,           <span class="com">// smallest group index sharing the current sort-key value</span>
+        sort_key: <span class="ty">Vec</span>&lt;<span class="ty">ScalarValue</span>&gt;,    <span class="com">// the current sort-key value itself</span>
+        current: <span class="ty">usize</span>,                <span class="com">// highest group index seen so far</span>
+    },
+    <span class="ty">Complete</span>,
+}</code></pre>
+
+<h4>Detecting the boundary — new_groups</h4>
+<p>The clever part: it projects the batch down to just the sorted columns, then uses Arrow's
+<code>partition()</code> to find the contiguous ranges where that sort key is constant. The <em>start of the last
+range</em> is where the newest sort-key value begins; that group index becomes the new <code>current_sort</code>.</p>
+
+<pre><code><span class="com">// keep only the sorted (prefix) columns, then find runs of equal sort-key</span>
+<span class="kw">let</span> sort_keys = <span class="kw">self</span>.<span class="fn">compute_sort_keys</span>(batch_group_values);
+<span class="kw">let</span> ranges = <span class="fn">partition</span>(&amp;sort_keys)?.<span class="fn">ranges</span>();
+<span class="kw">let</span> last_range = ranges.<span class="fn">last</span>().<span class="fn">unwrap</span>();
+
+<span class="kw">let</span> range_current_sort = group_indices[last_range.start];
+<span class="kw">let</span> range_sort_key     = <span class="fn">get_row_at_idx</span>(&amp;sort_keys, last_range.start)?;
+
+<span class="kw">let</span> (current_sort, sort_key) = <span class="kw">if</span> last_range.start == 0 {
+    <span class="com">// no boundary INSIDE this batch — compare against the previous batch's key</span>
+    <span class="ty">Self</span>::<span class="fn">updated_sort_key</span>(current_sort, sort_key, range_current_sort, range_sort_key)?
+} <span class="kw">else</span> {
+    (range_current_sort, range_sort_key)   <span class="com">// boundary found in-batch</span>
+};</code></pre>
+
+<p>The cross-batch comparison handles a run that straddles batch edges:</p>
+
+<pre><code><span class="kw">fn</span> <span class="fn">updated_sort_key</span>(current_sort, sort_key, range_current_sort, range_sort_key) {
+    <span class="kw">if</span> <span class="kw">let</span> <span class="ty">Some</span>(sort_key) = sort_key {
+        <span class="kw">if</span> <span class="fn">compare_rows</span>(&amp;sort_key, &amp;range_sort_key, &amp;opts)? == <span class="ty">Ordering</span>::<span class="ty">Equal</span> {
+            <span class="kw">return</span> (current_sort, sort_key);   <span class="com">// same value continues → no new boundary</span>
+        }
+    }
+    (range_current_sort, range_sort_key)        <span class="com">// value changed → boundary; advance current_sort</span>
+}</code></pre>
+
+<h4>emit_to — flush groups belonging to earlier sort-key values</h4>
+<pre><code><span class="kw">pub fn</span> <span class="fn">emit_to</span>(&amp;<span class="kw">self</span>) -&gt; <span class="ty">Option</span>&lt;<span class="ty">EmitTo</span>&gt; {
+    <span class="kw">match</span> &amp;<span class="kw">self</span>.state {
+        <span class="ty">State</span>::<span class="ty">InProgress</span> { current_sort, .. } =&gt; {
+            <span class="kw">if</span> *current_sort == 0 { <span class="ty">None</span> }                    <span class="com">// still in the first sort-key run</span>
+            <span class="kw">else</span> { <span class="ty">Some</span>(<span class="ty">EmitTo</span>::<span class="ty">First</span>(*current_sort)) }      <span class="com">// everything before it is done</span>
+        }
+        <span class="ty">State</span>::<span class="ty">Complete</span> =&gt; <span class="ty">Some</span>(<span class="ty">EmitTo</span>::<span class="ty">All</span>),
+        _ =&gt; <span class="ty">None</span>,
+    }
+}</code></pre>
+
+<div class="ascii">  GROUP BY (id, state), input sorted by state:
+
+   state | id | running group index
+   ------+----+--------------------
+    MA   | 10 | 0   ┐
+    MA   | 20 | 1   ┘  sort-key 'MA' run  → groups {0,1}
+    MD   | 10 | 2   ┐  ◀ sort key changed 'MA'→'MD': current_sort jumps to 2
+    MD   | 30 | 3   ┘     ⇒ emit_to() = First(2)  → flush groups 0,1 (all 'MA' groups)
+    ...
+
+   memory held live = only the groups of the CURRENT state value, not all (id,state) pairs.</div>
+
+<p>State size is just the <code>order_indices</code> vector plus the one current <code>sort_key</code> — see
+<code>size()</code> at partial.rs:265. So memory is bounded by the number of distinct group keys sharing a single
+sorted-prefix value, no matter how many total groups the query produces.</p>
+
+<!-- ===================================================================== -->
+<h2 id="emit">12 · ★ <code>EmitTo</code> and the bounded-memory payoff</h2>
+<p class="filehdr">src/aggregates/order/mod.rs:57</p>
+
+<p><code>GroupOrdering::emit_to()</code> just dispatches to the active variant:</p>
+
+<pre><code><span class="kw">pub fn</span> <span class="fn">emit_to</span>(&amp;<span class="kw">self</span>) -&gt; <span class="ty">Option</span>&lt;<span class="ty">EmitTo</span>&gt; {
+    <span class="kw">match</span> <span class="kw">self</span> {
+        <span class="ty">GroupOrdering</span>::<span class="ty">None</span>        =&gt; <span class="ty">None</span>,            <span class="com">// never emit early</span>
+        <span class="ty">GroupOrdering</span>::<span class="ty">Partial</span>(p)  =&gt; p.<span class="fn">emit_to</span>(),
+        <span class="ty">GroupOrdering</span>::<span class="ty">Full</span>(f)     =&gt; f.<span class="fn">emit_to</span>(),
+    }
+}</code></pre>
+
+<p><code>EmitTo</code> (from <code>datafusion_expr</code>) is the universal flush instruction understood by
+<code>GroupValues</code> and every <code>GroupsAccumulator</code>:</p>
+
+<pre><code><span class="kw">pub enum</span> <span class="ty">EmitTo</span> {
+    <span class="ty">All</span>,         <span class="com">// drain everything (used at end of input)</span>
+    <span class="ty">First</span>(<span class="ty">usize</span>), <span class="com">// drain the first n groups, keep & renumber the rest</span>
+}</code></pre>
+
+<p>When the stream receives <code>Some(EmitTo::First(n))</code> it calls <code>emit(...)</code> (row_hash.rs:1103), which:</p>
+<ol>
+  <li>pulls the first <code>n</code> group-key columns from <code>group_values.emit(emit_to)</code>;</li>
+  <li>calls <code>group_ordering.remove_groups(n)</code> to shift the tracker;</li>
+  <li>appends each accumulator's output — <code>evaluate(emit_to)</code> for a Final stage, or <code>state(emit_to)</code>
+      for a Partial stage / spill;</li>
+  <li>builds the output <code>RecordBatch</code> and resizes the memory reservation downward.</li>
+</ol>
+
+<div class="key">
+  <span class="tag">The bottom line</span>
+  <table style="margin:8px 0 0;">
+    <tr><th>Ordering</th><th>Peak memory</th><th>First output appears</th></tr>
+    <tr><td><code>None</code></td><td>O(total distinct groups)</td><td>only after the input is fully consumed</td></tr>
+    <tr><td><code>Partial</code></td><td>O(groups within one sorted-prefix value)</td><td>as soon as the prefix value changes</td></tr>
+    <tr><td><code>Full</code></td><td>O(one group window)</td><td>almost immediately, streaming</td></tr>
+  </table>
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="spill">13 · Spilling and the OOM paths</h2>
+<p class="filehdr">src/aggregates/row_hash.rs:78 (SpillState), 1031 (try_update_memory_reservation)</p>
+
+<p>What happens when the order is <em>not</em> helpful (<code>GroupOrdering::None</code>) and the hash table outgrows the
+memory budget? After each batch the stream updates its <code>MemoryReservation</code>; on
+<code>ResourcesExhausted</code> it branches on an <code>OutOfMemoryMode</code> chosen at construction:</p>
+
+<table>
+  <tr><th>OutOfMemoryMode</th><th>Chosen when</th><th>Action</th></tr>
+  <tr><td><code>EmitEarly</code></td><td>Partial aggregation</td><td>Flush accumulated groups downstream — a later Final stage will re-merge them, so partial early emission is always safe.</td></tr>
+  <tr><td><code>Spill</code></td><td>Final aggregation, unsorted</td><td>Sort current groups by key, write partial state to a temp file, clear memory, keep going.</td></tr>
+  <tr><td><code>ReportError</code></td><td>Fully sorted input, or no disk manager</td><td>Fail — but a sorted input shouldn't reach here, since it already streams in bounded memory.</td></tr>
+</table>
+
+<h4>The spill → re-merge trick</h4>
+<p>Spilling (row_hash.rs:1241) writes each spill <em>sorted by the group keys</em>. Once input is exhausted, the
+stream replaces its input with a <code>StreamingMerge</code> over the sorted spill files and re-runs aggregation in a
+second pass — and because the merged stream is now globally sorted on the keys, it sets:</p>
+
+<pre><code><span class="kw">self</span>.spill_state.is_stream_merging = <span class="kw">true</span>;
+<span class="kw">self</span>.group_ordering = <span class="ty">GroupOrdering</span>::<span class="ty">Full</span>(<span class="ty">GroupOrderingFull</span>::<span class="fn">new</span>());  <span class="com">// merged data IS sorted now</span></code></pre>
+
+<div class="note">
+  <span class="tag">Nice symmetry</span>
+  The spill recovery path <em>manufactures</em> exactly the sorted-input condition from §10 and then rides the same
+  <code>GroupOrderingFull</code> streaming machine to finish in bounded memory. Sorting is the unifying tool: either the
+  input gives you order for free, or you pay to create it when you run out of RAM.
+</div>
+
+<p>Under memory pressure with a Partial/Full ordering, <code>oom_emit_to(n)</code> (order/mod.rs:71) lets the engine
+flush up to <code>n</code> groups but <em>clamps</em> to the largest safe boundary the ordering allows, so early
+emission never violates correctness.</p>
+
+<!-- ===================================================================== -->
+<h2 id="topk">14 · The TopK and no-grouping paths (briefly)</h2>
+
+<h3>No grouping — <code>AggregateStream</code></h3>
+<p class="filehdr">src/aggregates/no_grouping.rs</p>
+<p>With no <code>GROUP BY</code>, there is exactly one group. One <code>Accumulator</code> per aggregate folds in every
+batch (<code>update_batch</code> for raw input, <code>merge_batch</code> for partial), and at end-of-input a single output
+row is finalized. No interning, no ordering, no spilling — just a running fold.</p>
+
+<h3>TopK — <code>GroupedTopKAggregateStream</code></h3>
+<p class="filehdr">src/aggregates/topk_stream.rs, src/aggregates/topk/priority_map.rs</p>
+<p>For the pattern <code>GROUP BY k ORDER BY MIN/MAX(agg) LIMIT k</code> (single key column), DataFusion keeps only the
+best <em>k</em> groups in a <code>PriorityMap</code> — a hash map (<code>key → slot</code>) wired to a bounded heap of the
+top-<em>k</em> aggregate values. The crucial optimization is early discard:</p>
+
+<pre><code><span class="kw">fn</span> <span class="fn">insert</span>(&amp;<span class="kw">mut</span> <span class="kw">self</span>, row_idx) {
+    <span class="kw">if</span> <span class="kw">self</span>.heap.<span class="fn">is_worse</span>(row_idx) { <span class="kw">return</span>; }  <span class="com">// heap full & this value can't make top-k → drop, no alloc</span>
+    ...
+}</code></pre>
+<p>So a high-cardinality group-by that only needs the top 10 rows never materializes more than ~10 groups — O(k)
+memory instead of O(distinct groups). This is a different lever from sort order (it exploits the <em>limit</em>), but
+it shares the same spirit: avoid materializing groups you can prove you'll never output.</p>
+
+<!-- ===================================================================== -->
+<h2 id="summary">15 · Putting it together</h2>
+
+<p>A single <code>SELECT k, agg(v) … GROUP BY k</code> can run in any of these regimes; the planner and runtime pick
+based on the shape of the query and the order of the input:</p>
+
+<div class="ascii">                         AggregateExec::execute_typed
+                                     │
+        ┌────────────────────────────┼──────────────────────────────┐
+   no GROUP BY?                 LIMIT k on agg?                  otherwise
+        │                            │                               │
+  AggregateStream         GroupedTopKAggregateStream        GroupedHashAggregateStream
+  (1 fold, 1 row)         (PriorityMap, O(k) memory)                 │
+                                                    ┌────────────────┴──────────────────┐
+                                            input_order_mode (decided in try_new, §8)
+                                                    │
+                ┌───────────────────────┬───────────────────────────┐
+            Linear                  PartiallySorted([..])          Sorted
+        GroupOrdering::None       GroupOrdering::Partial      GroupOrdering::Full
+        full hash table,          emit on prefix-value         emit on every new
+        emit at end;              change; O(groups per         group index;
+        spill / emit-early        prefix value)                O(1) streaming
+        under memory pressure                                  </div>
+
+<div class="key">
+  <span class="tag">The one thing to remember</span>
+  Sort-order exploitation is not a separate code path — it is the <em>same</em> hash engine, with a small state
+  machine (<code>GroupOrdering</code>) deciding <em>when</em> a group is provably finished. Sorted input lets that
+  decision happen mid-stream via <code>EmitTo::First(n)</code>, converting an O(#groups)-memory blocking operator into
+  an O(window)-memory streaming one. And when order isn't given, spilling sorts the data to recreate exactly that
+  condition. Order is the lever; <code>EmitTo</code> is how it's pulled.
+</div>
+
+<hr>
+<p class="small">Sources: <code>datafusion-physical-plan</code> v54.0.0 —
+<code>src/aggregates/{mod,row_hash,no_grouping,topk_stream}.rs</code>,
+<code>src/aggregates/order/{mod,full,partial}.rs</code>,
+<code>src/aggregates/group_values/{mod,row}.rs</code>,
+<code>src/aggregates/topk/priority_map.rs</code>, and <code>src/ordering.rs</code>.
+Line numbers approximate; verified against crate source.</p>
+
+</main>
+</div>
+</body>
+</html>
