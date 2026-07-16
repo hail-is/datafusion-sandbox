@@ -1,14 +1,18 @@
 use datafusion::common::DataFusionError;
 use datafusion::functions_aggregate::count::count_all;
 use datafusion::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
+use vortex_datafusion::{VortexFormatFactory, VortexTableOptions};
 
 use datafusion::arrow::array::Int32Array;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::streaming::StreamingTable;
+use datafusion::datasource::file_format::format_as_file_type;
 use datafusion::error::Result;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::logical_expr::logical_plan::LogicalPlanBuilder;
 use datafusion::logical_expr::{SortExpr, col};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
@@ -98,4 +102,24 @@ pub fn make_table_range_join(
     let left = make_range_table(ctx, m, batch_size)?;
     let right = make_range_table(ctx, n, batch_size)?.select(vec![col("idx").alias("idx2")])?;
     left.join(right, JoinType::Inner, &["idx"], &["idx2"], None)
+}
+
+pub async fn write_vortex(
+    df: DataFrame,
+    path: &str,
+    writer_options: Option<VortexTableOptions>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let format = if let Some(vortex_opts) = writer_options {
+        Arc::new(VortexFormatFactory::new().with_options(vortex_opts))
+    } else {
+        Arc::new(VortexFormatFactory::new())
+    };
+
+    let file_type = format_as_file_type(format);
+
+    let (session_state, plan) = df.into_parts();
+
+    let plan = LogicalPlanBuilder::copy_to(plan, path.into(), file_type, HashMap::new(), vec![])?
+        .build()?;
+    DataFrame::new(session_state, plan).collect().await
 }
