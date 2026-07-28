@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-datafusion = "54.0.0"
+datafusion = "54.1.0"
 vortex-datafusion = "0.78.0"
 vortex = { version = "0.78.0", features = ["object_store", "tokio", "files", "zstd"] }
 tokio = { version = "1.0", features = ["rt-multi-thread"] }

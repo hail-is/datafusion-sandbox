@@ -8,6 +8,7 @@ grows unwieldy we can split them into a `commands/` subpackage later.
 import logging
 import subprocess
 from pathlib import Path, PurePath
+import shutil
 
 import hail as hl
 import typer
@@ -92,7 +93,7 @@ def convert_vds(path: Path, dest: Path) -> None:
     tmp_dir = dest / f'{name}.reference'
     ref_mt = vds.reference_data
     ref_mt = ref_mt.transmute_entries(ploidy=ref_mt.LGT.ploidy)
-    ref_mt.entries().key_by('locus').drop('s', 'END').to_spark().write.parquet(str(tmp_dir), compression='zstd')
+    ref_mt.entries().key_by('locus').drop('s', 'END').to_spark().drop('locus.contig').withColumnRenamed('locus.position', 'position').write.parquet(str(tmp_dir), compression='zstd')
     [tmp] = tmp_dir.glob('*.parquet')
     tmp.rename(dest / f'{name}.reference.zstd.parquet')
     for file in tmp_dir.iterdir():
@@ -107,22 +108,25 @@ def convert_vdss(path: Path, dest: Path) -> None:
 
     assert(path.is_dir())
     dest.mkdir(exist_ok=True)
+    (dest / 'contig=chr22').mkdir()
 
     for gvcf in path.glob('*.vds'):
         name = gvcf.stem
         sample_id = name.split('.')[0]
-        part_dir = dest / f's={sample_id}'
+        part_dir = dest / 'contig=chr22' / f's={sample_id}'
         part_dir.mkdir()
         convert_vds(gvcf, part_dir)
 
 
 @app.command()
-def convert_parquets(path: Path, dest: Path) -> None:
+def convert_parquets(path: Path, dest: Path, compact: bool = False, scale_factor: int = 1) -> None:
     path = resolve_path(path)
     dest = resolve_path(dest)
 
     assert(path.is_dir())
     dest.mkdir(exist_ok=True)
+
+    (dest / "contig=chr22").mkdir()
 
     for parquet in path.rglob('*.parquet'):
         tmp = parquet.with_suffix('')
@@ -131,8 +135,15 @@ def convert_parquets(path: Path, dest: Path) -> None:
         name = tmp.name
         part_path = (dest / parquet.relative_to(path)).with_name(f'{name}.vortex')
         part_path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.check_call(['uv', 'run', 'vx', 'convert', parquet])
+        if compact:
+            subprocess.check_call(['uv', 'run', 'vx', 'convert', '-s', 'compact', parquet])
+        else:
+            subprocess.check_call(['uv', 'run', 'vx', 'convert', parquet])
         parquet.with_suffix('.vortex').rename(part_path)
+
+    contigs = [f'contig=chr{22-i}' for i in range(1, scale_factor)]
+    for contig in contigs:
+        shutil.copytree(dest / "contig=chr22", dest / contig)
 
 
 @app.command()
