@@ -3,7 +3,6 @@ use datafusion::logical_expr::logical_plan::Union;
 use datafusion_sandbox::write_vortex;
 
 use datafusion::arrow::datatypes::DataType;
-use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::ListingOptions;
 use datafusion::error::Result;
 use datafusion::prelude::*;

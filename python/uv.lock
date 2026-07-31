@@ -719,6 +719,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "hail" },
+    { name = "numpy" },
     { name = "typer" },
     { name = "vortex-data" },
 ]
@@ -726,6 +727,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "hail", specifier = "==0.2.138" },
+    { name = "numpy", specifier = ">=2,<3" },
     { name = "typer", specifier = ">=0.24.0" },
     { name = "vortex-data", specifier = ">=0.83.0" },
 ]

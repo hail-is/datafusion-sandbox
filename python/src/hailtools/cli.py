@@ -83,39 +83,58 @@ def convert_gvcfs(path: Path, dest: Path) -> None:
         part_dir.mkdir()
         convert_gvcf(gvcf, part_dir)
 
-
-@app.command()
-def convert_vds(path: Path, dest: Path) -> None:
-    assert(dest.is_dir())
-
-    name = path.stem
-    vds = hl.vds.read_vds(path)
-    tmp_dir = dest / f'{name}.reference'
-    ref_mt = vds.reference_data
-    ref_mt = ref_mt.transmute_entries(ploidy=ref_mt.LGT.ploidy)
-    ref_mt.entries().key_by('locus').drop('s', 'END').to_spark().drop('locus.contig').withColumnRenamed('locus.position', 'position').write.parquet(str(tmp_dir), compression='zstd')
+def spark_df_to_parquet(df, dest: Path, filename: str) -> None:
+    tmp_dir = dest / 'tmp'
+    df.write.parquet(str(tmp_dir), compression='zstd')
     [tmp] = tmp_dir.glob('*.parquet')
-    tmp.rename(dest / f'{name}.reference.zstd.parquet')
+    tmp.rename(dest / f'{filename}.zstd.parquet')
     for file in tmp_dir.iterdir():
         file.unlink()
     tmp_dir.rmdir()
 
+def vds_to_reference(vds: hl.vds.VariantDataset, name: str, dest: Path) -> None:
+    ref_mt = vds.reference_data
+    ref_mt = ref_mt.transmute_entries(ploidy=ref_mt.LGT.ploidy)
+    df = ref_mt.entries().key_by('locus').drop('s', 'END').to_spark().drop('locus.contig').withColumnRenamed('locus.position', 'position')
+    spark_df_to_parquet(df, dest, f'{name}.reference')
+
+def vds_to_alleles(vds: hl.vds.VariantDataset, name: str, dest: Path) -> None:
+    var_mt = vds.variant_data
+    df = var_mt.rows().drop('rsid').key_by('locus').explode('alleles').to_spark().drop('locus.contig').withColumnRenamed('locus.position', 'position')
+    spark_df_to_parquet(df, dest, f'{name}.alleles')
 
 @app.command()
-def convert_vdss(path: Path, dest: Path) -> None:
+def convert_vds(path: Path, dest: Path, alleles_dest: Path | None = None) -> None:
+    assert(dest.is_dir())
+    name = path.stem
+    vds = hl.vds.read_vds(path)
+    vds_to_reference(vds, name, dest)
+    if alleles_dest is not None:
+        vds_to_alleles(vds, name, alleles_dest)
+
+@app.command()
+def convert_vdss(path: Path, dest: Path, alleles_dest: Path | None = None) -> None:
     path = resolve_path(path)
     dest = resolve_path(dest)
 
     assert(path.is_dir())
     dest.mkdir(exist_ok=True)
-    (dest / 'contig=chr22').mkdir()
+    if alleles_dest is not None:
+        alleles_dest = resolve_path(alleles_dest)
+        alleles_dest.mkdir(exist_ok=True)
 
     for gvcf in path.glob('*.vds'):
         name = gvcf.stem
         sample_id = name.split('.')[0]
-        part_dir = dest / 'contig=chr22' / f's={sample_id}'
-        part_dir.mkdir()
-        convert_vds(gvcf, part_dir)
+        ref_dir = dest / f's={sample_id}' / 'contig=chr22'
+        ref_dir.mkdir(parents=True)
+
+        alleles_dir = None
+        if alleles_dest is not None:
+            alleles_dir = alleles_dest / f's={sample_id}' / 'contig=chr22'
+            alleles_dir.mkdir(parents=True)
+
+        convert_vds(gvcf, ref_dir, alleles_dir)
 
 
 @app.command()
@@ -125,8 +144,6 @@ def convert_parquets(path: Path, dest: Path, compact: bool = False, scale_factor
 
     assert(path.is_dir())
     dest.mkdir(exist_ok=True)
-
-    (dest / "contig=chr22").mkdir()
 
     for parquet in path.rglob('*.parquet'):
         tmp = parquet.with_suffix('')
@@ -142,8 +159,9 @@ def convert_parquets(path: Path, dest: Path, compact: bool = False, scale_factor
         parquet.with_suffix('.vortex').rename(part_path)
 
     contigs = [f'contig=chr{22-i}' for i in range(1, scale_factor)]
-    for contig in contigs:
-        shutil.copytree(dest / "contig=chr22", dest / contig)
+    for subdir in dest.iterdir():
+        for contig in contigs:
+            shutil.copytree(subdir / "contig=chr22", subdir / contig)
 
 
 @app.command()
