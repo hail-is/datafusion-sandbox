@@ -17,7 +17,8 @@ use vortex_datafusion::VortexFormat;
 // provided by a parent directory of the form "s=HG123456". Assumes all files have the same schema.
 // Reads them as a single table, with one partition per input file. By declaring the input files
 // to be sorted, this generates a physical plan with a single `SortPreservingMergeExec`.
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")] // for timing single-threaded performance
+// #[tokio::main()]
 async fn main() -> Result<()> {
     // Need at least as many partitions as files to avoid sorting. Merging is done via SortPreservingMergeExec,
     // which merges many partitions into one. If there are more files than partitions, DataSourceExec will
