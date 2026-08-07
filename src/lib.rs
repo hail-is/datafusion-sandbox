@@ -1,21 +1,28 @@
-use datafusion::common::DataFusionError;
-use datafusion::functions_aggregate::count::count_all;
-use datafusion::prelude::*;
-use std::collections::HashMap;
-use std::sync::Arc;
-use vortex_datafusion::{VortexFormatFactory, VortexTableOptions};
-
 use datafusion::arrow::array::Int32Array;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::streaming::StreamingTable;
+use datafusion::common::DataFusionError;
 use datafusion::datasource::file_format::format_as_file_type;
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
 use datafusion::error::Result;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::functions_aggregate::count::count_all;
 use datafusion::logical_expr::logical_plan::LogicalPlanBuilder;
 use datafusion::logical_expr::{SortExpr, col};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream;
+use datafusion::prelude::*;
+
+use vortex::VortexSessionDefault;
+use vortex::session::VortexSession;
+
+use vortex_datafusion::{VortexFormat, VortexFormatFactory, VortexTableOptions};
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug)]
 struct IntRangeStream {
@@ -102,6 +109,63 @@ pub fn make_table_range_join(
     let left = make_range_table(ctx, m, batch_size)?;
     let right = make_range_table(ctx, n, batch_size)?.select(vec![col("idx").alias("idx2")])?;
     left.join(right, JoinType::Inner, &["idx"], &["idx2"], None)
+}
+
+// TODO: try implementing ReadOptions for this
+#[derive(Default, Clone)]
+pub struct VortexReadOptions {
+    pub file_sort_order: Vec<Vec<SortExpr>>,
+    pub table_partition_cols: Vec<(String, DataType)>,
+    pub schema: Option<SchemaRef>,
+}
+
+impl VortexReadOptions {
+    fn to_listing_options(&self, config: &SessionConfig) -> ListingOptions {
+        let vortex_session = VortexSession::default();
+        let file_format = Arc::new(VortexFormat::new(vortex_session));
+
+        ListingOptions::new(file_format)
+            .with_file_extension(".vortex")
+            .with_table_partition_cols(self.table_partition_cols.clone())
+            .with_file_sort_order(self.file_sort_order.clone())
+            .with_session_config_options(config)
+    }
+}
+
+pub async fn read_vortex(
+    ctx: &SessionContext,
+    table_path: impl AsRef<str>,
+    options: VortexReadOptions,
+) -> Result<DataFrame> {
+    let table_path = ListingTableUrl::parse(table_path)?;
+    let vortex_opts = options.to_listing_options(ctx.state().config());
+    let resolved_schema = match options.schema {
+        Some(s) => s,
+        None => vortex_opts.infer_schema(&ctx.state(), &table_path).await?,
+    };
+    let config = ListingTableConfig::new(table_path)
+        .with_listing_options(vortex_opts)
+        .with_schema(resolved_schema);
+    let table = ListingTable::try_new(config)?;
+    let df = ctx.read_table(Arc::new(table))?;
+
+    Ok(df)
+}
+
+pub fn read_vortex_with_schema(
+    ctx: &SessionContext,
+    table_path: impl AsRef<str>,
+    options: VortexReadOptions,
+) -> Result<DataFrame> {
+    let table_path = ListingTableUrl::parse(table_path)?;
+    let vortex_opts = options.to_listing_options(ctx.state().config());
+    let config = ListingTableConfig::new(table_path)
+        .with_listing_options(vortex_opts)
+        .with_schema(options.schema.unwrap());
+    let table = ListingTable::try_new(config)?;
+    let df = ctx.read_table(Arc::new(table))?;
+
+    Ok(df)
 }
 
 pub async fn write_vortex(

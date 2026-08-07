@@ -1,18 +1,12 @@
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::logical_expr::logical_plan::Union;
-use datafusion_sandbox::write_vortex;
+use datafusion_sandbox::{VortexReadOptions, read_vortex, write_vortex};
 
 use datafusion::arrow::datatypes::DataType;
-use datafusion::datasource::listing::ListingOptions;
 use datafusion::error::Result;
 use datafusion::prelude::*;
 
 use std::sync::Arc;
-
-use vortex::VortexSessionDefault;
-use vortex::session::VortexSession;
-
-use vortex_datafusion::VortexFormat;
 
 // Combines all vortex files in a directory. Assumes each file is a single sample, with the sample id
 // provided by a parent directory of the form "s=HG123456". Assumes all files have the same schema.
@@ -37,24 +31,20 @@ async fn main() -> Result<()> {
     // Forces one partition per input scan. There will still be one partition per input going into the `SortPreservingMergeExec`.
     let config = SessionConfig::new().with_target_partitions(1);
     let ctx = SessionContext::new_with_config(config);
-    let contig = col("contig");
-    let position = col("position");
-    let vortex_session = VortexSession::default();
-    let format = Arc::new(VortexFormat::new(vortex_session));
-    let vortex_opts = ListingOptions::new(format)
-        .with_file_extension(".vortex")
-        .with_file_sort_order(vec![vec![
-            contig.clone().sort(true, false),
-            position.clone().sort(true, false),
-        ]])
-        .with_table_partition_cols(vec![
-            ("contig".to_string(), DataType::Utf8),
+
+    let read_opts = VortexReadOptions {
+        file_sort_order: vec![vec![
+            col("contig").sort(true, false),
+            col("position").sort(true, false),
+        ]],
+        schema: None,
+        table_partition_cols: vec![
             ("s".to_string(), DataType::Utf8),
-        ])
-        .with_session_config_options(ctx.state().config());
-    ctx.register_listing_table("ref", "data/vortices_chr22/", vortex_opts, None, None)
-        .await?;
-    let df = ctx.table("ref").await?;
+            ("contig".to_string(), DataType::Utf8),
+        ],
+    };
+    let df = read_vortex(&ctx, "data/vortices_chr22/", read_opts).await?;
+
     let lps = samples
         .iter()
         .map(|s| {
@@ -67,7 +57,7 @@ async fn main() -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     let lp = LogicalPlan::Union(Union::try_new(lps)?);
     let df = DataFrame::new(ctx.state(), lp);
-    let df = df.sort_by(vec![contig, position])?;
+    let df = df.sort_by(vec![col("contig"), col("position")])?;
     // df.limit(50, Some(100))?.show().await?;
     // df.explain(true, false)?.show().await?;
     write_vortex(df, "data/combined.vortex", None).await?;

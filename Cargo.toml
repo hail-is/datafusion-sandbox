@@ -14,6 +14,9 @@ futures-util = "0.3"
 [dev-dependencies]
 divan = "0.1.21"
 
+[profile.release]
+debug = true
+
 [[bench]]
 name = "example"
 harness = false

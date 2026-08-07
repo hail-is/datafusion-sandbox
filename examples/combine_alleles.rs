@@ -1,5 +1,5 @@
 use datafusion::functions_window::rank::rank;
-use datafusion_sandbox::write_vortex;
+use datafusion_sandbox::{VortexReadOptions, read_vortex_with_schema, write_vortex};
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::listing::{
@@ -32,53 +32,46 @@ async fn main() -> Result<()> {
 
     let config = SessionConfig::new().with_target_partitions(1);
     let ctx = SessionContext::new_with_config(config);
-    let contig = col("contig");
-    let position = col("position");
-    let allele = col("alleles");
-    let vortex_session = VortexSession::default();
-    let format = Arc::new(VortexFormat::new(vortex_session));
-    let vortex_opts = ListingOptions::new(format)
-        .with_file_extension(".vortex")
-        .with_file_sort_order(vec![vec![
-            contig.clone().sort(true, false),
-            position.clone().sort(true, false),
-            allele.clone().sort(true, false),
-        ]])
-        .with_table_partition_cols(vec![("contig".to_string(), DataType::Utf8)])
-        .with_session_config_options(ctx.state().config());
 
     // Note: leaving the schema to be inferred infers Utf8View for "alleles", which runs into what
     // I suspect is a bug, the effect of which is the query planner doesn't think the input file groups
     // are sorted.
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("position", DataType::Int32, false),
-        Field::new("alleles", DataType::Utf8, false),
-    ]));
+    let read_opts = VortexReadOptions {
+        file_sort_order: vec![vec![
+            col("contig").sort(true, false),
+            col("position").sort(true, false),
+            col("alleles").sort(true, false),
+        ]],
+        schema: Some(Arc::new(Schema::new(vec![
+            Field::new("position", DataType::Int32, false),
+            Field::new("alleles", DataType::Utf8, false),
+        ]))),
+        table_partition_cols: vec![("contig".to_string(), DataType::Utf8)],
+    };
+
     let lps = samples
         .iter()
         .map(|s| {
-            let table_path =
-                ListingTableUrl::parse(format!("data/vortices_alleles_chr22/s={}", s))?;
-            let table_config = ListingTableConfig::new(table_path)
-                .with_listing_options(vortex_opts.clone())
-                .with_schema(schema.clone());
-            let table = ListingTable::try_new(table_config)?;
-            let df = ctx.read_table(Arc::new(table))?;
+            let df = read_vortex_with_schema(
+                &ctx,
+                format!("data/vortices_alleles_chr22/s={}", s),
+                read_opts.clone(),
+            )?;
             Ok(Arc::new(df.into_unoptimized_plan()))
         })
         .collect::<Result<Vec<_>>>()?;
     let lp = LogicalPlan::Union(Union::try_new(lps)?);
     let df = DataFrame::new(ctx.state(), lp);
-    let df = df.sort_by(vec![contig.clone(), position.clone(), allele.clone()])?;
+    let df = df.sort_by(vec![col("contig"), col("position"), col("alleles")])?;
     let df = df.distinct()?;
     let df = df.window(vec![
         rank()
             .order_by(vec![
-                contig.clone().sort(true, false),
-                position.clone().sort(true, false),
-                allele.sort(true, false),
+                col("contig").sort(true, false),
+                col("position").sort(true, false),
+                col("alleles").sort(true, false),
             ])
-            .partition_by(vec![contig, position])
+            .partition_by(vec![col("contig"), col("position")])
             .build()?,
     ])?;
     // df.limit(0, Some(100))?.show().await?;
