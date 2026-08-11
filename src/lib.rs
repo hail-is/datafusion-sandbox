@@ -1,28 +1,27 @@
-use datafusion::arrow::array::Int32Array;
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::streaming::StreamingTable;
-use datafusion::common::DataFusionError;
-use datafusion::datasource::file_format::format_as_file_type;
-use datafusion::datasource::listing::{
-    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+use datafusion::{
+    arrow::{
+        array::Int32Array,
+        datatypes::{DataType, Field, Schema, SchemaRef},
+        record_batch::RecordBatch,
+    },
+    catalog::streaming::StreamingTable,
+    common::{DataFusionError, runtime::JoinSet},
+    datasource::{
+        file_format::format_as_file_type,
+        listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
+    },
+    error::Result,
+    execution::{SendableRecordBatchStream, TaskContext},
+    functions_aggregate::count::count_all,
+    logical_expr::{SortExpr, col, logical_plan::LogicalPlanBuilder},
+    physical_plan::{stream::RecordBatchStreamAdapter, streaming::PartitionStream},
+    prelude::*,
 };
-use datafusion::error::Result;
-use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::functions_aggregate::count::count_all;
-use datafusion::logical_expr::logical_plan::LogicalPlanBuilder;
-use datafusion::logical_expr::{SortExpr, col};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::streaming::PartitionStream;
-use datafusion::prelude::*;
-
-use vortex::VortexSessionDefault;
-use vortex::session::VortexSession;
-
+use std::{collections::HashMap, sync::Arc};
+use vortex::{VortexSessionDefault, session::VortexSession};
 use vortex_datafusion::{VortexFormat, VortexFormatFactory, VortexTableOptions};
 
-use std::collections::HashMap;
-use std::sync::Arc;
+pub mod cpu_runtime;
 
 #[derive(Debug)]
 struct IntRangeStream {
@@ -186,4 +185,15 @@ pub async fn write_vortex(
     let plan = LogicalPlanBuilder::copy_to(plan, path.into(), file_type, HashMap::new(), vec![])?
         .build()?;
     DataFrame::new(session_state, plan).collect().await
+}
+
+pub async fn drain_join_set(mut join_set: JoinSet<Result<()>>) {
+    // retrieve any errors from the tasks
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Ok(())) => {}                             // task completed successfully
+            Ok(Err(e)) => eprintln!("Task failed: {e}"), // task failed
+            Err(e) => eprintln!("JoinSet error: {e}"),   // JoinSet error
+        }
+    }
 }

@@ -6,19 +6,63 @@ grows unwieldy we can split them into a `commands/` subpackage later.
 """
 
 import logging
-import subprocess
 from pathlib import Path, PurePath
+import subprocess
 import shutil
+import typer
 
 import hail as hl
-import typer
 from hail.vds.combiner import transform_gvcf
 from hail.vds.combiner.combine import combine_references
+
+from . import gce
 
 app = typer.Typer(
     help="Utilities for creating parquet and vortex files from Hail data.",
     no_args_is_help=True,
 )
+
+# `hailtools gce ...`. The implementation lives in gce.py and depends on nothing outside
+# the standard library, so it can also be run directly on a build machine that has a rust
+# toolchain but no hail install:
+#     python3 python/src/hailtools/gce.py list
+gce_app = typer.Typer(
+    help="Pick rustc CPU flags for a GCE machine family.",
+    no_args_is_help=True,
+)
+app.add_typer(gce_app, name="gce")
+
+
+def _gce_run(fn, *args) -> None:
+    try:
+        print(fn(*args))
+    except gce.GceCpuError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from None
+
+
+@gce_app.command("list")
+def gce_list() -> None:
+    """Show every family: which target-cpu is safe, and what it costs."""
+    _gce_run(gce.cmd_list)
+
+
+@gce_app.command("flags")
+def gce_flags(family: str) -> None:
+    """Print the rustc flags to build for FAMILY, e.g. `hailtools gce flags n2`."""
+    _gce_run(gce.family_flags, family)
+
+
+@gce_app.command("features")
+def gce_features(family: str) -> None:
+    """Print the CPU features common to every platform in FAMILY, one per line."""
+    _gce_run(lambda f: "\n".join(sorted(gce.family_features(f))), family)
+
+
+@gce_app.command("verify")
+def gce_verify(family: str | None = None) -> None:
+    """Run on a GCE VM: check the instance really has the features we computed."""
+    _gce_run(gce.cmd_verify, family)
 
 
 @app.command()
