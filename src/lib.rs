@@ -132,7 +132,7 @@ pub struct VortexReadOptions {
 }
 
 impl VortexReadOptions {
-    fn to_listing_options(&self, config: &SessionConfig) -> ListingOptions {
+    fn to_listing_options(&self) -> ListingOptions {
         let vortex_session = VortexSession::default();
         let file_format = Arc::new(VortexFormat::new(vortex_session));
 
@@ -140,7 +140,6 @@ impl VortexReadOptions {
             .with_file_extension(".vortex")
             .with_table_partition_cols(self.table_partition_cols.clone())
             .with_file_sort_order(self.file_sort_order.clone())
-            .with_session_config_options(config)
     }
 }
 
@@ -150,7 +149,7 @@ pub async fn read_vortex(
     options: VortexReadOptions,
 ) -> Result<DataFrame> {
     let table_path = ListingTableUrl::parse(table_path)?;
-    let vortex_opts = options.to_listing_options(ctx.state().config());
+    let vortex_opts = options.to_listing_options();
     let resolved_schema = match options.schema {
         Some(s) => s,
         None => vortex_opts.infer_schema(&ctx.state(), &table_path).await?,
@@ -170,7 +169,7 @@ pub fn read_vortex_with_schema(
     options: VortexReadOptions,
 ) -> Result<DataFrame> {
     let table_path = ListingTableUrl::parse(table_path)?;
-    let vortex_opts = options.to_listing_options(ctx.state().config());
+    let vortex_opts = options.to_listing_options();
     let config = ListingTableConfig::new(table_path)
         .with_listing_options(vortex_opts)
         .with_schema(options.schema.unwrap());
