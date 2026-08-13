@@ -3,7 +3,7 @@ This repo is to help us start to experiment with implementing hail style pipelin
 - `benches/example.rs`: Some initial infrastructure for running benchmarks. Run using `cargo bench`. Setting `RUSTFLAGS='-C target-cpu=native'` is probably a good idea.
 - `data/`: Data files for use in benchmarks, or just ad hoc experimentation.
 - `src/lib.rs`: Definitions of dataframes, for use in benchmarks or ad hoc experimentation.
-- `src/main.rs`: I'm using the main function as a scratch area to run ad hoc experiments using `cargo run`.
+- `src/main.rs`: A CLI dispatching to the pipelines in `src/`. Run using `cargo run -r -- <subcommand>`.
 - `notes/`: A place for notes on datafusion. Right now just has an explainer I had Claude generate on how aggregation works, and how it can take advantage of ordered inputs.
 
 ### Setup
@@ -30,10 +30,13 @@ uv run --directory python hailtool --help
 ```
 
 ### Combiner prototype
-So far there is just a simple pipeline for combining the 50 samples of reference data from our benchmark data. Run it using
+So far there are simple pipelines for combining the 50 samples of our benchmark data. Each takes the path of a
+directory containing one subdirectory per sample, of the form `s=HG123456`, either local or in object storage.
 ```
-cargo run -r --example combiner1
+cargo run -r -- combine-refs data/vortices_chr22        # -> data/combined.vortex
+cargo run -r -- combine-alleles data/vortices_alleles_chr22  # -> data/combined_alleles.vortex
 ```
+An earlier variant of the reference combiner is still available as `cargo run -r --example combiner1`.
 
 ### Building for a specific GCE instance family
 
@@ -74,7 +77,7 @@ shared one:
 
 ```
 RUSTFLAGS="$(python3 python/src/hailtools/gce.py flags c4)" \
-  CARGO_TARGET_DIR=target-c4 cargo build -r --example combiner2
+  CARGO_TARGET_DIR=target-c4 cargo build -r
 ```
 
 Two caveats. The `FAMILY_CPUS` table in `gce.py` is the fragile part — Google adds platforms to

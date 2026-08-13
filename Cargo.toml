@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
 datafusion = "54.1.0"
 object_store = { version = "0.13.2", features = ["gcp"]}
 vortex-datafusion = "0.78.0"

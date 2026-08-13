@@ -50,9 +50,10 @@ impl Drop for CpuRuntime {
 }
 
 impl CpuRuntime {
-    /// Create a new Tokio Runtime for CPU bound tasks
-    pub fn try_new() -> Result<Self> {
+    /// Create a new Tokio Runtime for CPU bound tasks, with `worker_threads` worker threads
+    pub fn try_new(worker_threads: usize) -> Result<Self> {
         let cpu_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(worker_threads)
             .enable_time()
             .build()?;
         let handle = cpu_runtime.handle().clone();
