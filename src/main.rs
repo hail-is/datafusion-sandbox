@@ -1,9 +1,8 @@
 use clap::{Parser, Subcommand};
 use datafusion::error::Result;
-use datafusion::prelude::SessionConfig;
 
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
-use datafusion_sandbox::{SAMPLES, combine_alleles, combine_refs};
+use datafusion_sandbox::{SAMPLES, combine_alleles, combine_refs, combiner_session_config};
 
 #[derive(Parser)]
 #[command(about = "Run hail-style pipelines built on datafusion")]
@@ -60,9 +59,7 @@ fn main() -> Result<()> {
 /// object stores to register are the ones those paths live on, and local paths need none at all.
 fn options_for(input_path: &str, output_path: &str, threads: Option<usize>) -> PipelineOptions {
     let mut options = PipelineOptions {
-        // Forces one partition per input scan. There will still be one partition per input
-        // going into the `SortPreservingMergeExec`.
-        session_config: SessionConfig::new().with_target_partitions(1),
+        session_config: combiner_session_config(),
         ..Default::default()
     };
     if let Some(threads) = threads {

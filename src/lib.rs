@@ -37,6 +37,15 @@ pub const SAMPLES: &[&str] = &[
     "NA18613", "NA20802",
 ];
 
+/// The session config the combiners' plan shape depends on. Forcing one partition
+/// per input scan is what leaves one partition per sample going into the
+/// `SortPreservingMergeExec`; run a combiner under a different config and you get
+/// a different plan. Shared so that what the CLI runs and what the plan shape
+/// tests assert on cannot drift apart.
+pub fn combiner_session_config() -> SessionConfig {
+    SessionConfig::new().with_target_partitions(1)
+}
+
 #[derive(Debug)]
 struct IntRangeStream {
     schema: SchemaRef,

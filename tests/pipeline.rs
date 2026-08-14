@@ -1,5 +1,5 @@
 use datafusion::error::DataFusionError;
-use datafusion::prelude::DataFrame;
+use datafusion::prelude::{DataFrame, col, lit};
 use datafusion_sandbox::make_range_table;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 
@@ -22,8 +22,9 @@ fn runs_a_plan_builder_and_writes_output() {
     assert!(output.metadata().unwrap().len() > 0);
 }
 
-/// A plan that fails surfaces its error to the caller rather than printing and
-/// discarding it — that's what lets the CLI exit non-zero.
+/// A plan builder that fails while building surfaces its error to the caller
+/// rather than printing and discarding it — that's what lets the CLI exit
+/// non-zero.
 #[test]
 fn surfaces_plan_builder_errors() {
     let err = pipeline::run(
@@ -34,6 +35,27 @@ fn surfaces_plan_builder_errors() {
     .unwrap_err();
 
     assert!(err.to_string().contains("boom"), "got: {err}");
+}
+
+/// A plan that builds perfectly well and only fails once it runs still surfaces
+/// its error. Dividing by `idx - 1` over a range starting at 1 divides by zero
+/// on the first row, which nothing can catch before execution.
+#[test]
+fn surfaces_errors_from_plans_that_fail_at_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let output_path = dir.path().join("out.vortex").to_str().unwrap().to_string();
+
+    let err = pipeline::run(
+        move |ctx| async move {
+            make_range_table(&ctx, 1000, 128)?
+                .select(vec![(lit(1) / (col("idx") - lit(1))).alias("boom")])
+        },
+        &output_path,
+        PipelineOptions::default(),
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("Divide by zero"), "got: {err}");
 }
 
 /// Object stores are registered from a declared list of base URLs; any scheme

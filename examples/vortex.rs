@@ -1,4 +1,3 @@
-use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::datasource::listing::ListingOptions;
 use datafusion::error::Result;
 use datafusion::prelude::*;
@@ -12,7 +11,7 @@ use vortex_datafusion::VortexFormat;
 async fn main() -> Result<()> {
     let format = Arc::new(VortexFormat::new(VortexSession::default()));
     let ctx = SessionContext::new();
-    let vortex_opts = ListingOptions::new(format).with_session_config_options(ctx.state().config());
+    let vortex_opts = ListingOptions::new(format);
     ctx.register_listing_table(
         "ref",
         "data/NA20760.hg38.g.reference.vortex",
