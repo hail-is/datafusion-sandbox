@@ -5,7 +5,7 @@ use datafusion::{
         record_batch::RecordBatch,
     },
     catalog::streaming::StreamingTable,
-    common::{DataFusionError, runtime::JoinSet},
+    common::DataFusionError,
     datasource::{
         file_format::format_as_file_type,
         listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
@@ -24,6 +24,7 @@ use vortex_datafusion::{VortexFormat, VortexFormatFactory, VortexTableOptions};
 pub mod combine_alleles;
 pub mod combine_refs;
 pub mod cpu_runtime;
+pub mod pipeline;
 
 /// The 50 samples of the `1kg_chr22` benchmark dataset.
 pub const SAMPLES: &[&str] = &[
@@ -163,22 +164,6 @@ pub async fn read_vortex(
     Ok(df)
 }
 
-pub fn read_vortex_with_schema(
-    ctx: &SessionContext,
-    table_path: impl AsRef<str>,
-    options: VortexReadOptions,
-) -> Result<DataFrame> {
-    let table_path = ListingTableUrl::parse(table_path)?;
-    let vortex_opts = options.to_listing_options();
-    let config = ListingTableConfig::new(table_path)
-        .with_listing_options(vortex_opts)
-        .with_schema(options.schema.unwrap());
-    let table = ListingTable::try_new(config)?;
-    let df = ctx.read_table(Arc::new(table))?;
-
-    Ok(df)
-}
-
 pub async fn write_vortex(
     df: DataFrame,
     path: &str,
@@ -197,15 +182,4 @@ pub async fn write_vortex(
     let plan = LogicalPlanBuilder::copy_to(plan, path.into(), file_type, HashMap::new(), vec![])?
         .build()?;
     DataFrame::new(session_state, plan).collect().await
-}
-
-pub async fn drain_join_set(mut join_set: JoinSet<Result<()>>) {
-    // retrieve any errors from the tasks
-    while let Some(result) = join_set.join_next().await {
-        match result {
-            Ok(Ok(())) => {}                             // task completed successfully
-            Ok(Err(e)) => eprintln!("Task failed: {e}"), // task failed
-            Err(e) => eprintln!("JoinSet error: {e}"),   // JoinSet error
-        }
-    }
 }

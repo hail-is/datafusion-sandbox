@@ -1729,6 +1729,7 @@ dependencies = [
  "futures",
  "futures-util",
  "object_store",
+ "tempfile",
  "tokio",
  "vortex",
  "vortex-datafusion",
