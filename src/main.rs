@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand};
 use datafusion::error::Result;
+use datafusion::prelude::SessionConfig;
 
-use datafusion_sandbox::{combine_alleles, combine_refs};
-
-use std::thread::available_parallelism;
+use datafusion_sandbox::pipeline::{self, PipelineOptions};
+use datafusion_sandbox::{SAMPLES, combine_alleles, combine_refs};
 
 #[derive(Parser)]
 #[command(about = "Run hail-style pipelines built on datafusion")]
@@ -34,31 +34,78 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let threads = match cli.threads {
-        Some(n) => n,
-        None => available_parallelism().map(|n| n.get()).unwrap_or(1),
-    };
+    let Cli { command, threads } = Cli::parse();
 
-    // The runtime built here is the IO runtime: `combine_refs` moves the query itself onto a
-    // separate `CpuRuntime`, so that IO and CPU-bound work don't contend for the same threads.
-    let mut builder = if threads == 1 {
-        tokio::runtime::Builder::new_current_thread()
-    } else {
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.worker_threads(threads);
-        builder
-    };
-    let runtime = builder.enable_all().build()?;
-
-    runtime.block_on(async {
-        match cli.command {
-            Command::CombineRefs { path, output } => {
-                combine_refs::run(&path, &output, threads).await
-            }
-            Command::CombineAlleles { path, output } => {
-                combine_alleles::run(&path, &output, threads).await
-            }
+    match command {
+        Command::CombineRefs { path, output } => {
+            let options = options_for(&path, &output, threads);
+            pipeline::run(
+                move |ctx| async move { combine_refs::plan(&ctx, &path, SAMPLES).await },
+                &output,
+                options,
+            )
         }
-    })
+        Command::CombineAlleles { path, output } => {
+            let options = options_for(&path, &output, threads);
+            pipeline::run(
+                move |ctx| async move { combine_alleles::plan(&ctx, &path, SAMPLES).await },
+                &output,
+                options,
+            )
+        }
+    }
+}
+
+/// Pipeline options for a combiner reading from `input_path` and writing to `output_path`: the
+/// object stores to register are the ones those paths live on, and local paths need none at all.
+fn options_for(input_path: &str, output_path: &str, threads: Option<usize>) -> PipelineOptions {
+    let mut options = PipelineOptions {
+        // Forces one partition per input scan. There will still be one partition per input
+        // going into the `SortPreservingMergeExec`.
+        session_config: SessionConfig::new().with_target_partitions(1),
+        ..Default::default()
+    };
+    if let Some(threads) = threads {
+        options.threads = threads;
+    }
+    options.object_stores = [input_path, output_path]
+        .into_iter()
+        .filter_map(object_store_base_url)
+        .collect();
+    options.object_stores.dedup();
+    options
+}
+
+/// The base URL of the object store `path` lives on, e.g. "gs://my-bucket", or None for a
+/// local path.
+fn object_store_base_url(path: &str) -> Option<String> {
+    let (scheme, rest) = path.split_once("://")?;
+    if scheme == "file" {
+        return None;
+    }
+    let authority = rest.split('/').next().unwrap_or("");
+    Some(format!("{scheme}://{authority}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registers_the_object_stores_of_both_input_and_output() {
+        let options = options_for("gs://bucket-a/path", "gs://bucket-b/out.vortex", None);
+        assert_eq!(options.object_stores, ["gs://bucket-a", "gs://bucket-b"]);
+    }
+
+    #[test]
+    fn registers_a_shared_object_store_once() {
+        let options = options_for("gs://bucket/path/", "gs://bucket/out.vortex", None);
+        assert_eq!(options.object_stores, ["gs://bucket"]);
+    }
+
+    #[test]
+    fn registers_no_object_stores_for_local_paths() {
+        let options = options_for("data/samples", "data/out.vortex", None);
+        assert!(options.object_stores.is_empty());
+    }
 }

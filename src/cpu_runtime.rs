@@ -50,10 +50,10 @@ impl Drop for CpuRuntime {
 }
 
 impl CpuRuntime {
-    /// Create a new Tokio Runtime for CPU bound tasks, with `worker_threads` worker threads
+    /// Create a new Tokio Runtime for CPU bound tasks, with `worker_threads` worker threads.
+    /// 1 runs on a current-thread runtime, for timing single-threaded performance.
     pub fn try_new(worker_threads: usize) -> Result<Self> {
-        let cpu_runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(worker_threads)
+        let cpu_runtime = crate::pipeline::runtime_builder(worker_threads)
             .enable_time()
             .build()?;
         let handle = cpu_runtime.handle().clone();
