@@ -23,6 +23,7 @@ use vortex_datafusion::{VortexFormat, VortexFormatFactory, VortexTableOptions};
 
 pub mod combine_alleles;
 pub mod combine_refs;
+pub mod combine_refs_one_scan;
 pub mod cpu_runtime;
 pub mod pipeline;
 

@@ -8,14 +8,18 @@
 mod fixture;
 
 use datafusion::{
+    datasource::source::DataSourceExec,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
+        union::UnionExec,
     },
     prelude::*,
 };
 use datafusion_sandbox::pipeline::PlanBuilder;
-use datafusion_sandbox::{SAMPLES, combine_alleles, combine_refs, combiner_session_config};
+use datafusion_sandbox::{
+    SAMPLES, combine_alleles, combine_refs, combine_refs_one_scan, combiner_session_config,
+};
 
 use std::sync::Arc;
 
@@ -29,8 +33,9 @@ fn combine_refs_merges_one_partition_per_sample_without_re_sorting() {
     let samples = &SAMPLES[..N_SAMPLES];
     let root = fixture::write_sample_tables(dir.path(), samples);
 
-    let plan =
-        physical_plan(move |ctx| async move { combine_refs::plan(&ctx, &root, samples).await });
+    let plan = physical_plan(combiner_session_config(), move |ctx| async move {
+        combine_refs::plan(&ctx, &root, samples).await
+    });
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
 }
@@ -43,10 +48,38 @@ fn combine_alleles_merges_one_partition_per_sample_without_re_sorting() {
     let samples = &SAMPLES[..N_SAMPLES];
     let root = fixture::write_sample_tables(dir.path(), samples);
 
-    let plan =
-        physical_plan(move |ctx| async move { combine_alleles::plan(&ctx, &root, samples).await });
+    let plan = physical_plan(combiner_session_config(), move |ctx| async move {
+        combine_alleles::plan(&ctx, &root, samples).await
+    });
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+}
+
+/// The earlier reference combiner variant preserves every file partition from
+/// its single shared scan and merges them without re-sorting.
+#[test]
+fn combine_refs_one_scan_merges_one_partition_per_sample_without_re_sorting() {
+    let dir = tempfile::tempdir().unwrap();
+    let samples = &SAMPLES[..N_SAMPLES];
+    let root = fixture::write_sample_tables(dir.path(), samples);
+
+    let plan = physical_plan(
+        combine_refs_one_scan::session_config(),
+        move |ctx| async move { combine_refs_one_scan::plan(&ctx, &root).await },
+    );
+
+    assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+    assert_eq!(
+        nodes_of::<DataSourceExec>(&plan).len(),
+        1,
+        "expected one shared scan:\n{}",
+        displayed(&plan),
+    );
+    assert!(
+        nodes_of::<UnionExec>(&plan).is_empty(),
+        "expected no union of per-sample scans:\n{}",
+        displayed(&plan),
+    );
 }
 
 /// Exactly one sort-preserving merge, no re-sort, and one input partition per
@@ -82,13 +115,16 @@ fn assert_merges_one_partition_per_sample(plan: &Arc<dyn ExecutionPlan>, n_sampl
 /// Builds `plan_builder`'s physical plan, against the same plan builder interface
 /// the pipeline runs one through and under the same session config, since target
 /// partitions is part of what decides plan shape.
-fn physical_plan(plan_builder: impl PlanBuilder) -> Arc<dyn ExecutionPlan> {
+fn physical_plan(
+    session_config: SessionConfig,
+    plan_builder: impl PlanBuilder,
+) -> Arc<dyn ExecutionPlan> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async {
-        let ctx = SessionContext::new_with_config(combiner_session_config());
+        let ctx = SessionContext::new_with_config(session_config);
         plan_builder
             .build(ctx)
             .await
