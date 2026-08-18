@@ -1,13 +1,13 @@
 use datafusion::{
     arrow::{
-        array::Int32Array,
+        array::{Int32Array, UInt64Array},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
     },
     catalog::streaming::StreamingTable,
     common::DataFusionError,
     datasource::{
-        file_format::format_as_file_type,
+        file_format::{FileFormatFactory, format_as_file_type},
         listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
     },
     error::Result,
@@ -19,7 +19,7 @@ use datafusion::{
 };
 use std::{collections::HashMap, sync::Arc};
 use vortex::{VortexSessionDefault, session::VortexSession};
-use vortex_datafusion::{VortexFormat, VortexFormatFactory, VortexTableOptions};
+use vortex_datafusion::VortexFormat;
 
 pub mod combine_alleles;
 pub mod combine_refs;
@@ -174,22 +174,65 @@ pub async fn read_vortex(
     Ok(df)
 }
 
-pub async fn write_vortex(
+/// Writes all rows in `df` to `path` using `format_factory`.
+///
+/// DataFusion's parquet, CSV, and JSON DataFrame writers each implement this
+/// same operation, but DataFusion exposes no generic DataFrame-level
+/// write-with-format entry point. Its public generic seam is
+/// [`LogicalPlanBuilder::copy_to`], one layer below `DataFrame`, so this helper
+/// uses that supported route.
+///
+/// This deliberately covers only appending everything to one path, with empty
+/// copy options and no partition columns. DataFusion's parquet writer also
+/// supports insert options, sort-on-write, and partition columns; those remain
+/// known extension points for this helper.
+pub async fn write(
     df: DataFrame,
     path: &str,
-    writer_options: Option<VortexTableOptions>,
+    format_factory: Arc<dyn FileFormatFactory>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let format = if let Some(vortex_opts) = writer_options {
-        Arc::new(VortexFormatFactory::new().with_options(vortex_opts))
-    } else {
-        Arc::new(VortexFormatFactory::new())
-    };
-
-    let file_type = format_as_file_type(format);
-
+    let file_type = format_as_file_type(format_factory);
     let (session_state, plan) = df.into_parts();
-
     let plan = LogicalPlanBuilder::copy_to(plan, path.into(), file_type, HashMap::new(), vec![])?
         .build()?;
     DataFrame::new(session_state, plan).collect().await
+}
+
+/// Decodes the number of rows produced by a DataFusion copy-to write.
+///
+/// Copy-to returns exactly one batch containing one non-null `UInt64` value in
+/// a column named `count`.
+pub fn write_count(write_result: &[RecordBatch]) -> Result<u64, DataFusionError> {
+    if write_result.len() != 1 {
+        return Err(DataFusionError::Internal(format!(
+            "expected one batch from copy-to, got {}",
+            write_result.len()
+        )));
+    }
+
+    let batch = &write_result[0];
+    if batch.num_columns() != 1 || batch.num_rows() != 1 {
+        return Err(DataFusionError::Internal(format!(
+            "expected one column and one row from copy-to, got {} columns and {} rows",
+            batch.num_columns(),
+            batch.num_rows()
+        )));
+    }
+
+    let schema = batch.schema();
+    let field = schema.field(0);
+    if field.name() != "count" || field.data_type() != &DataType::UInt64 || field.is_nullable() {
+        return Err(DataFusionError::Internal(format!(
+            "expected non-null count: UInt64 from copy-to, got {field:?}"
+        )));
+    }
+
+    let counts = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| {
+            DataFusionError::Internal("copy-to count column was not a UInt64 array".to_string())
+        })?;
+    Ok(counts.value(0))
 }

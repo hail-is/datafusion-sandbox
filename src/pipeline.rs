@@ -1,7 +1,7 @@
 //! The execution side of every pipeline: builds the runtimes and the session,
 //! runs a plan builder against it, and writes the resulting DataFrame as vortex.
 
-use crate::{cpu_runtime::CpuRuntime, write_vortex};
+use crate::{cpu_runtime::CpuRuntime, write};
 
 use datafusion::{
     common::runtime::JoinSet,
@@ -11,7 +11,7 @@ use datafusion::{
     prelude::*,
 };
 use tokio::runtime::Handle;
-use vortex_datafusion::VortexTableOptions;
+use vortex_datafusion::{VortexFormatFactory, VortexTableOptions};
 
 use std::{future::Future, sync::Arc, thread::available_parallelism};
 
@@ -77,7 +77,12 @@ pub fn run(
     let writer_options = options.writer_options;
     let pipeline_task = async move {
         let df = plan_builder.build(ctx).await?;
-        write_vortex(df, &output_path, writer_options).await?;
+        let format = if let Some(vortex_opts) = writer_options {
+            Arc::new(VortexFormatFactory::new().with_options(vortex_opts))
+        } else {
+            Arc::new(VortexFormatFactory::new())
+        };
+        write(df, &output_path, format).await?;
         Ok(()) as Result<()>
     };
 
