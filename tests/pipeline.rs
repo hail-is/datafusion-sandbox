@@ -1,19 +1,47 @@
 use datafusion::error::DataFusionError;
 use datafusion::prelude::{DataFrame, col, lit};
-use datafusion_sandbox::make_range_table;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
+use datafusion_sandbox::{make_range_table, write};
+use std::sync::Arc;
+use vortex_datafusion::VortexFormatFactory;
 
-/// The pipeline entry point is synchronous, runs a plan builder to completion,
-/// and writes its output as vortex.
 #[test]
-fn runs_a_plan_builder_and_writes_output() {
+fn returns_the_pipeline_result_to_the_calling_thread() {
+    let result = pipeline::run(
+        |_ctx| async move { Ok::<_, DataFusionError>(42_u64) },
+        PipelineOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(result, 42);
+}
+
+#[test]
+fn invokes_the_pipeline_on_the_cpu_runtime() {
+    let has_runtime = pipeline::run(
+        |_ctx| {
+            let has_runtime = tokio::runtime::Handle::try_current().is_ok();
+            async move { Ok::<_, DataFusionError>(has_runtime) }
+        },
+        PipelineOptions::default(),
+    )
+    .unwrap();
+
+    assert!(has_runtime);
+}
+
+/// The pipeline entry point is synchronous and runs a pipeline to completion.
+#[test]
+fn runs_a_pipeline_that_writes_output() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("out.vortex");
     let output_path = output.to_str().unwrap().to_string();
 
     pipeline::run(
-        move |ctx| async move { make_range_table(&ctx, 1000, 128) },
-        &output_path,
+        move |ctx| async move {
+            let df = make_range_table(&ctx, 1000, 128)?;
+            write(df, &output_path, Arc::new(VortexFormatFactory::new())).await
+        },
         PipelineOptions::default(),
     )
     .unwrap();
@@ -29,7 +57,6 @@ fn runs_a_plan_builder_and_writes_output() {
 fn surfaces_plan_builder_errors() {
     let err = pipeline::run(
         |_ctx| async move { Err(DataFusionError::Plan("boom".to_string())) as Result<DataFrame, _> },
-        "/tmp/should-never-be-written.vortex",
         PipelineOptions::default(),
     )
     .unwrap_err();
@@ -47,10 +74,10 @@ fn surfaces_errors_from_plans_that_fail_at_execution() {
 
     let err = pipeline::run(
         move |ctx| async move {
-            make_range_table(&ctx, 1000, 128)?
-                .select(vec![(lit(1) / (col("idx") - lit(1))).alias("boom")])
+            let df = make_range_table(&ctx, 1000, 128)?
+                .select(vec![(lit(1) / (col("idx") - lit(1))).alias("boom")])?;
+            write(df, &output_path, Arc::new(VortexFormatFactory::new())).await
         },
-        &output_path,
         PipelineOptions::default(),
     )
     .unwrap_err();
@@ -64,7 +91,6 @@ fn surfaces_errors_from_plans_that_fail_at_execution() {
 fn rejects_object_store_urls_with_unsupported_schemes() {
     let err = pipeline::run(
         move |ctx| async move { make_range_table(&ctx, 10, 8) },
-        "/tmp/should-never-be-written.vortex",
         PipelineOptions {
             object_stores: vec!["s3://some-bucket".to_string()],
             ..Default::default()
@@ -94,8 +120,10 @@ fn runs_single_threaded() {
     let output_path = output.to_str().unwrap().to_string();
 
     pipeline::run(
-        move |ctx| async move { make_range_table(&ctx, 1000, 128) },
-        &output_path,
+        move |ctx| async move {
+            let df = make_range_table(&ctx, 1000, 128)?;
+            write(df, &output_path, Arc::new(VortexFormatFactory::new())).await
+        },
         PipelineOptions {
             threads: 1,
             ..Default::default()

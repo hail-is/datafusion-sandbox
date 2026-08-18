@@ -1,37 +1,20 @@
 //! The execution side of every pipeline: builds the runtimes and the session,
-//! runs a plan builder against it, and writes the resulting DataFrame as vortex.
+//! then runs a pipeline closure to completion.
 
-use crate::{cpu_runtime::CpuRuntime, write};
+use crate::cpu_runtime::CpuRuntime;
 
 use datafusion::{
     common::runtime::JoinSet,
     error::{DataFusionError, Result},
     execution::object_store::ObjectStoreUrl,
     object_store::{client::SpawnedReqwestConnector, gcp::GoogleCloudStorageBuilder},
-    prelude::*,
+    prelude::{SessionConfig, SessionContext},
 };
 use tokio::runtime::Handle;
-use vortex_datafusion::{VortexFormatFactory, VortexTableOptions};
 
 use std::{future::Future, sync::Arc, thread::available_parallelism};
 
-/// A plan builder: an async function from a session to a DataFrame, and nothing
-/// else — no runtime setup, no object store registration, no writing.
-pub trait PlanBuilder: Send + 'static {
-    fn build(self, ctx: SessionContext) -> impl Future<Output = Result<DataFrame>> + Send + 'static;
-}
-
-impl<F, Fut> PlanBuilder for F
-where
-    F: FnOnce(SessionContext) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<DataFrame>> + Send + 'static,
-{
-    fn build(self, ctx: SessionContext) -> impl Future<Output = Result<DataFrame>> + Send + 'static {
-        self(ctx)
-    }
-}
-
-/// Everything a pipeline needs besides the plan itself.
+/// Everything the runner needs besides the pipeline closure itself.
 pub struct PipelineOptions {
     /// Number of worker threads for each runtime. 1 runs on current-thread
     /// runtimes, for timing single-threaded performance.
@@ -40,8 +23,6 @@ pub struct PipelineOptions {
     /// Base URLs of the object stores to register on the session, e.g.
     /// "gs://my-bucket". Only gs:// URLs are supported.
     pub object_stores: Vec<String>,
-    /// Vortex writer options for the output file. None uses the writer defaults.
-    pub writer_options: Option<VortexTableOptions>,
 }
 
 impl Default for PipelineOptions {
@@ -50,21 +31,23 @@ impl Default for PipelineOptions {
             threads: available_parallelism().map(|n| n.get()).unwrap_or(1),
             session_config: SessionConfig::new(),
             object_stores: Vec::new(),
-            writer_options: None,
         }
     }
 }
 
-/// Runs `plan_builder` to completion and writes its DataFrame to `output_path`.
+/// Runs `pipeline` to completion and returns its result to the calling thread.
 ///
 /// Owns both runtimes: an IO runtime for object store requests, and a separate
 /// CPU runtime the plan executes on, so that IO and CPU-bound work don't
 /// contend for the same threads.
-pub fn run(
-    plan_builder: impl PlanBuilder,
-    output_path: &str,
+pub fn run<T, Fut>(
+    pipeline: impl FnOnce(SessionContext) -> Fut + Send + 'static,
     options: PipelineOptions,
-) -> Result<()> {
+) -> Result<T>
+where
+    T: Send + 'static,
+    Fut: Future<Output = Result<T>> + Send + 'static,
+{
     let io_runtime = runtime_builder(options.threads).enable_all().build()?;
     let cpu_runtime = CpuRuntime::try_new(options.threads)?;
 
@@ -73,25 +56,12 @@ pub fn run(
         register_object_store(&ctx, base_url, io_runtime.handle())?;
     }
 
-    let output_path = output_path.to_string();
-    let writer_options = options.writer_options;
-    let pipeline_task = async move {
-        let df = plan_builder.build(ctx).await?;
-        let format = if let Some(vortex_opts) = writer_options {
-            Arc::new(VortexFormatFactory::new().with_options(vortex_opts))
-        } else {
-            Arc::new(VortexFormatFactory::new())
-        };
-        write(df, &output_path, format).await?;
-        Ok(()) as Result<()>
-    };
-
     io_runtime.block_on(async {
         let mut join_set = JoinSet::new();
-        join_set.spawn_on(pipeline_task, cpu_runtime.handle());
+        join_set.spawn_on(async move { pipeline(ctx).await }, cpu_runtime.handle());
         match join_set.join_next().await {
             Some(result) => result.map_err(|e| DataFusionError::External(Box::new(e)))?,
-            None => Ok(()),
+            None => unreachable!("the pipeline join set always contains one task"),
         }
     })
 }

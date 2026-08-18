@@ -9,6 +9,7 @@ mod fixture;
 
 use datafusion::{
     datasource::source::DataSourceExec,
+    error::Result,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
@@ -16,12 +17,11 @@ use datafusion::{
     },
     prelude::*,
 };
-use datafusion_sandbox::pipeline::PlanBuilder;
 use datafusion_sandbox::{
     SAMPLES, combine_alleles, combine_refs, combine_refs_one_scan, combiner_session_config,
 };
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 const N_SAMPLES: usize = 4;
 
@@ -112,21 +112,21 @@ fn assert_merges_one_partition_per_sample(plan: &Arc<dyn ExecutionPlan>, n_sampl
     );
 }
 
-/// Builds `plan_builder`'s physical plan, against the same plan builder interface
-/// the pipeline runs one through and under the same session config, since target
-/// partitions is part of what decides plan shape.
-fn physical_plan(
-    session_config: SessionConfig,
-    plan_builder: impl PlanBuilder,
-) -> Arc<dyn ExecutionPlan> {
+/// Builds `plan_builder`'s physical plan under the given session config, since
+/// target partitions is part of what decides plan shape. Plan-shape assertions
+/// deliberately stop at the plan builder, before execution.
+fn physical_plan<F, Fut>(session_config: SessionConfig, plan_builder: F) -> Arc<dyn ExecutionPlan>
+where
+    F: FnOnce(SessionContext) -> Fut,
+    Fut: Future<Output = Result<DataFrame>>,
+{
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     rt.block_on(async {
         let ctx = SessionContext::new_with_config(session_config);
-        plan_builder
-            .build(ctx)
+        plan_builder(ctx)
             .await
             .unwrap()
             .create_physical_plan()

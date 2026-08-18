@@ -1,11 +1,10 @@
 use datafusion::physical_plan::{ExecutionPlan, execute_stream};
 use datafusion::prelude::*;
-use datafusion_sandbox::pipeline::PlanBuilder;
 use datafusion_sandbox::*;
 use divan::Bencher;
 use divan::counter::ItemsCount;
 use futures_util::stream::StreamExt;
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 use tokio::runtime::LocalRuntime as Runtime;
 
 fn main() {
@@ -28,14 +27,17 @@ fn session_context() -> SessionContext {
 const BATCH_SIZES: &[u32] = &[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
 const N_ROWS: u32 = 2 ^ 18;
 
-fn run_benchmark(bencher: Bencher, plan_builder: impl PlanBuilder) {
+fn run_benchmark<F, Fut>(bencher: Bencher, plan_builder: F)
+where
+    F: FnOnce(SessionContext) -> Fut,
+    Fut: Future<Output = datafusion::error::Result<DataFrame>>,
+{
     // using a LocalRuntime, again because we're running with single core
     let rt = Runtime::new().unwrap();
     let ctx = session_context();
 
     let physical_plan = rt.block_on(async {
-        plan_builder
-            .build(ctx.clone())
+        plan_builder(ctx.clone())
             .await
             .unwrap()
             .create_physical_plan()

@@ -1,9 +1,10 @@
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::prelude::*;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
-use datafusion_sandbox::{VortexReadOptions, make_range_table, read_vortex};
+use datafusion_sandbox::{VortexReadOptions, make_range_table, read_vortex, write};
 
 use std::sync::Arc;
+use vortex_datafusion::VortexFormatFactory;
 
 const N_ROWS: u32 = 1000;
 
@@ -11,9 +12,12 @@ const N_ROWS: u32 = 1000;
 fn write_fixture(dir: &tempfile::TempDir) -> String {
     let output = dir.path().join("fixture.vortex");
     let output_path = output.to_str().unwrap().to_string();
+    let write_path = output_path.clone();
     pipeline::run(
-        move |ctx| async move { make_range_table(&ctx, N_ROWS, 128) },
-        &output_path,
+        move |ctx| async move {
+            let df = make_range_table(&ctx, N_ROWS, 128)?;
+            write(df, &write_path, Arc::new(VortexFormatFactory::new())).await
+        },
         PipelineOptions::default(),
     )
     .unwrap();
