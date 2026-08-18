@@ -1,3 +1,4 @@
+use datafusion::datasource::file_format::parquet::ParquetFormatFactory;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::{DataFrame, col, lit};
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
@@ -41,6 +42,25 @@ fn runs_a_pipeline_that_writes_output() {
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
             write(df, &output_path, Arc::new(VortexFormatFactory::new())).await
+        },
+        PipelineOptions::default(),
+    )
+    .unwrap();
+
+    assert!(output.exists());
+    assert!(output.metadata().unwrap().len() > 0);
+}
+
+#[test]
+fn runs_a_pipeline_that_writes_parquet_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("out.parquet");
+    let output_path = output.to_str().unwrap().to_string();
+
+    pipeline::run(
+        move |ctx| async move {
+            let df = make_range_table(&ctx, 1000, 128)?;
+            write(df, &output_path, Arc::new(ParquetFormatFactory::new())).await
         },
         PipelineOptions::default(),
     )
