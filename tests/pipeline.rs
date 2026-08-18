@@ -1,3 +1,4 @@
+use arrow::util::pretty::pretty_format_batches;
 use datafusion::datasource::file_format::parquet::ParquetFormatFactory;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::{DataFrame, col, lit};
@@ -15,6 +16,24 @@ fn returns_the_pipeline_result_to_the_calling_thread() {
     .unwrap();
 
     assert_eq!(result, 42);
+}
+
+#[test]
+fn returns_explain_output_without_writing() {
+    let explained_plan: String = pipeline::run(
+        |ctx| async move {
+            let df = make_range_table(&ctx, 1000, 128)?;
+            let batches = df.explain(false, false)?.collect().await?;
+            Ok::<_, DataFusionError>(pretty_format_batches(&batches)?.to_string())
+        },
+        PipelineOptions::default(),
+    )
+    .unwrap();
+
+    assert!(
+        explained_plan.contains("StreamingTableExec"),
+        "got:\n{explained_plan}"
+    );
 }
 
 #[test]
