@@ -2,7 +2,9 @@ use clap::{Parser, Subcommand};
 use datafusion::error::Result;
 
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
-use datafusion_sandbox::{SAMPLES, combine_alleles, combine_refs, combiner_session_config, write};
+use datafusion_sandbox::{
+    SAMPLES, combine_alleles, combine_refs, combiner_session_config, write, write_count,
+};
 use std::sync::Arc;
 use vortex_datafusion::VortexFormatFactory;
 
@@ -37,7 +39,7 @@ enum Command {
 fn main() -> Result<()> {
     let Cli { command, threads } = Cli::parse();
 
-    match command {
+    let write_result = match command {
         Command::CombineRefs { path, output } => {
             let options = options_for(&path, &output, threads);
             pipeline::run(
@@ -46,8 +48,7 @@ fn main() -> Result<()> {
                     write(df, &output, Arc::new(VortexFormatFactory::new())).await
                 },
                 options,
-            )
-            .map(|_| ())
+            )?
         }
         Command::CombineAlleles { path, output } => {
             let options = options_for(&path, &output, threads);
@@ -57,10 +58,11 @@ fn main() -> Result<()> {
                     write(df, &output, Arc::new(VortexFormatFactory::new())).await
                 },
                 options,
-            )
-            .map(|_| ())
+            )?
         }
-    }
+    };
+    println!("{}", write_count(&write_result)?);
+    Ok(())
 }
 
 /// Pipeline options for a combiner reading from `input_path` and writing to `output_path`: the
