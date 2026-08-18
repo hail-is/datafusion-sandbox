@@ -11,8 +11,10 @@ use datafusion::{
     prelude::*,
 };
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
+use datafusion_sandbox::write;
 
 use std::{path::Path, sync::Arc};
+use vortex_datafusion::VortexFormatFactory;
 
 /// The single contig the fixture writes, so that each sample is exactly one file
 /// and a plan's partition count is its sample count.
@@ -41,8 +43,10 @@ pub fn write_sample_tables(dir: &Path, samples: &[&str]) -> String {
             .to_string();
         let batch = sample_batch();
         pipeline::run(
-            move |ctx: SessionContext| async move { ctx.read_batch(batch) },
-            &path,
+            move |ctx: SessionContext| async move {
+                let df = ctx.read_batch(batch)?;
+                write(df, &path, Arc::new(VortexFormatFactory::new())).await
+            },
             PipelineOptions {
                 threads: 1,
                 ..Default::default()

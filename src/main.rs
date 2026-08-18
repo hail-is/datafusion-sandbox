@@ -2,7 +2,9 @@ use clap::{Parser, Subcommand};
 use datafusion::error::Result;
 
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
-use datafusion_sandbox::{SAMPLES, combine_alleles, combine_refs, combiner_session_config};
+use datafusion_sandbox::{SAMPLES, combine_alleles, combine_refs, combiner_session_config, write};
+use std::sync::Arc;
+use vortex_datafusion::VortexFormatFactory;
 
 #[derive(Parser)]
 #[command(about = "Run hail-style pipelines built on datafusion")]
@@ -39,18 +41,24 @@ fn main() -> Result<()> {
         Command::CombineRefs { path, output } => {
             let options = options_for(&path, &output, threads);
             pipeline::run(
-                move |ctx| async move { combine_refs::plan(&ctx, &path, SAMPLES).await },
-                &output,
+                move |ctx| async move {
+                    let df = combine_refs::plan(&ctx, &path, SAMPLES).await?;
+                    write(df, &output, Arc::new(VortexFormatFactory::new())).await
+                },
                 options,
             )
+            .map(|_| ())
         }
         Command::CombineAlleles { path, output } => {
             let options = options_for(&path, &output, threads);
             pipeline::run(
-                move |ctx| async move { combine_alleles::plan(&ctx, &path, SAMPLES).await },
-                &output,
+                move |ctx| async move {
+                    let df = combine_alleles::plan(&ctx, &path, SAMPLES).await?;
+                    write(df, &output, Arc::new(VortexFormatFactory::new())).await
+                },
                 options,
             )
+            .map(|_| ())
         }
     }
 }

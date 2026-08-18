@@ -9,8 +9,12 @@ shape of a plan is itself a first-class subject here, not just its results.
 ### Pipelines
 
 **Pipeline**:
-A named end-to-end query over genomics data, from input tables through to written output. Each is
-exposed as one CLI subcommand.
+A named end-to-end query over genomics data, from input tables through to its consumed result. A
+pipeline is the closure the runner executes: it takes a session, runs to completion on the
+pipeline's runtimes, and returns what it produced to the calling thread — a written file's row
+counts, collected batches, or an explained plan. Most are exposed as CLI subcommands, but fixture
+writers and tests also construct pipelines. The result is generic because it crosses runtimes; it
+is not a DataFrame tied to work that has yet to execute.
 _Avoid_: job, query (too narrow — a pipeline includes its execution setup), driver
 
 **Combiner**:
@@ -19,9 +23,11 @@ and the allele combiner are the two we have.
 _Avoid_: merger, joiner
 
 **Plan builder**:
-The part of a pipeline that constructs its DataFrame against a session, and nothing else — no
-runtime setup, no object store registration, no writing. Every plan builder in the repo satisfies
-one interface, which is what lets the same pipeline be run, benchmarked, or asserted on.
+The async plan function each combiner conventionally exposes, from a session, path, and samples to
+a DataFrame. It constructs the plan and nothing else — no runtime setup, object store registration,
+writing, or execution. Plan-shape tests assert on this part because it deliberately stops before
+execution. Keeping writing out is what distinguishes a plan builder from a pipeline; this is a
+convention, not a shared interface.
 _Avoid_: query builder, factory
 
 **Plan shape**:
