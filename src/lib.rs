@@ -3,6 +3,7 @@ use datafusion::{
         array::{Int32Array, UInt64Array},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
+        util::pretty::pretty_format_batches,
     },
     catalog::streaming::StreamingTable,
     common::DataFusionError,
@@ -20,7 +21,7 @@ use datafusion::{
     physical_plan::{stream::RecordBatchStreamAdapter, streaming::PartitionStream},
     prelude::*,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc};
 use vortex::{VortexSessionDefault, session::VortexSession};
 use vortex_datafusion::VortexFormat;
 
@@ -40,6 +41,29 @@ pub const SAMPLES: &[&str] = &[
     "NA19456", "HG00590", "HG01383", "HG00320", "HG04001", "NA20796", "HG00323", "HG01384",
     "NA18613", "NA20802",
 ];
+
+/// What a CLI pipeline hands back to its caller.
+pub enum Outcome {
+    /// The number of rows written to an output path.
+    RowsWritten(u64),
+    /// Record batches collected in memory.
+    Batches(Vec<RecordBatch>),
+    /// A plain or analyzed plan rendered as text.
+    Plan(String),
+}
+
+impl fmt::Display for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RowsWritten(count) => write!(f, "{count}"),
+            Self::Batches(batches) => {
+                let formatted = pretty_format_batches(batches).map_err(|_| fmt::Error)?;
+                write!(f, "{formatted}")
+            }
+            Self::Plan(plan) => f.write_str(plan),
+        }
+    }
+}
 
 /// The session config the combiners' plan shape depends on. Forcing one partition
 /// per input scan is what leaves one partition per sample going into the
