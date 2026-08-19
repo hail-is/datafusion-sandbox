@@ -23,11 +23,12 @@ and the allele combiner are the two we have.
 _Avoid_: merger, joiner
 
 **Plan builder**:
-The async plan function each combiner conventionally exposes, from a session, path, and samples to
-a DataFrame. It constructs the plan and nothing else — no runtime setup, object store registration,
-writing, or execution. Plan-shape tests assert on this part because it deliberately stops before
-execution. Keeping writing out is what distinguishes a plan builder from a pipeline; this is a
-convention, not a shared interface.
+The async function each combiner exposes to construct its DataFrame. The caller chooses the input
+file format; the combiner owns the locus ordering because its plan shape depends on that ordering.
+It constructs the plan and nothing else — no runtime setup, object store registration, writing, or
+execution. Plan-shape tests assert on this part because it deliberately stops before execution.
+Keeping writing out is what distinguishes a plan builder from a pipeline; this is a convention, not
+a shared interface.
 _Avoid_: query builder, factory
 
 **Plan shape**:

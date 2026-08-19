@@ -19,11 +19,8 @@ use vortex_datafusion::VortexFormatFactory;
 
 /// File formats supported by the shared sample-table fixture.
 #[derive(Clone, Copy)]
-pub enum FixtureFileFormat {
+enum FixtureFileFormat {
     Vortex,
-    // Each integration test crate compiles this shared module separately, and
-    // the CLI tests only write Vortex fixtures.
-    #[allow(dead_code)]
     Parquet,
 }
 
@@ -46,9 +43,7 @@ const ROWS_PER_SAMPLE: i32 = 8;
 
 /// Writes one vortex table per sample under `dir`, as
 /// `s=<sample>/contig=<contig>/fixture.vortex`, with rows in locus order.
-/// Returns the root path the combiners read. Existing fixture callers use this
-/// convenience wrapper; format-specific tests use
-/// [`write_sample_tables_with_format`].
+/// Returns the root path the combiners read.
 ///
 /// Every sample covers the same loci with the same alleles, so a plan that
 /// de-duplicates across samples has something to de-duplicate.
@@ -56,9 +51,18 @@ pub fn write_sample_tables(dir: &Path, samples: &[&str]) -> String {
     write_sample_tables_with_format(dir, samples, FixtureFileFormat::Vortex, "fixture.vortex")
 }
 
+/// The parquet counterpart of [`write_sample_tables`], laid out identically so
+/// the two formats' plan shapes are compared over the same data.
+// Each integration test crate compiles this shared module separately, and the
+// CLI tests only write vortex fixtures.
+#[allow(dead_code)]
+pub fn write_parquet_sample_tables(dir: &Path, samples: &[&str]) -> String {
+    write_sample_tables_with_format(dir, samples, FixtureFileFormat::Parquet, "fixture.parquet")
+}
+
 /// Writes the sample tables in `file_format`, using `filename` inside every
 /// sample and contig directory.
-pub fn write_sample_tables_with_format(
+fn write_sample_tables_with_format(
     dir: &Path,
     samples: &[&str],
     file_format: FixtureFileFormat,
