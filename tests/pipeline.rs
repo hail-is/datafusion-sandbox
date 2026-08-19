@@ -1,4 +1,4 @@
-use arrow::util::pretty::pretty_format_batches;
+use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::datasource::file_format::parquet::ParquetFormatFactory;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::{DataFrame, col, lit};

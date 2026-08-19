@@ -11,11 +11,16 @@ shape of a plan is itself a first-class subject here, not just its results.
 **Pipeline**:
 A named end-to-end query over genomics data, from input tables through to its consumed result. A
 pipeline is the closure the runner executes: it takes a session, runs to completion on the
-pipeline's runtimes, and returns what it produced to the calling thread — a written file's row
-counts, collected batches, or an explained plan. Most are exposed as CLI subcommands, but fixture
-writers and tests also construct pipelines. The result is generic because it crosses runtimes; it
-is not a DataFrame tied to work that has yet to execute.
+pipeline's runtimes, and returns what it produced to the calling thread. CLI combiners return an
+Outcome containing written row counts, collected batches, or a plain or analyzed plan; fixture
+writers and tests also construct pipelines with other result types. A pipeline result is not a
+DataFrame tied to work that has yet to execute.
 _Avoid_: job, query (too narrow — a pipeline includes its execution setup), driver
+
+**Outcome**:
+What a CLI pipeline hands back after it runs: rows written, collected batches, or a plan rendered
+as text. Both plain explain and explain-analyze produce the rendered-plan case.
+_Avoid_: result (too broad), output (ambiguous with a written artifact)
 
 **Combiner**:
 A pipeline that merges per-sample tables into a single locus-ordered table. The reference combiner
