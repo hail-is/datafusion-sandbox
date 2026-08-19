@@ -8,8 +8,10 @@
 mod fixture;
 
 use datafusion::{
+    arrow::datatypes::DataType,
     datasource::source::DataSourceExec,
     error::Result,
+    logical_expr::{LogicalPlan, SortExpr, logical_plan::Union},
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
@@ -24,6 +26,27 @@ use datafusion_sandbox::{
 use std::{future::Future, sync::Arc};
 
 const N_SAMPLES: usize = 4;
+
+/// DataFusion's parquet reader preserves the declared locus ordering through
+/// the reference combiner's union, so the requested ordering needs a merge but
+/// no re-sort.
+#[test]
+fn parquet_read_merges_one_partition_per_sample_without_re_sorting() {
+    let dir = tempfile::tempdir().unwrap();
+    let samples = &SAMPLES[..N_SAMPLES];
+    let root = fixture::write_sample_tables_with_format(
+        dir.path(),
+        samples,
+        fixture::FixtureFileFormat::Parquet,
+        "fixture.parquet",
+    );
+
+    let plan = physical_plan(combiner_session_config(), move |ctx| async move {
+        parquet_reference_plan(&ctx, &root, samples).await
+    });
+
+    assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+}
 
 /// The reference combiner merges its per-sample inputs rather than re-sorting
 /// them.
@@ -80,6 +103,49 @@ fn combine_refs_one_scan_merges_one_partition_per_sample_without_re_sorting() {
         "expected no union of per-sample scans:\n{}",
         displayed(&plan),
     );
+}
+
+// TODO(#27): Delete this copy when the plan builders take the input format
+// type. The parquet test should call `combine_refs::plan` after that change.
+async fn parquet_reference_plan(
+    ctx: &SessionContext,
+    table_path: &str,
+    samples: &[&str],
+) -> Result<DataFrame> {
+    let locus_ordering = locus_ordering();
+    let read_options = ParquetReadOptions::default()
+        .table_partition_cols(vec![
+            ("s".to_string(), DataType::Utf8),
+            ("contig".to_string(), DataType::Utf8),
+        ])
+        .file_sort_order(vec![locus_ordering.clone()]);
+    let df = ctx
+        .read_parquet(
+            format!("{}/", table_path.trim_end_matches('/')),
+            read_options,
+        )
+        .await?;
+
+    let plans = samples
+        .iter()
+        .map(|sample| {
+            Ok(Arc::new(
+                df.clone()
+                    .filter(col("s").eq(lit(*sample)))?
+                    .into_unoptimized_plan(),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let plan = LogicalPlan::Union(Union::try_new(plans)?);
+
+    DataFrame::new(ctx.state(), plan).sort(locus_ordering)
+}
+
+fn locus_ordering() -> Vec<SortExpr> {
+    vec![
+        col("contig").sort(true, false),
+        col("position").sort(true, false),
+    ]
 }
 
 /// Exactly one sort-preserving merge, no re-sort, and one input partition per

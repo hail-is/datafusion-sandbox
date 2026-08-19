@@ -8,6 +8,7 @@ use datafusion::{
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     },
+    datasource::file_format::{FileFormatFactory, parquet::ParquetFormatFactory},
     prelude::*,
 };
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
@@ -15,6 +16,25 @@ use datafusion_sandbox::write;
 
 use std::{path::Path, sync::Arc};
 use vortex_datafusion::VortexFormatFactory;
+
+/// File formats supported by the shared sample-table fixture.
+#[derive(Clone, Copy)]
+pub enum FixtureFileFormat {
+    Vortex,
+    // Each integration test crate compiles this shared module separately, and
+    // the CLI tests only write Vortex fixtures.
+    #[allow(dead_code)]
+    Parquet,
+}
+
+impl FixtureFileFormat {
+    fn factory(self) -> Arc<dyn FileFormatFactory> {
+        match self {
+            Self::Vortex => Arc::new(VortexFormatFactory::new()),
+            Self::Parquet => Arc::new(ParquetFormatFactory::new()),
+        }
+    }
+}
 
 /// The single contig the fixture writes, so that each sample is exactly one file
 /// and a plan's partition count is its sample count.
@@ -24,19 +44,32 @@ const CONTIG: &str = "chr22";
 /// batch is a real sorted run.
 const ROWS_PER_SAMPLE: i32 = 8;
 
-/// Writes one table per sample under `dir`, as
-/// `s=<sample>/contig=<contig>/<sample>.vortex`, with rows in locus order.
-/// Returns the root path the combiners read.
+/// Writes one vortex table per sample under `dir`, as
+/// `s=<sample>/contig=<contig>/fixture.vortex`, with rows in locus order.
+/// Returns the root path the combiners read. Existing fixture callers use this
+/// convenience wrapper; format-specific tests use
+/// [`write_sample_tables_with_format`].
 ///
 /// Every sample covers the same loci with the same alleles, so a plan that
 /// de-duplicates across samples has something to de-duplicate.
 pub fn write_sample_tables(dir: &Path, samples: &[&str]) -> String {
+    write_sample_tables_with_format(dir, samples, FixtureFileFormat::Vortex, "fixture.vortex")
+}
+
+/// Writes the sample tables in `file_format`, using `filename` inside every
+/// sample and contig directory.
+pub fn write_sample_tables_with_format(
+    dir: &Path,
+    samples: &[&str],
+    file_format: FixtureFileFormat,
+    filename: &str,
+) -> String {
     let root = dir.join("samples");
     for sample in samples {
         let path = root
             .join(format!("s={sample}"))
             .join(format!("contig={CONTIG}"));
-        let path = path.join(format!("{sample}.vortex"));
+        let path = path.join(filename);
         let path = path
             .to_str()
             .expect("fixture path is valid UTF-8")
@@ -45,7 +78,7 @@ pub fn write_sample_tables(dir: &Path, samples: &[&str]) -> String {
         pipeline::run(
             move |ctx: SessionContext| async move {
                 let df = ctx.read_batch(batch)?;
-                write(df, &path, Arc::new(VortexFormatFactory::new())).await
+                write(df, &path, file_format.factory()).await
             },
             PipelineOptions {
                 threads: 1,
