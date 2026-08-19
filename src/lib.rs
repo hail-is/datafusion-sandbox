@@ -7,11 +7,14 @@ use datafusion::{
     catalog::streaming::StreamingTable,
     common::DataFusionError,
     datasource::{
-        file_format::{FileFormatFactory, format_as_file_type},
-        listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
+        file_format::{FileFormat, FileFormatFactory, format_as_file_type},
+        listing::{ListingOptions, ListingTable, ListingTableConfig},
     },
     error::Result,
-    execution::{SendableRecordBatchStream, TaskContext},
+    execution::{
+        SendableRecordBatchStream, TaskContext,
+        context::{DataFilePaths, SessionConfig},
+    },
     functions_aggregate::count::count_all,
     logical_expr::{SortExpr, col, logical_plan::LogicalPlanBuilder},
     physical_plan::{stream::RecordBatchStreamAdapter, streaming::PartitionStream},
@@ -134,44 +137,50 @@ pub fn make_table_range_join(
     left.join(right, JoinType::Inner, &["idx"], &["idx2"], None)
 }
 
-// TODO: try implementing ReadOptions for this
-#[derive(Default, Clone)]
-pub struct VortexReadOptions {
-    pub file_sort_order: Vec<Vec<SortExpr>>,
-    pub table_partition_cols: Vec<(String, DataType)>,
-    pub schema: Option<SchemaRef>,
+/// The vortex file format to read through, on a default session.
+///
+/// Constructing it takes a [`VortexSession`], and every caller here wants the
+/// same default one; parquet's format needs no such decision, so it has no
+/// counterpart helper.
+pub fn vortex_format() -> Arc<dyn FileFormat> {
+    Arc::new(VortexFormat::new(VortexSession::default()))
 }
 
-impl VortexReadOptions {
-    fn to_listing_options(&self) -> ListingOptions {
-        let vortex_session = VortexSession::default();
-        let file_format = Arc::new(VortexFormat::new(vortex_session));
-
-        ListingOptions::new(file_format)
-            .with_file_extension(".vortex")
-            .with_table_partition_cols(self.table_partition_cols.clone())
-            .with_file_sort_order(self.file_sort_order.clone())
-    }
-}
-
-pub async fn read_vortex(
+/// Reads one or more file collections as a single table.
+///
+/// Takes the same listing options and optional schema that
+/// [`SessionContext::register_listing_table`] does: `listing_options` carries
+/// the file format along with the sort order and partition columns declared on
+/// the files, and `schema` is inferred from the files when `None`.
+///
+/// This exists because DataFusion keeps its generic read entry point private,
+/// exposing only per-format wrappers. It carries over that entry point's
+/// file-statistics cache, so benchmark numbers stay comparable with
+/// DataFusion's own readers rather than running uncached. It drops the
+/// file-extension check, which DataFusion skips for collection paths anyway,
+/// and every path here is a collection.
+pub async fn read<P: DataFilePaths>(
     ctx: &SessionContext,
-    table_path: impl AsRef<str>,
-    options: VortexReadOptions,
+    table_paths: P,
+    listing_options: ListingOptions,
+    schema: Option<SchemaRef>,
 ) -> Result<DataFrame> {
-    let table_path = ListingTableUrl::parse(table_path)?;
-    let vortex_opts = options.to_listing_options();
-    let resolved_schema = match options.schema {
-        Some(s) => s,
-        None => vortex_opts.infer_schema(&ctx.state(), &table_path).await?,
+    let table_paths = table_paths.to_urls()?;
+    if table_paths.is_empty() {
+        return Err(DataFusionError::Execution(
+            "No table paths were provided".to_string(),
+        ));
+    }
+    let config =
+        ListingTableConfig::new_with_multi_paths(table_paths).with_listing_options(listing_options);
+    let config = match schema {
+        Some(schema) => config.with_schema(schema),
+        None => config.infer_schema(&ctx.state()).await?,
     };
-    let config = ListingTableConfig::new(table_path)
-        .with_listing_options(vortex_opts)
-        .with_schema(resolved_schema);
-    let table = ListingTable::try_new(config)?;
-    let df = ctx.read_table(Arc::new(table))?;
+    let table = ListingTable::try_new(config)?
+        .with_cache(ctx.runtime_env().cache_manager.get_file_statistic_cache());
 
-    Ok(df)
+    ctx.read_table(Arc::new(table))
 }
 
 /// Writes all rows in `df` to `path` using `format_factory`.

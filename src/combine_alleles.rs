@@ -1,7 +1,8 @@
-use crate::{VortexReadOptions, read_vortex};
+use crate::read;
 
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema},
+    datasource::{file_format::FileFormat, listing::ListingOptions},
     error::Result,
     functions_window::rank::rank,
     logical_expr::{LogicalPlan, SortExpr, logical_plan::Union},
@@ -24,24 +25,35 @@ fn locus_ordering() -> Vec<SortExpr> {
 /// Builds the plan combining the alleles of all `samples` under `table_path`, which is expected
 /// to contain one directory per sample, of the form "s=HG123456". Produces the distinct set of
 /// alleles at each locus, ranked within the locus.
-pub async fn plan(ctx: &SessionContext, table_path: &str, samples: &[&str]) -> Result<DataFrame> {
+pub async fn plan(
+    ctx: &SessionContext,
+    table_path: &str,
+    samples: &[&str],
+    file_format: Arc<dyn FileFormat>,
+) -> Result<DataFrame> {
     let table_path = table_path.trim_end_matches('/');
+
+    let listing_options = ListingOptions::new(file_format)
+        .with_file_sort_order(vec![locus_ordering()])
+        .with_table_partition_cols(vec![("contig".to_string(), DataType::Utf8)]);
 
     // Note: leaving the schema to be inferred infers Utf8View for "alleles", which runs into what
     // I suspect is a bug, the effect of which is the query planner doesn't think the input file groups
     // are sorted.
-    let read_opts = VortexReadOptions {
-        file_sort_order: vec![locus_ordering()],
-        schema: Some(Arc::new(Schema::new(vec![
-            Field::new("position", DataType::Int32, false),
-            Field::new("alleles", DataType::Utf8, false),
-        ]))),
-        table_partition_cols: vec![("contig".to_string(), DataType::Utf8)],
-    };
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("position", DataType::Int32, false),
+        Field::new("alleles", DataType::Utf8, false),
+    ]));
 
     let mut lps = Vec::with_capacity(samples.len());
     for s in samples {
-        let df = read_vortex(ctx, format!("{table_path}/s={s}/"), read_opts.clone()).await?;
+        let df = read(
+            ctx,
+            format!("{table_path}/s={s}/"),
+            listing_options.clone(),
+            Some(Arc::clone(&schema)),
+        )
+        .await?;
         lps.push(Arc::new(df.into_unoptimized_plan()));
     }
     let lp = LogicalPlan::Union(Union::try_new(lps)?);

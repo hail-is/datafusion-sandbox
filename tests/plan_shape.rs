@@ -8,10 +8,11 @@
 mod fixture;
 
 use datafusion::{
-    arrow::datatypes::DataType,
-    datasource::source::DataSourceExec,
+    datasource::{
+        file_format::{FileFormat, parquet::ParquetFormat},
+        source::DataSourceExec,
+    },
     error::Result,
-    logical_expr::{LogicalPlan, SortExpr, logical_plan::Union},
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
@@ -21,6 +22,7 @@ use datafusion::{
 };
 use datafusion_sandbox::{
     SAMPLES, combine_alleles, combine_refs, combine_refs_one_scan, combiner_session_config,
+    vortex_format,
 };
 
 use std::{future::Future, sync::Arc};
@@ -31,18 +33,13 @@ const N_SAMPLES: usize = 4;
 /// the reference combiner's union, so the requested ordering needs a merge but
 /// no re-sort.
 #[test]
-fn parquet_read_merges_one_partition_per_sample_without_re_sorting() {
+fn combine_refs_parquet_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
     let samples = &SAMPLES[..N_SAMPLES];
-    let root = fixture::write_sample_tables_with_format(
-        dir.path(),
-        samples,
-        fixture::FixtureFileFormat::Parquet,
-        "fixture.parquet",
-    );
+    let root = fixture::write_parquet_sample_tables(dir.path(), samples);
 
     let plan = physical_plan(combiner_session_config(), move |ctx| async move {
-        parquet_reference_plan(&ctx, &root, samples).await
+        combine_refs::plan(&ctx, &root, samples, parquet_format()).await
     });
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
@@ -51,13 +48,29 @@ fn parquet_read_merges_one_partition_per_sample_without_re_sorting() {
 /// The reference combiner merges its per-sample inputs rather than re-sorting
 /// them.
 #[test]
-fn combine_refs_merges_one_partition_per_sample_without_re_sorting() {
+fn combine_refs_vortex_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
     let samples = &SAMPLES[..N_SAMPLES];
     let root = fixture::write_sample_tables(dir.path(), samples);
 
     let plan = physical_plan(combiner_session_config(), move |ctx| async move {
-        combine_refs::plan(&ctx, &root, samples).await
+        combine_refs::plan(&ctx, &root, samples, vortex_format()).await
+    });
+
+    assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+}
+
+/// DataFusion's parquet reader preserves the declared locus ordering through the
+/// allele combiner's union, and its de-duplication and ranking don't reintroduce
+/// a sort.
+#[test]
+fn combine_alleles_parquet_merges_one_partition_per_sample_without_re_sorting() {
+    let dir = tempfile::tempdir().unwrap();
+    let samples = &SAMPLES[..N_SAMPLES];
+    let root = fixture::write_parquet_sample_tables(dir.path(), samples);
+
+    let plan = physical_plan(combiner_session_config(), move |ctx| async move {
+        combine_alleles::plan(&ctx, &root, samples, parquet_format()).await
     });
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
@@ -66,13 +79,13 @@ fn combine_refs_merges_one_partition_per_sample_without_re_sorting() {
 /// The allele combiner merges its per-sample inputs rather than re-sorting them,
 /// and the de-duplication and ranking it stacks on top don't reintroduce a sort.
 #[test]
-fn combine_alleles_merges_one_partition_per_sample_without_re_sorting() {
+fn combine_alleles_vortex_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
     let samples = &SAMPLES[..N_SAMPLES];
     let root = fixture::write_sample_tables(dir.path(), samples);
 
     let plan = physical_plan(combiner_session_config(), move |ctx| async move {
-        combine_alleles::plan(&ctx, &root, samples).await
+        combine_alleles::plan(&ctx, &root, samples, vortex_format()).await
     });
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
@@ -81,71 +94,55 @@ fn combine_alleles_merges_one_partition_per_sample_without_re_sorting() {
 /// The earlier reference combiner variant preserves every file partition from
 /// its single shared scan and merges them without re-sorting.
 #[test]
-fn combine_refs_one_scan_merges_one_partition_per_sample_without_re_sorting() {
+fn combine_refs_one_scan_vortex_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
     let samples = &SAMPLES[..N_SAMPLES];
     let root = fixture::write_sample_tables(dir.path(), samples);
 
     let plan = physical_plan(
         combine_refs_one_scan::session_config(),
-        move |ctx| async move { combine_refs_one_scan::plan(&ctx, &root).await },
+        move |ctx| async move { combine_refs_one_scan::plan(&ctx, &root, vortex_format()).await },
     );
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+    assert_one_shared_scan(&plan);
+}
+
+/// DataFusion's parquet reader preserves every file partition from the earlier
+/// variant's single shared scan, so it too merges without re-sorting.
+#[test]
+fn combine_refs_one_scan_parquet_merges_one_partition_per_sample_without_re_sorting() {
+    let dir = tempfile::tempdir().unwrap();
+    let samples = &SAMPLES[..N_SAMPLES];
+    let root = fixture::write_parquet_sample_tables(dir.path(), samples);
+
+    let plan = physical_plan(
+        combine_refs_one_scan::session_config(),
+        move |ctx| async move { combine_refs_one_scan::plan(&ctx, &root, parquet_format()).await },
+    );
+
+    assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+    assert_one_shared_scan(&plan);
+}
+
+fn parquet_format() -> Arc<dyn FileFormat> {
+    Arc::new(ParquetFormat::default())
+}
+
+/// One scan feeding the merge rather than a union of per-sample scans. What
+/// distinguishes the earlier reference combiner variant from the others.
+fn assert_one_shared_scan(plan: &Arc<dyn ExecutionPlan>) {
     assert_eq!(
-        nodes_of::<DataSourceExec>(&plan).len(),
+        nodes_of::<DataSourceExec>(plan).len(),
         1,
         "expected one shared scan:\n{}",
-        displayed(&plan),
+        displayed(plan),
     );
     assert!(
-        nodes_of::<UnionExec>(&plan).is_empty(),
+        nodes_of::<UnionExec>(plan).is_empty(),
         "expected no union of per-sample scans:\n{}",
-        displayed(&plan),
+        displayed(plan),
     );
-}
-
-// TODO(#27): Delete this copy when the plan builders take the input format
-// type. The parquet test should call `combine_refs::plan` after that change.
-async fn parquet_reference_plan(
-    ctx: &SessionContext,
-    table_path: &str,
-    samples: &[&str],
-) -> Result<DataFrame> {
-    let locus_ordering = locus_ordering();
-    let read_options = ParquetReadOptions::default()
-        .table_partition_cols(vec![
-            ("s".to_string(), DataType::Utf8),
-            ("contig".to_string(), DataType::Utf8),
-        ])
-        .file_sort_order(vec![locus_ordering.clone()]);
-    let df = ctx
-        .read_parquet(
-            format!("{}/", table_path.trim_end_matches('/')),
-            read_options,
-        )
-        .await?;
-
-    let plans = samples
-        .iter()
-        .map(|sample| {
-            Ok(Arc::new(
-                df.clone()
-                    .filter(col("s").eq(lit(*sample)))?
-                    .into_unoptimized_plan(),
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let plan = LogicalPlan::Union(Union::try_new(plans)?);
-
-    DataFrame::new(ctx.state(), plan).sort(locus_ordering)
-}
-
-fn locus_ordering() -> Vec<SortExpr> {
-    vec![
-        col("contig").sort(true, false),
-        col("position").sort(true, false),
-    ]
 }
 
 /// Exactly one sort-preserving merge, no re-sort, and one input partition per

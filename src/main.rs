@@ -3,7 +3,8 @@ use datafusion::error::Result;
 
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::{
-    SAMPLES, combine_alleles, combine_refs, combiner_session_config, write, write_count,
+    SAMPLES, combine_alleles, combine_refs, combiner_session_config, vortex_format, write,
+    write_count,
 };
 use std::sync::Arc;
 use vortex_datafusion::VortexFormatFactory;
@@ -44,7 +45,7 @@ fn main() -> Result<()> {
             let options = options_for(&path, &output, threads);
             pipeline::run(
                 move |ctx| async move {
-                    let df = combine_refs::plan(&ctx, &path, SAMPLES).await?;
+                    let df = combine_refs::plan(&ctx, &path, SAMPLES, vortex_format()).await?;
                     write(df, &output, Arc::new(VortexFormatFactory::new())).await
                 },
                 options,
@@ -54,7 +55,7 @@ fn main() -> Result<()> {
             let options = options_for(&path, &output, threads);
             pipeline::run(
                 move |ctx| async move {
-                    let df = combine_alleles::plan(&ctx, &path, SAMPLES).await?;
+                    let df = combine_alleles::plan(&ctx, &path, SAMPLES, vortex_format()).await?;
                     write(df, &output, Arc::new(VortexFormatFactory::new())).await
                 },
                 options,
