@@ -28,6 +28,33 @@ fn write_mode_reports_rows_written() {
 }
 
 #[test]
+fn one_scan_reference_combiner_supports_every_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
+
+    assert_rows_written(
+        "combine-refs-one-scan",
+        &input,
+        &dir.path().join("combined_refs_one_scan.vortex"),
+        400,
+    );
+
+    let stdout = successful_combiner_stdout("combine-refs-one-scan", &input, "--show");
+    assert_eq!(shown_row_count(&stdout), 20, "stdout:\n{stdout}");
+
+    let stdout = successful_combiner_stdout("combine-refs-one-scan", &input, "--explain");
+    assert!(
+        stdout.contains("SortPreservingMergeExec"),
+        "stdout:\n{stdout}"
+    );
+    assert!(!stdout.contains("SortExec:"), "stdout:\n{stdout}");
+
+    let stdout = successful_combiner_stdout("combine-refs-one-scan", &input, "--explain-analyze");
+    assert!(stdout.contains("Plan with Metrics"), "stdout:\n{stdout}");
+    assert!(stdout.contains("elapsed_compute"), "stdout:\n{stdout}");
+}
+
+#[test]
 fn writes_parquet_when_the_output_format_is_overridden() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
@@ -141,15 +168,7 @@ fn show_mode_defaults_to_vortex_input() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
-    let stdout = successful_stdout(
-        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
-            "--threads",
-            "1",
-            "combine-alleles",
-            &input,
-            "--show",
-        ]),
-    );
+    let stdout = successful_combiner_stdout("combine-alleles", &input, "--show");
     assert!(
         stdout.contains("| position | alleles | contig |"),
         "stdout:\n{stdout}"
@@ -210,15 +229,7 @@ fn show_mode_defaults_to_twenty_rows() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
-    let stdout = successful_stdout(
-        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
-            "--threads",
-            "1",
-            "combine-refs",
-            &input,
-            "--show",
-        ]),
-    );
+    let stdout = successful_combiner_stdout("combine-refs", &input, "--show");
     assert_eq!(shown_row_count(&stdout), 20, "stdout:\n{stdout}");
 }
 
@@ -227,15 +238,7 @@ fn explain_mode_prints_the_combiner_plan() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
-    let stdout = successful_stdout(
-        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
-            "--threads",
-            "1",
-            "combine-refs",
-            &input,
-            "--explain",
-        ]),
-    );
+    let stdout = successful_combiner_stdout("combine-refs", &input, "--explain");
     assert!(stdout.contains("physical_plan"), "stdout:\n{stdout}");
     assert!(
         stdout.contains("SortPreservingMergeExec"),
@@ -249,15 +252,7 @@ fn explain_analyze_mode_prints_operator_timings() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
-    let stdout = successful_stdout(
-        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
-            "--threads",
-            "1",
-            "combine-alleles",
-            &input,
-            "--explain-analyze",
-        ]),
-    );
+    let stdout = successful_combiner_stdout("combine-alleles", &input, "--explain-analyze");
     assert!(stdout.contains("Plan with Metrics"), "stdout:\n{stdout}");
     assert!(stdout.contains("elapsed_compute"), "stdout:\n{stdout}");
     assert!(!stdout.contains("LimitExec"), "stdout:\n{stdout}");
@@ -396,6 +391,18 @@ fn assert_rows_written(command: &str, input: &str, output_path: &Path, expected:
             .arg(output_path),
     );
     assert_eq!(stdout.lines().last(), Some(expected.to_string().as_str()));
+}
+
+fn successful_combiner_stdout(command: &str, input: &str, mode: &str) -> String {
+    successful_stdout(
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
+            "--threads",
+            "1",
+            command,
+            input,
+            mode,
+        ]),
+    )
 }
 
 fn successful_stdout(command: &mut Command) -> String {
