@@ -215,18 +215,19 @@ pub async fn read<P: DataFilePaths>(
 /// [`LogicalPlanBuilder::copy_to`], one layer below `DataFrame`, so this helper
 /// uses that supported route.
 ///
-/// This deliberately covers only appending everything to one path, with empty
-/// copy options and no partition columns. DataFusion's parquet writer also
+/// This deliberately covers only appending everything to one path, with
+/// caller-provided format options and no partition columns. DataFusion's parquet writer also
 /// supports insert options, sort-on-write, and partition columns; those remain
 /// known extension points for this helper.
 pub async fn write(
     df: DataFrame,
     path: &str,
     format_factory: Arc<dyn FileFormatFactory>,
+    format_options: HashMap<String, String>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
     let file_type = format_as_file_type(format_factory);
     let (session_state, plan) = df.into_parts();
-    let plan = LogicalPlanBuilder::copy_to(plan, path.into(), file_type, HashMap::new(), vec![])?
+    let plan = LogicalPlanBuilder::copy_to(plan, path.into(), file_type, format_options, vec![])?
         .build()?;
     DataFrame::new(session_state, plan).collect().await
 }
