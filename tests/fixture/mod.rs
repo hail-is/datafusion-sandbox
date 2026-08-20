@@ -53,8 +53,8 @@ pub fn write_sample_tables(dir: &Path, samples: &[&str]) -> String {
 
 /// The parquet counterpart of [`write_sample_tables`], laid out identically so
 /// the two formats' plan shapes are compared over the same data.
-// Each integration test crate compiles this shared module separately, and the
-// CLI tests only write vortex fixtures.
+// Each integration test crate compiles this shared module separately, and not
+// all of them write parquet fixtures.
 #[allow(dead_code)]
 pub fn write_parquet_sample_tables(dir: &Path, samples: &[&str]) -> String {
     write_sample_tables_with_format(dir, samples, FixtureFileFormat::Parquet, "fixture.parquet")
