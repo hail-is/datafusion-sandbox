@@ -63,6 +63,33 @@ fn writes_parquet_when_the_output_format_is_overridden() {
 }
 
 #[test]
+fn writing_compact_vortex_changes_the_file_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
+    let sizes = ["standard", "compact"].map(|compression| {
+        let output_path = dir
+            .path()
+            .join(format!("combined_refs_{compression}.vortex"));
+        successful_stdout(
+            Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+                .args([
+                    "--threads",
+                    "1",
+                    "combine-refs",
+                    &input,
+                    "--compression",
+                    compression,
+                    "--write",
+                ])
+                .arg(&output_path),
+        );
+        output_path.metadata().unwrap().len()
+    });
+
+    assert_ne!(sizes[0], sizes[1], "standard and compact file sizes match");
+}
+
+#[test]
 fn reads_parquet_input() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_parquet_sample_tables(dir.path(), SAMPLES);
