@@ -6,12 +6,13 @@ use datafusion::datasource::file_format::{
     parquet::{ParquetFormat, ParquetFormatFactory},
 };
 use datafusion::error::{DataFusionError, Result};
+use datafusion::execution::context::SessionConfig;
 use datafusion::prelude::DataFrame;
 
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::{
-    Outcome, SAMPLES, combine_alleles, combine_refs, combiner_session_config, vortex_format, write,
-    write_count,
+    Outcome, SAMPLES, combine_alleles, combine_refs, combine_refs_one_scan,
+    combiner_session_config, vortex_format, write, write_count,
 };
 use std::{collections::HashMap, path::Path, sync::Arc};
 use vortex_datafusion::VortexFormatFactory;
@@ -36,6 +37,8 @@ struct Cli {
 enum Command {
     /// Combine the reference data of all samples under PATH.
     CombineRefs(CombinerArgs),
+    /// Combine reference data with one shared scan of all samples under PATH.
+    CombineRefsOneScan(CombinerArgs),
     /// Combine the alleles of all samples under PATH.
     CombineAlleles(CombinerArgs),
 }
@@ -164,8 +167,10 @@ impl From<EndingArgs> for Ending {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Combiner {
     Refs,
+    RefsOneScan,
     Alleles,
 }
 
@@ -174,6 +179,7 @@ fn main() -> Result<()> {
 
     let (combiner, args) = match command {
         Command::CombineRefs(args) => (Combiner::Refs, args),
+        Command::CombineRefsOneScan(args) => (Combiner::RefsOneScan, args),
         Command::CombineAlleles(args) => (Combiner::Alleles, args),
     };
     let CombinerArgs {
@@ -189,12 +195,19 @@ fn main() -> Result<()> {
     validate_output_extension(ending.output_path(), output_format)?;
     let format_options = compression_options(compression.as_deref(), output_format)?;
     let limit = ending.row_limit(limit);
-    let options = options_for(&path, ending.output_path(), threads);
+    let session_config = match combiner {
+        Combiner::RefsOneScan => combine_refs_one_scan::session_config(),
+        Combiner::Refs | Combiner::Alleles => combiner_session_config(),
+    };
+    let options = options_for(&path, ending.output_path(), threads, session_config);
     let outcome = pipeline::run(
         move |ctx| async move {
             let input_format = input_format.read_format();
             let df = match combiner {
                 Combiner::Refs => combine_refs::plan(&ctx, &path, SAMPLES, input_format).await?,
+                Combiner::RefsOneScan => {
+                    combine_refs_one_scan::plan(&ctx, &path, input_format).await?
+                }
                 Combiner::Alleles => {
                     combine_alleles::plan(&ctx, &path, SAMPLES, input_format).await?
                 }
@@ -313,9 +326,10 @@ fn options_for(
     input_path: &str,
     output_path: Option<&str>,
     threads: Option<usize>,
+    session_config: SessionConfig,
 ) -> PipelineOptions {
     let mut options = PipelineOptions {
-        session_config: combiner_session_config(),
+        session_config,
         ..Default::default()
     };
     if let Some(threads) = threads {
@@ -416,25 +430,40 @@ mod tests {
 
     #[test]
     fn registers_the_object_stores_of_both_input_and_output() {
-        let options = options_for("gs://bucket-a/path", Some("gs://bucket-b/out.vortex"), None);
+        let options = options_for(
+            "gs://bucket-a/path",
+            Some("gs://bucket-b/out.vortex"),
+            None,
+            combiner_session_config(),
+        );
         assert_eq!(options.object_stores, ["gs://bucket-a", "gs://bucket-b"]);
     }
 
     #[test]
     fn registers_a_shared_object_store_once() {
-        let options = options_for("gs://bucket/path/", Some("gs://bucket/out.vortex"), None);
+        let options = options_for(
+            "gs://bucket/path/",
+            Some("gs://bucket/out.vortex"),
+            None,
+            combiner_session_config(),
+        );
         assert_eq!(options.object_stores, ["gs://bucket"]);
     }
 
     #[test]
     fn registers_no_object_stores_for_local_paths() {
-        let options = options_for("data/samples", Some("data/out.vortex"), None);
+        let options = options_for(
+            "data/samples",
+            Some("data/out.vortex"),
+            None,
+            combiner_session_config(),
+        );
         assert!(options.object_stores.is_empty());
     }
 
     #[test]
     fn registers_only_the_input_store_when_there_is_no_output() {
-        let options = options_for("gs://bucket-a/path", None, None);
+        let options = options_for("gs://bucket-a/path", None, None, combiner_session_config());
         assert_eq!(options.object_stores, ["gs://bucket-a"]);
     }
 }
