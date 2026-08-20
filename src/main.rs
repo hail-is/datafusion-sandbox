@@ -1,5 +1,9 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use datafusion::arrow::util::pretty::pretty_format_batches;
+use datafusion::datasource::file_format::{
+    FileFormat, FileFormatFactory,
+    parquet::{ParquetFormat, ParquetFormatFactory},
+};
 use datafusion::error::Result;
 use datafusion::prelude::DataFrame;
 
@@ -8,7 +12,7 @@ use datafusion_sandbox::{
     Outcome, SAMPLES, combine_alleles, combine_refs, combiner_session_config, vortex_format, write,
     write_count,
 };
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use vortex_datafusion::VortexFormatFactory;
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
@@ -37,10 +41,59 @@ enum Command {
 struct CombinerArgs {
     path: String,
     #[command(flatten)]
+    formats: FormatArgs,
+    #[command(flatten)]
     ending: EndingArgs,
     /// Return at most ROWS combined rows. Defaults to 20 with --show and unlimited otherwise.
     #[arg(long, value_name = "ROWS")]
     limit: Option<usize>,
+}
+
+#[derive(Args)]
+struct FormatArgs {
+    /// Format of the input tables.
+    #[arg(long, value_enum, default_value = "vortex")]
+    input_format: Format,
+    /// Format to write. Defaults to the input format.
+    #[arg(long, value_enum)]
+    output_format: Option<Format>,
+}
+
+impl FormatArgs {
+    /// When gVCF becomes an input format, change its output default here rather
+    /// than giving the input and output arguments separate enums.
+    fn output_format(&self) -> Format {
+        self.output_format.unwrap_or(self.input_format)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum Format {
+    Parquet,
+    Vortex,
+}
+
+impl Format {
+    fn read_format(self) -> Arc<dyn FileFormat> {
+        match self {
+            Self::Parquet => Arc::new(ParquetFormat::default()),
+            Self::Vortex => vortex_format(),
+        }
+    }
+
+    fn output_factory(self) -> Arc<dyn FileFormatFactory> {
+        match self {
+            Self::Parquet => Arc::new(ParquetFormatFactory::new()),
+            Self::Vortex => Arc::new(VortexFormatFactory::new()),
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Parquet => "parquet",
+            Self::Vortex => "vortex",
+        }
+    }
 }
 
 #[derive(Args)]
@@ -111,25 +164,30 @@ fn main() -> Result<()> {
     };
     let CombinerArgs {
         path,
+        formats,
         ending,
         limit,
     } = args;
     let ending = Ending::from(ending);
+    let input_format = formats.input_format;
+    let output_format = formats.output_format();
+    validate_output_extension(ending.output_path(), output_format)?;
     let limit = ending.row_limit(limit);
     let options = options_for(&path, ending.output_path(), threads);
     let outcome = pipeline::run(
         move |ctx| async move {
+            let input_format = input_format.read_format();
             let df = match combiner {
-                Combiner::Refs => combine_refs::plan(&ctx, &path, SAMPLES, vortex_format()).await?,
+                Combiner::Refs => combine_refs::plan(&ctx, &path, SAMPLES, input_format).await?,
                 Combiner::Alleles => {
-                    combine_alleles::plan(&ctx, &path, SAMPLES, vortex_format()).await?
+                    combine_alleles::plan(&ctx, &path, SAMPLES, input_format).await?
                 }
             };
             let df = match limit {
                 Some(limit) => df.limit(0, Some(limit))?,
                 None => df,
             };
-            produce_outcome(df, ending).await
+            produce_outcome(df, ending, output_format).await
         },
         options,
     )?;
@@ -137,10 +195,10 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-async fn produce_outcome(df: DataFrame, ending: Ending) -> Result<Outcome> {
+async fn produce_outcome(df: DataFrame, ending: Ending, output_format: Format) -> Result<Outcome> {
     match ending {
         Ending::Write(output) => {
-            let write_result = write(df, &output, Arc::new(VortexFormatFactory::new())).await?;
+            let write_result = write(df, &output, output_format.output_factory()).await?;
             Ok(Outcome::RowsWritten(write_count(&write_result)?))
         }
         Ending::Show => Ok(Outcome::Batches(df.collect().await?)),
@@ -153,6 +211,25 @@ async fn produce_outcome(df: DataFrame, ending: Ending) -> Result<Outcome> {
             Ok(Outcome::Plan(pretty_format_batches(&batches)?.to_string()))
         }
     }
+}
+
+fn validate_output_extension(output_path: Option<&str>, output_format: Format) -> Result<()> {
+    let Some(output_path) = output_path else {
+        return Ok(());
+    };
+    let Some(extension) = Path::new(output_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+    else {
+        return Ok(());
+    };
+    if extension != output_format.extension() {
+        return Err(datafusion::error::DataFusionError::Configuration(format!(
+            "output path '{output_path}' has extension '.{extension}', which contradicts output format '{}'",
+            output_format.extension()
+        )));
+    }
+    Ok(())
 }
 
 /// Pipeline options for a combiner reading from `input_path` and optionally writing to

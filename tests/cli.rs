@@ -1,7 +1,8 @@
 mod fixture;
 
+use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use datafusion_sandbox::SAMPLES;
-use std::{path::Path, process::Command};
+use std::{future::Future, path::Path, process::Command};
 
 #[test]
 fn write_mode_reports_rows_written() {
@@ -23,7 +24,82 @@ fn write_mode_reports_rows_written() {
 }
 
 #[test]
-fn show_mode_prints_combiner_rows() {
+fn writes_parquet_when_the_output_format_is_overridden() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
+    let output_path = dir.path().join("combined_refs.parquet");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args([
+            "--threads",
+            "1",
+            "combine-refs",
+            &input,
+            "--output-format",
+            "parquet",
+            "--write",
+        ])
+        .arg(&output_path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(parquet_row_count(&output_path), 400);
+}
+
+#[test]
+fn reads_parquet_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::write_parquet_sample_tables(dir.path(), SAMPLES);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args([
+            "--threads",
+            "1",
+            "combine-alleles",
+            &input,
+            "--input-format",
+            "parquet",
+            "--show",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("| 1        | A,G"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn rejects_an_output_extension_that_contradicts_the_default_format() {
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args([
+            "combine-refs",
+            "missing",
+            "--input-format",
+            "parquet",
+            "--write",
+            "combined.vortex",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("combined.vortex"), "stderr:\n{stderr}");
+    assert!(stderr.contains("parquet"), "stderr:\n{stderr}");
+}
+
+#[test]
+fn show_mode_defaults_to_vortex_input() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
@@ -220,4 +296,24 @@ fn successful_stdout(command: &mut Command) -> String {
 
 fn shown_row_count(stdout: &str) -> usize {
     stdout.lines().filter(|line| line.starts_with("| ")).count() - 1
+}
+
+fn parquet_row_count(path: &Path) -> usize {
+    block_on(async {
+        let ctx = SessionContext::new();
+        ctx.read_parquet(path.to_str().unwrap(), ParquetReadOptions::default())
+            .await
+            .unwrap()
+            .count()
+            .await
+            .unwrap()
+    })
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
 }
