@@ -24,8 +24,10 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 
-    /// Number of worker threads to execute on. 1 runs on a current-thread runtime, for timing
-    /// single-threaded performance. Defaults to the number of available cores.
+    /// Number of worker threads to execute on.
+    ///
+    /// 1 runs on a current-thread runtime, for timing single-threaded performance.
+    /// Defaults to the number of available cores.
     #[arg(long, short = 'j', global = true)]
     threads: Option<usize>,
 }
@@ -46,6 +48,9 @@ struct CombinerArgs {
     #[command(flatten)]
     ending: EndingArgs,
     /// Compression to use when writing.
+    ///
+    /// Parquet accepts uncompressed, snappy, gzip(LEVEL), brotli(LEVEL), lz4, zstd(LEVEL), or lz4_raw.
+    /// Vortex accepts standard or compact.
     #[arg(
         long,
         value_name = "COMPRESSION",
@@ -256,7 +261,7 @@ fn compression_options(
     let Some(compression) = compression else {
         return Ok(HashMap::new());
     };
-    match output_format {
+    let (key, value) = match output_format {
         Format::Parquet => {
             // DataFusion 55's parser assumes anything after `(` ends with `)` and removes the
             // final byte with `&rh[..rh.len() - 1]`. An input such as `gzip(` leaves `rh` empty,
@@ -266,15 +271,18 @@ fn compression_options(
             }
             parquet_writer::parse_compression_string(compression)
                 .map_err(|_| unrecognized_compression(compression, output_format))?;
+            ("format.compression", compression)
         }
         Format::Vortex => {
-            return Err(unrecognized_compression(compression, output_format));
+            let compact = match compression {
+                "standard" => "false",
+                "compact" => "true",
+                _ => return Err(unrecognized_compression(compression, output_format)),
+            };
+            ("format.use_compact_encodings", compact)
         }
     };
-    Ok(HashMap::from([(
-        "format.compression".to_string(),
-        compression.to_string(),
-    )]))
+    Ok(HashMap::from([(key.to_string(), value.to_string())]))
 }
 
 fn has_parquet_compression_syntax(compression: &str) -> bool {
@@ -353,6 +361,19 @@ mod tests {
                 std::collections::HashMap::from([(
                     "format.compression".to_string(),
                     compression.to_string(),
+                )]),
+            );
+        }
+    }
+
+    #[test]
+    fn maps_vortex_compression_modes_to_compact_encodings() {
+        for (compression, use_compact_encodings) in [("standard", "false"), ("compact", "true")] {
+            assert_eq!(
+                compression_options(Some(compression), Format::Vortex).unwrap(),
+                std::collections::HashMap::from([(
+                    "format.use_compact_encodings".to_string(),
+                    use_compact_encodings.to_string(),
                 )]),
             );
         }
