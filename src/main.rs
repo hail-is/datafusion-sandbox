@@ -11,6 +11,8 @@ use datafusion_sandbox::{
 use std::sync::Arc;
 use vortex_datafusion::VortexFormatFactory;
 
+const DEFAULT_SHOW_LIMIT: usize = 20;
+
 #[derive(Parser)]
 #[command(about = "Run hail-style pipelines built on datafusion")]
 struct Cli {
@@ -26,17 +28,19 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Combine the reference data of all samples under PATH.
-    CombineRefs {
-        path: String,
-        #[command(flatten)]
-        ending: EndingArgs,
-    },
+    CombineRefs(CombinerArgs),
     /// Combine the alleles of all samples under PATH.
-    CombineAlleles {
-        path: String,
-        #[command(flatten)]
-        ending: EndingArgs,
-    },
+    CombineAlleles(CombinerArgs),
+}
+
+#[derive(Args)]
+struct CombinerArgs {
+    path: String,
+    #[command(flatten)]
+    ending: EndingArgs,
+    /// Return at most ROWS combined rows. Defaults to 20 with --show and unlimited otherwise.
+    #[arg(long, value_name = "ROWS")]
+    limit: Option<usize>,
 }
 
 #[derive(Args)]
@@ -64,6 +68,10 @@ enum Ending {
 }
 
 impl Ending {
+    fn row_limit(&self, explicit_limit: Option<usize>) -> Option<usize> {
+        explicit_limit.or_else(|| matches!(self, Self::Show).then_some(DEFAULT_SHOW_LIMIT))
+    }
+
     fn output_path(&self) -> Option<&str> {
         match self {
             Self::Write(path) => Some(path),
@@ -97,10 +105,17 @@ enum Combiner {
 fn main() -> Result<()> {
     let Cli { command, threads } = Cli::parse();
 
-    let (combiner, path, ending) = match command {
-        Command::CombineRefs { path, ending } => (Combiner::Refs, path, Ending::from(ending)),
-        Command::CombineAlleles { path, ending } => (Combiner::Alleles, path, Ending::from(ending)),
+    let (combiner, args) = match command {
+        Command::CombineRefs(args) => (Combiner::Refs, args),
+        Command::CombineAlleles(args) => (Combiner::Alleles, args),
     };
+    let CombinerArgs {
+        path,
+        ending,
+        limit,
+    } = args;
+    let ending = Ending::from(ending);
+    let limit = ending.row_limit(limit);
     let options = options_for(&path, ending.output_path(), threads);
     let outcome = pipeline::run(
         move |ctx| async move {
@@ -109,6 +124,10 @@ fn main() -> Result<()> {
                 Combiner::Alleles => {
                     combine_alleles::plan(&ctx, &path, SAMPLES, vortex_format()).await?
                 }
+            };
+            let df = match limit {
+                Some(limit) => df.limit(0, Some(limit))?,
+                None => df,
             };
             produce_outcome(df, ending).await
         },

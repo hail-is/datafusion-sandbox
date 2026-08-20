@@ -27,17 +27,15 @@ fn show_mode_prints_combiner_rows() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
-        .args(["--threads", "1", "combine-alleles", &input, "--show"])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+    let stdout = successful_stdout(
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
+            "--threads",
+            "1",
+            "combine-alleles",
+            &input,
+            "--show",
+        ]),
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         stdout.contains("| position | alleles | contig |"),
         "stdout:\n{stdout}"
@@ -49,26 +47,87 @@ fn show_mode_prints_combiner_rows() {
 }
 
 #[test]
+fn explicit_limit_applies_in_every_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
+
+    let stdout = successful_stdout(
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
+            "--threads",
+            "1",
+            "combine-alleles",
+            &input,
+            "--show",
+            "--limit",
+            "1",
+        ]),
+    );
+    assert_eq!(shown_row_count(&stdout), 1, "stdout:\n{stdout}");
+
+    let stdout = successful_stdout(
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+            .args(["--threads", "1", "combine-refs", &input, "--write"])
+            .arg(dir.path().join("limited.vortex"))
+            .args(["--limit", "3"]),
+    );
+    assert_eq!(stdout.lines().last(), Some("3"), "stdout:\n{stdout}");
+
+    for mode in ["--explain", "--explain-analyze"] {
+        let stdout = successful_stdout(
+            Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
+                "--threads",
+                "1",
+                "combine-alleles",
+                &input,
+                mode,
+                "--limit",
+                "1",
+            ]),
+        );
+        assert!(
+            stdout.contains("GlobalLimitExec: skip=0, fetch=1"),
+            "mode {mode} stdout:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn show_mode_defaults_to_twenty_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
+
+    let stdout = successful_stdout(
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
+            "--threads",
+            "1",
+            "combine-refs",
+            &input,
+            "--show",
+        ]),
+    );
+    assert_eq!(shown_row_count(&stdout), 20, "stdout:\n{stdout}");
+}
+
+#[test]
 fn explain_mode_prints_the_combiner_plan() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
-        .args(["--threads", "1", "combine-refs", &input, "--explain"])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+    let stdout = successful_stdout(
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
+            "--threads",
+            "1",
+            "combine-refs",
+            &input,
+            "--explain",
+        ]),
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("physical_plan"), "stdout:\n{stdout}");
     assert!(
         stdout.contains("SortPreservingMergeExec"),
         "stdout:\n{stdout}"
     );
+    assert!(!stdout.contains("LimitExec"), "stdout:\n{stdout}");
 }
 
 #[test]
@@ -76,25 +135,18 @@ fn explain_analyze_mode_prints_operator_timings() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
-        .args([
+    let stdout = successful_stdout(
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
             "--threads",
             "1",
             "combine-alleles",
             &input,
             "--explain-analyze",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        ]),
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Plan with Metrics"), "stdout:\n{stdout}");
     assert!(stdout.contains("elapsed_compute"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("LimitExec"), "stdout:\n{stdout}");
 }
 
 #[test]
@@ -148,17 +200,24 @@ fn failing_combiner_exits_non_zero() {
 }
 
 fn assert_rows_written(command: &str, input: &str, output_path: &Path, expected: u64) {
-    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
-        .args(["--threads", "1", command, input, "--write"])
-        .arg(output_path)
-        .output()
-        .unwrap();
+    let stdout = successful_stdout(
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+            .args(["--threads", "1", command, input, "--write"])
+            .arg(output_path),
+    );
+    assert_eq!(stdout.lines().last(), Some(expected.to_string().as_str()));
+}
 
+fn successful_stdout(command: &mut Command) -> String {
+    let output = command.output().unwrap();
     assert!(
         output.status.success(),
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(stdout.lines().last(), Some(expected.to_string().as_str()));
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn shown_row_count(stdout: &str) -> usize {
+    stdout.lines().filter(|line| line.starts_with("| ")).count() - 1
 }
