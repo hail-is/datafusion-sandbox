@@ -1,5 +1,9 @@
 mod fixture;
 
+use datafusion::parquet::{
+    basic::Compression,
+    file::reader::{FileReader, SerializedFileReader},
+};
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use datafusion_sandbox::SAMPLES;
 use std::{future::Future, path::Path, process::Command};
@@ -37,6 +41,8 @@ fn writes_parquet_when_the_output_format_is_overridden() {
             &input,
             "--output-format",
             "parquet",
+            "--compression",
+            "uncompressed",
             "--write",
         ])
         .arg(&output_path)
@@ -49,6 +55,11 @@ fn writes_parquet_when_the_output_format_is_overridden() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(parquet_row_count(&output_path), 400);
+    assert!(
+        parquet_compressions(&output_path)
+            .iter()
+            .all(|compression| compression == &Compression::UNCOMPRESSED)
+    );
 }
 
 #[test]
@@ -249,6 +260,82 @@ fn combiner_requires_exactly_one_mode() {
 }
 
 #[test]
+fn compression_requires_write_mode() {
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args([
+            "combine-refs",
+            "missing",
+            "--output-format",
+            "parquet",
+            "--compression",
+            "snappy",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("required arguments were not provided"),
+        "stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("--compression"), "stderr:\n{stderr}");
+    assert!(stderr.contains("--write"), "stderr:\n{stderr}");
+}
+
+#[test]
+fn compression_is_rejected_in_non_write_modes() {
+    for command in ["combine-refs", "combine-alleles"] {
+        for mode in ["--show", "--explain", "--explain-analyze"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+                .args([
+                    command,
+                    "missing",
+                    "--output-format",
+                    "parquet",
+                    "--compression",
+                    "snappy",
+                    mode,
+                ])
+                .output()
+                .unwrap();
+
+            assert!(!output.status.success(), "{command} {mode} succeeded");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(
+                stderr.contains("cannot be used with"),
+                "{command} {mode} stderr:\n{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_compression_unknown_to_the_output_format() {
+    for (format, compression) in [("parquet", "zip"), ("vortex", "zstd(3)")] {
+        let output_path = format!("combined.{format}");
+        let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+            .args([
+                "combine-refs",
+                "missing",
+                "--output-format",
+                format,
+                "--compression",
+                compression,
+                "--write",
+                &output_path,
+            ])
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(compression), "stderr:\n{stderr}");
+        assert!(stderr.contains(format), "stderr:\n{stderr}");
+    }
+}
+
+#[test]
 fn failing_combiner_exits_non_zero() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("missing");
@@ -308,6 +395,17 @@ fn parquet_row_count(path: &Path) -> usize {
             .await
             .unwrap()
     })
+}
+
+fn parquet_compressions(path: &Path) -> Vec<Compression> {
+    let reader = SerializedFileReader::try_from(path).unwrap();
+    reader
+        .metadata()
+        .row_groups()
+        .iter()
+        .flat_map(|row_group| row_group.columns())
+        .map(|column| column.compression())
+        .collect()
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {

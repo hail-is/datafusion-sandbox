@@ -60,7 +60,13 @@ fn runs_a_pipeline_that_writes_output() {
     let write_result = pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            write(df, &output_path, Arc::new(VortexFormatFactory::new())).await
+            write(
+                df,
+                &output_path,
+                Arc::new(VortexFormatFactory::new()),
+                Default::default(),
+            )
+            .await
         },
         PipelineOptions::default(),
     )
@@ -80,7 +86,13 @@ fn runs_a_pipeline_that_writes_parquet_output() {
     pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            write(df, &output_path, Arc::new(ParquetFormatFactory::new())).await
+            write(
+                df,
+                &output_path,
+                Arc::new(ParquetFormatFactory::new()),
+                Default::default(),
+            )
+            .await
         },
         PipelineOptions::default(),
     )
@@ -116,7 +128,13 @@ fn surfaces_errors_from_plans_that_fail_at_execution() {
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?
                 .select(vec![(lit(1) / (col("idx") - lit(1))).alias("boom")])?;
-            write(df, &output_path, Arc::new(VortexFormatFactory::new())).await
+            write(
+                df,
+                &output_path,
+                Arc::new(VortexFormatFactory::new()),
+                Default::default(),
+            )
+            .await
         },
         PipelineOptions::default(),
     )
@@ -162,7 +180,13 @@ fn runs_single_threaded() {
     pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            write(df, &output_path, Arc::new(VortexFormatFactory::new())).await
+            write(
+                df,
+                &output_path,
+                Arc::new(VortexFormatFactory::new()),
+                Default::default(),
+            )
+            .await
         },
         PipelineOptions {
             threads: 1,

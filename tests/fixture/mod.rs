@@ -82,7 +82,7 @@ fn write_sample_tables_with_format(
         pipeline::run(
             move |ctx: SessionContext| async move {
                 let df = ctx.read_batch(batch)?;
-                write(df, &path, file_format.factory()).await
+                write(df, &path, file_format.factory(), Default::default()).await
             },
             PipelineOptions {
                 threads: 1,

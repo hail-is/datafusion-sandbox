@@ -22,7 +22,13 @@ fn write_vortex_fixture(dir: &tempfile::TempDir) -> String {
     pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, N_ROWS, 128)?;
-            write(df, &write_path, Arc::new(VortexFormatFactory::new())).await
+            write(
+                df,
+                &write_path,
+                Arc::new(VortexFormatFactory::new()),
+                Default::default(),
+            )
+            .await
         },
         PipelineOptions::default(),
     )
@@ -36,9 +42,14 @@ fn write_parquet_fixture(dir: &tempfile::TempDir, filename: &str) -> String {
     block_on(async {
         let ctx = SessionContext::new();
         let df = make_range_table(&ctx, N_ROWS, 128).unwrap();
-        write(df, &write_path, Arc::new(ParquetFormatFactory::new()))
-            .await
-            .unwrap();
+        write(
+            df,
+            &write_path,
+            Arc::new(ParquetFormatFactory::new()),
+            Default::default(),
+        )
+        .await
+        .unwrap();
     });
     output_path
 }

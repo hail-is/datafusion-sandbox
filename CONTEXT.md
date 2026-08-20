@@ -65,3 +65,11 @@ _Avoid_: sort key, ordering (unqualified)
 The per-sample records covering loci where a sample matches the reference genome, stored as
 runs of adjacent loci rather than one record each. Input to the reference combiner.
 _Avoid_: ref blocks, non-variant data
+
+### Benchmark settings
+
+**Compression mode**:
+The output-specific compression choice recorded for a benchmark. It names a codec, including its
+level when applicable, for Parquet and an encoding scheme set for Vortex, so values are not shared
+between formats.
+_Avoid_: compression codec (too narrow for Vortex), encoding (ambiguous without a format)
