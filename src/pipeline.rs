@@ -16,8 +16,8 @@ use std::{future::Future, sync::Arc, thread::available_parallelism};
 
 /// Everything the runner needs besides the pipeline closure itself.
 pub struct PipelineOptions {
-    /// Number of worker threads for each runtime. 1 runs on current-thread
-    /// runtimes, for timing single-threaded performance.
+    /// Number of worker threads for each runtime. Independent of `target_partitions`, which
+    /// each combiner sets for itself.
     pub threads: usize,
     pub session_config: SessionConfig,
     /// Base URLs of the object stores to register on the session, e.g.
@@ -48,7 +48,13 @@ where
     T: Send + 'static,
     Fut: Future<Output = Result<T>> + Send + 'static,
 {
-    let io_runtime = runtime_builder(options.threads).enable_all().build()?;
+    // Multi-thread even at one worker: TLS and HTTP framing for every object store request runs
+    // here, so throughput has to scale with the thread count. See
+    // docs/adr/0001-always-use-multi-thread-tokio-runtimes.md.
+    let io_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(options.threads)
+        .enable_all()
+        .build()?;
     let cpu_runtime = CpuRuntime::try_new(options.threads)?;
 
     let ctx = SessionContext::new_with_config(options.session_config);
@@ -82,17 +88,4 @@ fn register_object_store(ctx: &SessionContext, base_url: &str, io_handle: &Handl
         .build()?;
     ctx.register_object_store(url.as_ref(), Arc::new(store));
     Ok(())
-}
-
-/// A runtime builder for `threads` worker threads: a current-thread runtime
-/// when 1, so both the IO and CPU runtimes mean the same thing by
-/// "single-threaded".
-pub(crate) fn runtime_builder(threads: usize) -> tokio::runtime::Builder {
-    if threads == 1 {
-        tokio::runtime::Builder::new_current_thread()
-    } else {
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.worker_threads(threads);
-        builder
-    }
 }

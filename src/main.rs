@@ -27,10 +27,20 @@ struct Cli {
 
     /// Number of worker threads to execute on.
     ///
-    /// 1 runs on a current-thread runtime, for timing single-threaded performance.
-    /// Defaults to the number of available cores.
-    #[arg(long, short = 'j', global = true)]
+    /// Defaults to available parallelism. Does not affect the number of partitions the plan is
+    /// built with, which each combiner sets for itself.
+    #[arg(long, short = 'j', global = true, value_parser = parse_thread_count)]
     threads: Option<usize>,
+}
+
+/// Rejects 0, which `Builder::worker_threads` panics on, with a message rather than clap's
+/// generated `0 is not in 1..18446744073709551615`.
+fn parse_thread_count(value: &str) -> std::result::Result<usize, String> {
+    match value.parse::<usize>() {
+        Ok(0) => Err("thread count must be at least 1".to_string()),
+        Ok(threads) => Ok(threads),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[derive(Subcommand)]
@@ -358,6 +368,17 @@ fn object_store_base_url(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_a_thread_count_of_zero() {
+        assert_eq!(parse_thread_count("1"), Ok(1));
+        assert_eq!(parse_thread_count("8"), Ok(8));
+
+        let err = parse_thread_count("0").unwrap_err();
+        assert!(err.contains("at least 1"), "got: {err}");
+
+        assert!(parse_thread_count("banana").is_err());
+    }
 
     #[test]
     fn maps_parquet_compression_to_a_format_option() {
