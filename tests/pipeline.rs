@@ -170,9 +170,28 @@ fn default_thread_count_is_available_parallelism() {
     );
 }
 
-/// Single-threaded mode runs the whole pipeline on current-thread runtimes.
+/// A one-thread pipeline still executes on a multi-thread runtime, because DataFusion's
+/// `spawn_buffered` only buffers when it finds `RuntimeFlavor::MultiThread`. See
+/// docs/adr/0001-always-use-multi-thread-tokio-runtimes.md.
 #[test]
-fn runs_single_threaded() {
+fn one_thread_still_executes_on_a_multi_thread_runtime() {
+    let flavor = pipeline::run(
+        |_ctx| async move {
+            Ok::<_, DataFusionError>(tokio::runtime::Handle::current().runtime_flavor())
+        },
+        PipelineOptions {
+            threads: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(flavor, tokio::runtime::RuntimeFlavor::MultiThread);
+}
+
+/// One thread runs a pipeline end to end, including the write.
+#[test]
+fn runs_with_one_thread() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("out.vortex");
     let output_path = output.to_str().unwrap().to_string();

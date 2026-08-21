@@ -43,6 +43,26 @@ an order of magnitude in time. A `SortExec` appearing where a `SortPreservingMer
 expected is a plan shape regression.
 _Avoid_: query plan (ambiguous between logical and physical), execution graph
 
+### Runtimes
+
+**CPU runtime**:
+The Tokio runtime a pipeline's plan executes on. Separate from the IO runtime so that plan
+execution and object store requests do not compete for the same threads. It has no IO driver, so
+a task that attempts IO on it fails rather than quietly taking time from the plan.
+_Avoid_: worker pool, executor, thread pool
+
+**IO runtime**:
+The Tokio runtime object store requests run on. It is also the runtime the calling thread blocks
+on for the duration of a pipeline, so it outlives the plan's execution.
+_Avoid_: network runtime, blocking pool (Tokio's own, separate, thing)
+
+**Runtime flavor**:
+Tokio's distinction between a current-thread runtime, driven by whichever thread blocks on it, and
+a multi-thread runtime with a fixed number of worker threads. Not a setting here — both of a
+pipeline's runtimes are always multi-thread. See
+[ADR 0001](docs/adr/0001-always-use-multi-thread-tokio-runtimes.md).
+_Avoid_: runtime type, threading mode, runtime kind
+
 ### Data
 
 **Sample**:
@@ -73,3 +93,9 @@ The output-specific compression choice recorded for a benchmark. It names a code
 level when applicable, for Parquet and an encoding scheme set for Vortex, so values are not shared
 between formats.
 _Avoid_: compression codec (too narrow for Vortex), encoding (ambiguous without a format)
+
+**Thread count**:
+The number of worker threads given to both of a pipeline's runtimes, defaulting to available
+parallelism. Independent of how many partitions a plan is built with, which each combiner settles
+for itself, so plan shape and thread count are separate axes.
+_Avoid_: parallelism, cores, degree of parallelism

@@ -38,12 +38,10 @@ impl Drop for CpuRuntime {
         // new tasks to the underlying runtime after this point to allow the
         // thread to complete its work and exit cleanly.
         if let Some(thread_join_handle) = self.thread_join_handle.take() {
-            // If the thread is still running, we wait for it to finish
-            print!("Shutting down CPU runtime thread...");
+            // If the thread is still running, we wait for it to finish. Report a panicked thread
+            // on stderr: Drop cannot propagate it, and panicking here would be worse.
             if let Err(e) = thread_join_handle.join() {
-                eprintln!("Error joining CPU runtime thread: {e:?}",);
-            } else {
-                println!("CPU runtime thread shutdown successfully.");
+                eprintln!("Error joining CPU runtime thread: {e:?}");
             }
         }
     }
@@ -51,9 +49,12 @@ impl Drop for CpuRuntime {
 
 impl CpuRuntime {
     /// Create a new Tokio Runtime for CPU bound tasks, with `worker_threads` worker threads.
-    /// 1 runs on a current-thread runtime, for timing single-threaded performance.
     pub fn try_new(worker_threads: usize) -> Result<Self> {
-        let cpu_runtime = crate::pipeline::runtime_builder(worker_threads)
+        // Multi-thread even at one worker: DataFusion's `spawn_buffered` keys off the runtime
+        // flavor, not the thread count. See
+        // docs/adr/0001-always-use-multi-thread-tokio-runtimes.md.
+        let cpu_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(worker_threads)
             .enable_time()
             .build()?;
         let handle = cpu_runtime.handle().clone();
