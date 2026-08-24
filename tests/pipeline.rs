@@ -1,11 +1,9 @@
 use datafusion::arrow::util::pretty::pretty_format_batches;
-use datafusion::datasource::file_format::parquet::ParquetFormatFactory;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::{DataFrame, col, lit};
+use datafusion_sandbox::format::OutputFormat;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::{make_range_table, write, write_count};
-use std::sync::Arc;
-use vortex_datafusion::VortexFormatFactory;
 
 #[test]
 fn returns_the_pipeline_result_to_the_calling_thread() {
@@ -60,13 +58,7 @@ fn runs_a_pipeline_that_writes_output() {
     let write_result = pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            write(
-                df,
-                &output_path,
-                Arc::new(VortexFormatFactory::new()),
-                Default::default(),
-            )
-            .await
+            write(df, &output_path, &OutputFormat::VORTEX).await
         },
         PipelineOptions::default(),
     )
@@ -86,13 +78,7 @@ fn runs_a_pipeline_that_writes_parquet_output() {
     pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            write(
-                df,
-                &output_path,
-                Arc::new(ParquetFormatFactory::new()),
-                Default::default(),
-            )
-            .await
+            write(df, &output_path, &OutputFormat::PARQUET).await
         },
         PipelineOptions::default(),
     )
@@ -128,13 +114,7 @@ fn surfaces_errors_from_plans_that_fail_at_execution() {
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?
                 .select(vec![(lit(1) / (col("idx") - lit(1))).alias("boom")])?;
-            write(
-                df,
-                &output_path,
-                Arc::new(VortexFormatFactory::new()),
-                Default::default(),
-            )
-            .await
+            write(df, &output_path, &OutputFormat::VORTEX).await
         },
         PipelineOptions::default(),
     )
@@ -199,13 +179,7 @@ fn runs_with_one_thread() {
     pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            write(
-                df,
-                &output_path,
-                Arc::new(VortexFormatFactory::new()),
-                Default::default(),
-            )
-            .await
+            write(df, &output_path, &OutputFormat::VORTEX).await
         },
         PipelineOptions {
             threads: 1,

@@ -1,16 +1,13 @@
 use datafusion::prelude::*;
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema},
-    datasource::{
-        file_format::parquet::{ParquetFormat, ParquetFormatFactory},
-        listing::ListingOptions,
-    },
+    datasource::listing::ListingOptions,
 };
+use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
-use datafusion_sandbox::{make_range_table, read, vortex_format, write};
+use datafusion_sandbox::{make_range_table, read, write};
 
 use std::{future::Future, sync::Arc};
-use vortex_datafusion::VortexFormatFactory;
 
 const N_ROWS: u32 = 1000;
 
@@ -22,13 +19,7 @@ fn write_vortex_fixture(dir: &tempfile::TempDir) -> String {
     pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, N_ROWS, 128)?;
-            write(
-                df,
-                &write_path,
-                Arc::new(VortexFormatFactory::new()),
-                Default::default(),
-            )
-            .await
+            write(df, &write_path, &OutputFormat::VORTEX).await
         },
         PipelineOptions::default(),
     )
@@ -42,14 +33,9 @@ fn write_parquet_fixture(dir: &tempfile::TempDir, filename: &str) -> String {
     block_on(async {
         let ctx = SessionContext::new();
         let df = make_range_table(&ctx, N_ROWS, 128).unwrap();
-        write(
-            df,
-            &write_path,
-            Arc::new(ParquetFormatFactory::new()),
-            Default::default(),
-        )
-        .await
-        .unwrap();
+        write(df, &write_path, &OutputFormat::PARQUET)
+            .await
+            .unwrap();
     });
     output_path
 }
@@ -126,11 +112,11 @@ fn rejects_an_empty_path_list() {
 }
 
 fn parquet_listing_options() -> ListingOptions {
-    ListingOptions::new(Arc::new(ParquetFormat::default()))
+    ListingOptions::new(InputFormat::PARQUET.read_format())
 }
 
 fn vortex_listing_options() -> ListingOptions {
-    ListingOptions::new(vortex_format())
+    ListingOptions::new(InputFormat::VORTEX.read_format())
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {

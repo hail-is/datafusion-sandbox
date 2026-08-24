@@ -86,12 +86,20 @@ The per-sample records covering loci where a sample matches the reference genome
 runs of adjacent loci rather than one record each. Input to the reference combiner.
 _Avoid_: ref blocks, non-variant data
 
+### Formats
+
+**Format**:
+The encoding of a table on disk, together with how to read and write it, its file extension, and
+the compression modes it accepts. Every format can be read but only some can be written, so the
+code represents input and output format choices as separate types.
+_Avoid_: file format, codec, encoding
+
 ### Benchmark settings
 
 **Compression mode**:
-The output-specific compression choice recorded for a benchmark. It names a codec, including its
-level when applicable, for Parquet and an encoding scheme set for Vortex, so values are not shared
-between formats.
+A compression choice is always relative to an output format. It names a codec, including its level
+when applicable, for Parquet and an encoding scheme set for Vortex, so values are not shared
+between formats when recorded for a benchmark.
 _Avoid_: compression codec (too narrow for Vortex), encoding (ambiguous without a format)
 
 **Thread count**:
