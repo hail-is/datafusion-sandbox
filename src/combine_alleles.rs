@@ -1,8 +1,8 @@
-use crate::read;
+use crate::{format::InputFormat, read};
 
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema},
-    datasource::{file_format::FileFormat, listing::ListingOptions},
+    datasource::listing::ListingOptions,
     error::Result,
     functions_window::rank::rank,
     logical_expr::{LogicalPlan, SortExpr, logical_plan::Union},
@@ -29,11 +29,11 @@ pub async fn plan(
     ctx: &SessionContext,
     table_path: &str,
     samples: &[&str],
-    file_format: Arc<dyn FileFormat>,
+    input_format: InputFormat,
 ) -> Result<DataFrame> {
     let table_path = table_path.trim_end_matches('/');
 
-    let listing_options = ListingOptions::new(file_format)
+    let listing_options = ListingOptions::new(input_format.read_format())
         .with_file_sort_order(vec![locus_ordering()])
         .with_table_partition_cols(vec![("contig".to_string(), DataType::Utf8)]);
 

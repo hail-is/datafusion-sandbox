@@ -8,7 +8,7 @@ use datafusion::{
     catalog::streaming::StreamingTable,
     common::DataFusionError,
     datasource::{
-        file_format::{FileFormat, FileFormatFactory, format_as_file_type},
+        file_format::format_as_file_type,
         listing::{ListingOptions, ListingTable, ListingTableConfig},
     },
     error::Result,
@@ -21,14 +21,15 @@ use datafusion::{
     physical_plan::{stream::RecordBatchStreamAdapter, streaming::PartitionStream},
     prelude::*,
 };
-use std::{collections::HashMap, fmt, sync::Arc};
-use vortex::{VortexSessionDefault, session::VortexSession};
-use vortex_datafusion::VortexFormat;
+use std::{fmt, sync::Arc};
+
+use crate::format::OutputFormat;
 
 pub mod combine_alleles;
 pub mod combine_refs;
 pub mod combine_refs_one_scan;
 pub mod cpu_runtime;
+pub mod format;
 pub mod pipeline;
 
 /// The 50 samples of the `1kg_chr22` benchmark dataset.
@@ -161,15 +162,6 @@ pub fn make_table_range_join(
     left.join(right, JoinType::Inner, &["idx"], &["idx2"], None)
 }
 
-/// The vortex file format to read through, on a default session.
-///
-/// Constructing it takes a [`VortexSession`], and every caller here wants the
-/// same default one; parquet's format needs no such decision, so it has no
-/// counterpart helper.
-pub fn vortex_format() -> Arc<dyn FileFormat> {
-    Arc::new(VortexFormat::new(VortexSession::default()))
-}
-
 /// Reads one or more file collections as a single table.
 ///
 /// Takes the same listing options and optional schema that
@@ -207,28 +199,22 @@ pub async fn read<P: DataFilePaths>(
     ctx.read_table(Arc::new(table))
 }
 
-/// Writes all rows in `df` to `path` using `format_factory`.
-///
-/// DataFusion's parquet, CSV, and JSON DataFrame writers each implement this
-/// same operation, but DataFusion exposes no generic DataFrame-level
-/// write-with-format entry point. Its public generic seam is
-/// [`LogicalPlanBuilder::copy_to`], one layer below `DataFrame`, so this helper
-/// uses that supported route.
-///
-/// This deliberately covers only appending everything to one path, with
-/// caller-provided format options and no partition columns. DataFusion's parquet writer also
-/// supports insert options, sort-on-write, and partition columns; those remain
-/// known extension points for this helper.
+/// Writes all rows in `df` to `path` using one of this project's output formats.
 pub async fn write(
     df: DataFrame,
     path: &str,
-    format_factory: Arc<dyn FileFormatFactory>,
-    format_options: HashMap<String, String>,
+    format: &OutputFormat,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let file_type = format_as_file_type(format_factory);
+    let file_type = format_as_file_type(format.output_factory());
     let (session_state, plan) = df.into_parts();
-    let plan = LogicalPlanBuilder::copy_to(plan, path.into(), file_type, format_options, vec![])?
-        .build()?;
+    let plan = LogicalPlanBuilder::copy_to(
+        plan,
+        path.into(),
+        file_type,
+        format.format_options(),
+        vec![],
+    )?
+    .build()?;
     DataFrame::new(session_state, plan).collect().await
 }
 

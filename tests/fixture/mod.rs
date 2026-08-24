@@ -8,30 +8,13 @@ use datafusion::{
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     },
-    datasource::file_format::{FileFormatFactory, parquet::ParquetFormatFactory},
     prelude::*,
 };
+use datafusion_sandbox::format::OutputFormat;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::write;
 
 use std::{path::Path, sync::Arc};
-use vortex_datafusion::VortexFormatFactory;
-
-/// File formats supported by the shared sample-table fixture.
-#[derive(Clone, Copy)]
-enum FixtureFileFormat {
-    Vortex,
-    Parquet,
-}
-
-impl FixtureFileFormat {
-    fn factory(self) -> Arc<dyn FileFormatFactory> {
-        match self {
-            Self::Vortex => Arc::new(VortexFormatFactory::new()),
-            Self::Parquet => Arc::new(ParquetFormatFactory::new()),
-        }
-    }
-}
 
 /// The single contig the fixture writes, so that each sample is exactly one file
 /// and a plan's partition count is its sample count.
@@ -48,7 +31,7 @@ const ROWS_PER_SAMPLE: i32 = 8;
 /// Every sample covers the same loci with the same alleles, so a plan that
 /// de-duplicates across samples has something to de-duplicate.
 pub fn write_sample_tables(dir: &Path, samples: &[&str]) -> String {
-    write_sample_tables_with_format(dir, samples, FixtureFileFormat::Vortex, "fixture.vortex")
+    write_sample_tables_with_format(dir, samples, &OutputFormat::VORTEX)
 }
 
 /// The parquet counterpart of [`write_sample_tables`], laid out identically so
@@ -57,23 +40,21 @@ pub fn write_sample_tables(dir: &Path, samples: &[&str]) -> String {
 // all of them write parquet fixtures.
 #[allow(dead_code)]
 pub fn write_parquet_sample_tables(dir: &Path, samples: &[&str]) -> String {
-    write_sample_tables_with_format(dir, samples, FixtureFileFormat::Parquet, "fixture.parquet")
+    write_sample_tables_with_format(dir, samples, &OutputFormat::PARQUET)
 }
 
-/// Writes the sample tables in `file_format`, using `filename` inside every
-/// sample and contig directory.
+/// Writes the sample tables in `format`, deriving every filename from it.
 fn write_sample_tables_with_format(
     dir: &Path,
     samples: &[&str],
-    file_format: FixtureFileFormat,
-    filename: &str,
+    format: &'static OutputFormat,
 ) -> String {
     let root = dir.join("samples");
     for sample in samples {
         let path = root
             .join(format!("s={sample}"))
             .join(format!("contig={CONTIG}"));
-        let path = path.join(filename);
+        let path = path.join(format!("fixture.{}", format.extension()));
         let path = path
             .to_str()
             .expect("fixture path is valid UTF-8")
@@ -82,7 +63,7 @@ fn write_sample_tables_with_format(
         pipeline::run(
             move |ctx: SessionContext| async move {
                 let df = ctx.read_batch(batch)?;
-                write(df, &path, file_format.factory(), Default::default()).await
+                write(df, &path, format).await
             },
             PipelineOptions {
                 threads: 1,

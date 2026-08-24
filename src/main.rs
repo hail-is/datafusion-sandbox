@@ -1,21 +1,16 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use datafusion::arrow::util::pretty::pretty_format_batches;
-use datafusion::common::file_options::parquet_writer; //::parse_compression_string;
-use datafusion::datasource::file_format::{
-    FileFormat, FileFormatFactory,
-    parquet::{ParquetFormat, ParquetFormatFactory},
-};
-use datafusion::error::{DataFusionError, Result};
+use datafusion::error::Result;
 use datafusion::execution::context::SessionConfig;
 use datafusion::prelude::DataFrame;
 
+use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::{
     Outcome, SAMPLES, combine_alleles, combine_refs, combine_refs_one_scan,
-    combiner_session_config, vortex_format, write, write_count,
+    combiner_session_config, write, write_count,
 };
-use std::{collections::HashMap, path::Path, sync::Arc};
-use vortex_datafusion::VortexFormatFactory;
+use std::path::Path;
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
 
@@ -80,45 +75,52 @@ struct CombinerArgs {
 struct FormatArgs {
     /// Format of the input tables.
     #[arg(long, value_enum, default_value = "vortex")]
-    input_format: Format,
+    input_format: InputFormatArg,
     /// Format to write. Defaults to the input format.
     #[arg(long, value_enum)]
-    output_format: Option<Format>,
+    output_format: Option<OutputFormatArg>,
 }
 
 impl FormatArgs {
-    /// When gVCF becomes an input format, change its output default here rather
-    /// than giving the input and output arguments separate enums.
-    fn output_format(&self) -> Format {
-        self.output_format.unwrap_or(self.input_format)
+    fn output_format(&self) -> OutputFormatArg {
+        self.output_format
+            .unwrap_or_else(|| self.input_format.default_output_format())
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum Format {
+enum InputFormatArg {
     Parquet,
     Vortex,
 }
 
-impl Format {
-    fn read_format(self) -> Arc<dyn FileFormat> {
+impl InputFormatArg {
+    fn format(self) -> InputFormat {
         match self {
-            Self::Parquet => Arc::new(ParquetFormat::default()),
-            Self::Vortex => vortex_format(),
+            Self::Parquet => InputFormat::PARQUET,
+            Self::Vortex => InputFormat::VORTEX,
         }
     }
 
-    fn output_factory(self) -> Arc<dyn FileFormatFactory> {
+    fn default_output_format(self) -> OutputFormatArg {
         match self {
-            Self::Parquet => Arc::new(ParquetFormatFactory::new()),
-            Self::Vortex => Arc::new(VortexFormatFactory::new()),
+            Self::Parquet => OutputFormatArg::Parquet,
+            Self::Vortex => OutputFormatArg::Vortex,
         }
     }
+}
 
-    fn extension(self) -> &'static str {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum OutputFormatArg {
+    Parquet,
+    Vortex,
+}
+
+impl OutputFormatArg {
+    fn format(self) -> OutputFormat {
         match self {
-            Self::Parquet => "parquet",
-            Self::Vortex => "vortex",
+            Self::Parquet => OutputFormat::PARQUET,
+            Self::Vortex => OutputFormat::VORTEX,
         }
     }
 }
@@ -200,10 +202,13 @@ fn main() -> Result<()> {
         limit,
     } = args;
     let ending = Ending::from(ending);
-    let input_format = formats.input_format;
-    let output_format = formats.output_format();
-    validate_output_extension(ending.output_path(), output_format)?;
-    let format_options = compression_options(compression.as_deref(), output_format)?;
+    let input_format = formats.input_format.format();
+    let output_format = formats.output_format().format();
+    validate_output_extension(ending.output_path(), &output_format)?;
+    let output_format = match compression {
+        Some(compression) => output_format.with_compression(&compression)?,
+        None => output_format,
+    };
     let limit = ending.row_limit(limit);
     let session_config = match combiner {
         Combiner::RefsOneScan => combine_refs_one_scan::session_config(),
@@ -212,7 +217,6 @@ fn main() -> Result<()> {
     let options = options_for(&path, ending.output_path(), threads, session_config);
     let outcome = pipeline::run(
         move |ctx| async move {
-            let input_format = input_format.read_format();
             let df = match combiner {
                 Combiner::Refs => combine_refs::plan(&ctx, &path, SAMPLES, input_format).await?,
                 Combiner::RefsOneScan => {
@@ -226,7 +230,7 @@ fn main() -> Result<()> {
                 Some(limit) => df.limit(0, Some(limit))?,
                 None => df,
             };
-            produce_outcome(df, ending, output_format, format_options).await
+            produce_outcome(df, ending, output_format).await
         },
         options,
     )?;
@@ -237,13 +241,11 @@ fn main() -> Result<()> {
 async fn produce_outcome(
     df: DataFrame,
     ending: Ending,
-    output_format: Format,
-    format_options: HashMap<String, String>,
+    output_format: OutputFormat,
 ) -> Result<Outcome> {
     match ending {
         Ending::Write(output) => {
-            let write_result =
-                write(df, &output, output_format.output_factory(), format_options).await?;
+            let write_result = write(df, &output, &output_format).await?;
             Ok(Outcome::RowsWritten(write_count(&write_result)?))
         }
         Ending::Show => Ok(Outcome::Batches(df.collect().await?)),
@@ -258,7 +260,10 @@ async fn produce_outcome(
     }
 }
 
-fn validate_output_extension(output_path: Option<&str>, output_format: Format) -> Result<()> {
+fn validate_output_extension(
+    output_path: Option<&str>,
+    output_format: &OutputFormat,
+) -> Result<()> {
     let Some(output_path) = output_path else {
         return Ok(());
     };
@@ -271,62 +276,10 @@ fn validate_output_extension(output_path: Option<&str>, output_format: Format) -
     if extension != output_format.extension() {
         return Err(datafusion::error::DataFusionError::Configuration(format!(
             "output path '{output_path}' has extension '.{extension}', which contradicts output format '{}'",
-            output_format.extension()
+            output_format
         )));
     }
     Ok(())
-}
-
-fn compression_options(
-    compression: Option<&str>,
-    output_format: Format,
-) -> Result<HashMap<String, String>> {
-    let Some(compression) = compression else {
-        return Ok(HashMap::new());
-    };
-    let (key, value) = match output_format {
-        Format::Parquet => {
-            // DataFusion 55's parser assumes anything after `(` ends with `)` and removes the
-            // final byte with `&rh[..rh.len() - 1]`. An input such as `gzip(` leaves `rh` empty,
-            // so that subtraction panics instead of returning a configuration error.
-            if !has_parquet_compression_syntax(compression) {
-                return Err(unrecognized_compression(compression, output_format));
-            }
-            parquet_writer::parse_compression_string(compression)
-                .map_err(|_| unrecognized_compression(compression, output_format))?;
-            ("format.compression", compression)
-        }
-        Format::Vortex => {
-            let compact = match compression {
-                "standard" => "false",
-                "compact" => "true",
-                _ => return Err(unrecognized_compression(compression, output_format)),
-            };
-            ("format.use_compact_encodings", compact)
-        }
-    };
-    Ok(HashMap::from([(key.to_string(), value.to_string())]))
-}
-
-fn has_parquet_compression_syntax(compression: &str) -> bool {
-    let compression = compression.to_ascii_lowercase();
-    if ["uncompressed", "snappy", "lz4", "lz4_raw"].contains(&compression.as_str()) {
-        return true;
-    }
-    ["gzip", "brotli", "zstd"].into_iter().any(|codec| {
-        compression
-            .strip_prefix(codec)
-            .and_then(|suffix| suffix.strip_prefix('('))
-            .and_then(|level| level.strip_suffix(')'))
-            .is_some_and(|level| !level.is_empty() && level.chars().all(|c| c.is_ascii_digit()))
-    })
-}
-
-fn unrecognized_compression(compression: &str, output_format: Format) -> DataFusionError {
-    DataFusionError::Configuration(format!(
-        "compression '{compression}' is not recognized for output format '{}'",
-        output_format.extension()
-    ))
 }
 
 /// Pipeline options for a combiner reading from `input_path` and optionally writing to
@@ -378,75 +331,6 @@ mod tests {
         assert!(err.contains("at least 1"), "got: {err}");
 
         assert!(parse_thread_count("banana").is_err());
-    }
-
-    #[test]
-    fn maps_parquet_compression_to_a_format_option() {
-        for compression in [
-            "uncompressed",
-            "snappy",
-            "gzip(6)",
-            "brotli(5)",
-            "lz4",
-            "zstd(7)",
-            "lz4_raw",
-        ] {
-            assert_eq!(
-                compression_options(Some(compression), Format::Parquet).unwrap(),
-                std::collections::HashMap::from([(
-                    "format.compression".to_string(),
-                    compression.to_string(),
-                )]),
-            );
-        }
-    }
-
-    #[test]
-    fn maps_vortex_compression_modes_to_compact_encodings() {
-        for (compression, use_compact_encodings) in [("standard", "false"), ("compact", "true")] {
-            assert_eq!(
-                compression_options(Some(compression), Format::Vortex).unwrap(),
-                std::collections::HashMap::from([(
-                    "format.use_compact_encodings".to_string(),
-                    use_compact_encodings.to_string(),
-                )]),
-            );
-        }
-    }
-
-    #[test]
-    fn omits_compression_option_when_the_flag_is_absent() {
-        assert!(
-            compression_options(None, Format::Parquet)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            compression_options(None, Format::Vortex)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_parquet_compression() {
-        let error = compression_options(Some("brotli"), Format::Parquet).unwrap_err();
-
-        assert!(error.to_string().contains("parquet"), "got: {error}");
-    }
-
-    #[test]
-    fn rejects_malformed_parquet_compression_without_panicking() {
-        let error = compression_options(Some("gzip("), Format::Parquet).unwrap_err();
-
-        assert!(error.to_string().contains("parquet"), "got: {error}");
-    }
-
-    #[test]
-    fn rejects_compression_that_vortex_does_not_recognize() {
-        let error = compression_options(Some("zstd(7)"), Format::Vortex).unwrap_err();
-
-        assert!(error.to_string().contains("vortex"), "got: {error}");
     }
 
     #[test]

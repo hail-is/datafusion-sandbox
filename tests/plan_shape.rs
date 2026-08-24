@@ -8,10 +8,7 @@
 mod fixture;
 
 use datafusion::{
-    datasource::{
-        file_format::{FileFormat, parquet::ParquetFormat},
-        source::DataSourceExec,
-    },
+    datasource::source::DataSourceExec,
     error::Result,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties,
@@ -22,7 +19,7 @@ use datafusion::{
 };
 use datafusion_sandbox::{
     SAMPLES, combine_alleles, combine_refs, combine_refs_one_scan, combiner_session_config,
-    vortex_format,
+    format::InputFormat,
 };
 
 use std::{future::Future, sync::Arc};
@@ -39,7 +36,7 @@ fn combine_refs_parquet_merges_one_partition_per_sample_without_re_sorting() {
     let root = fixture::write_parquet_sample_tables(dir.path(), samples);
 
     let plan = physical_plan(combiner_session_config(), move |ctx| async move {
-        combine_refs::plan(&ctx, &root, samples, parquet_format()).await
+        combine_refs::plan(&ctx, &root, samples, InputFormat::PARQUET).await
     });
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
@@ -54,7 +51,7 @@ fn combine_refs_vortex_merges_one_partition_per_sample_without_re_sorting() {
     let root = fixture::write_sample_tables(dir.path(), samples);
 
     let plan = physical_plan(combiner_session_config(), move |ctx| async move {
-        combine_refs::plan(&ctx, &root, samples, vortex_format()).await
+        combine_refs::plan(&ctx, &root, samples, InputFormat::VORTEX).await
     });
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
@@ -70,7 +67,7 @@ fn combine_alleles_parquet_merges_one_partition_per_sample_without_re_sorting() 
     let root = fixture::write_parquet_sample_tables(dir.path(), samples);
 
     let plan = physical_plan(combiner_session_config(), move |ctx| async move {
-        combine_alleles::plan(&ctx, &root, samples, parquet_format()).await
+        combine_alleles::plan(&ctx, &root, samples, InputFormat::PARQUET).await
     });
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
@@ -85,7 +82,7 @@ fn combine_alleles_vortex_merges_one_partition_per_sample_without_re_sorting() {
     let root = fixture::write_sample_tables(dir.path(), samples);
 
     let plan = physical_plan(combiner_session_config(), move |ctx| async move {
-        combine_alleles::plan(&ctx, &root, samples, vortex_format()).await
+        combine_alleles::plan(&ctx, &root, samples, InputFormat::VORTEX).await
     });
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
@@ -101,7 +98,7 @@ fn combine_refs_one_scan_vortex_merges_one_partition_per_sample_without_re_sorti
 
     let plan = physical_plan(
         combine_refs_one_scan::session_config(),
-        move |ctx| async move { combine_refs_one_scan::plan(&ctx, &root, vortex_format()).await },
+        move |ctx| async move { combine_refs_one_scan::plan(&ctx, &root, InputFormat::VORTEX).await },
     );
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
@@ -118,15 +115,11 @@ fn combine_refs_one_scan_parquet_merges_one_partition_per_sample_without_re_sort
 
     let plan = physical_plan(
         combine_refs_one_scan::session_config(),
-        move |ctx| async move { combine_refs_one_scan::plan(&ctx, &root, parquet_format()).await },
+        move |ctx| async move { combine_refs_one_scan::plan(&ctx, &root, InputFormat::PARQUET).await },
     );
 
     assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
     assert_one_shared_scan(&plan);
-}
-
-fn parquet_format() -> Arc<dyn FileFormat> {
-    Arc::new(ParquetFormat::default())
 }
 
 /// One scan feeding the merge rather than a union of per-sample scans. What
