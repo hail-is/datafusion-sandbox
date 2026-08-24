@@ -8,7 +8,7 @@ use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::{
     Outcome, SAMPLES, combine_alleles, combine_refs, combine_refs_one_scan,
-    combiner_session_config, write, write_count,
+    combiner_session_config, write,
 };
 use std::path::Path;
 
@@ -244,10 +244,9 @@ async fn produce_outcome(
     output_format: OutputFormat,
 ) -> Result<Outcome> {
     match ending {
-        Ending::Write(output) => {
-            let write_result = write(df, &output, &output_format).await?;
-            Ok(Outcome::RowsWritten(write_count(&write_result)?))
-        }
+        Ending::Write(output) => Ok(Outcome::RowsWritten(
+            write(df, &output, &output_format).await?,
+        )),
         Ending::Show => Ok(Outcome::Batches(df.collect().await?)),
         Ending::Explain => {
             let batches = df.explain(false, false)?.collect().await?;

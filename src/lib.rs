@@ -1,6 +1,6 @@
 use datafusion::{
     arrow::{
-        array::{Int32Array, UInt64Array},
+        array::{Array, Int32Array, UInt64Array},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
         util::pretty::pretty_format_batches,
@@ -199,12 +199,13 @@ pub async fn read<P: DataFilePaths>(
     ctx.read_table(Arc::new(table))
 }
 
-/// Writes all rows in `df` to `path` using one of this project's output formats.
-pub async fn write(
-    df: DataFrame,
-    path: &str,
-    format: &OutputFormat,
-) -> Result<Vec<RecordBatch>, DataFusionError> {
+/// Writes all rows in `df` to `path` using one of this project's output
+/// formats, returning the number of rows written.
+///
+/// DataFusion exposes no generic DataFrame-level write-with-format entry point;
+/// its public generic seam is [`LogicalPlanBuilder::copy_to`], one layer below
+/// `DataFrame`, so this uses that supported route.
+pub async fn write(df: DataFrame, path: &str, format: &OutputFormat) -> Result<u64> {
     let file_type = format_as_file_type(format.output_factory());
     let (session_state, plan) = df.into_parts();
     let plan = LogicalPlanBuilder::copy_to(
@@ -215,44 +216,27 @@ pub async fn write(
         vec![],
     )?
     .build()?;
-    DataFrame::new(session_state, plan).collect().await
+    let batches = DataFrame::new(session_state, plan).collect().await?;
+    decode_row_count(&batches)
 }
 
 /// Decodes the number of rows produced by a DataFusion copy-to write.
 ///
-/// Copy-to returns exactly one batch containing one non-null `UInt64` value in
-/// a column named `count`.
-pub fn write_count(write_result: &[RecordBatch]) -> Result<u64, DataFusionError> {
-    if write_result.len() != 1 {
-        return Err(DataFusionError::Internal(format!(
-            "expected one batch from copy-to, got {}",
-            write_result.len()
-        )));
+/// Copy-to returns exactly one batch of one non-null `UInt64` value; anything
+/// else means that contract moved underneath us.
+fn decode_row_count(batches: &[RecordBatch]) -> Result<u64> {
+    match batches {
+        [batch] if batch.num_columns() == 1 && batch.num_rows() == 1 => batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .filter(|counts| !counts.is_null(0))
+            .map(|counts| counts.value(0)),
+        _ => None,
     }
-
-    let batch = &write_result[0];
-    if batch.num_columns() != 1 || batch.num_rows() != 1 {
-        return Err(DataFusionError::Internal(format!(
-            "expected one column and one row from copy-to, got {} columns and {} rows",
-            batch.num_columns(),
-            batch.num_rows()
-        )));
-    }
-
-    let schema = batch.schema();
-    let field = schema.field(0);
-    if field.name() != "count" || field.data_type() != &DataType::UInt64 || field.is_nullable() {
-        return Err(DataFusionError::Internal(format!(
-            "expected non-null count: UInt64 from copy-to, got {field:?}"
-        )));
-    }
-
-    let counts = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .ok_or_else(|| {
-            DataFusionError::Internal("copy-to count column was not a UInt64 array".to_string())
-        })?;
-    Ok(counts.value(0))
+    .ok_or_else(|| {
+        DataFusionError::Internal(format!(
+            "expected one batch with a single non-null count: UInt64 row from copy-to, got {batches:?}"
+        ))
+    })
 }

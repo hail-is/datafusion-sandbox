@@ -3,7 +3,7 @@ use datafusion::error::DataFusionError;
 use datafusion::prelude::{DataFrame, col, lit};
 use datafusion_sandbox::format::OutputFormat;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
-use datafusion_sandbox::{make_range_table, write, write_count};
+use datafusion_sandbox::{make_range_table, write};
 
 #[test]
 fn returns_the_pipeline_result_to_the_calling_thread() {
@@ -55,7 +55,7 @@ fn runs_a_pipeline_that_writes_output() {
     let output = dir.path().join("out.vortex");
     let output_path = output.to_str().unwrap().to_string();
 
-    let write_result = pipeline::run(
+    let rows_written = pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
             write(df, &output_path, &OutputFormat::VORTEX).await
@@ -64,7 +64,7 @@ fn runs_a_pipeline_that_writes_output() {
     )
     .unwrap();
 
-    assert_eq!(write_count(&write_result).unwrap(), 1000);
+    assert_eq!(rows_written, 1000);
     assert!(output.exists());
     assert!(output.metadata().unwrap().len() > 0);
 }
