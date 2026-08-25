@@ -11,15 +11,23 @@ shape of a plan is itself a first-class subject here, not just its results.
 **Pipeline**:
 A named end-to-end query over genomics data, from input tables through to its consumed result. A
 pipeline is the closure the runner executes: it takes a session, runs to completion on the
-pipeline's runtimes, and returns what it produced to the calling thread. A combiner run from the
-CLI returns an Outcome: written row counts, collected batches, or a plain or analyzed plan; fixture
-writers and tests also construct pipelines with other result types. A pipeline result is not a
-DataFrame tied to work that has yet to execute.
+pipeline's runtimes, and returns what it produced to the calling thread. A combiner run returns an
+Outcome; fixture writers and tests also construct pipelines with other result types. A pipeline
+result is not a DataFrame tied to work that has yet to execute.
 _Avoid_: job, query (too narrow — a pipeline includes its execution setup), driver
 
+**Combiner run**:
+One execution of a combiner against a dataset, from resolved settings through to an Outcome.
+_Avoid_: invocation, command
+
+**Action**:
+What a caller asks a combiner run to do with its combined rows: write them, collect them for display,
+render the plan, or execute and render the analyzed plan. The Action determines the run's Outcome.
+_Avoid_: mode (taken by **Compression mode**), ending, sink
+
 **Outcome**:
-What a CLI pipeline hands back after it runs: rows written, collected batches, or a plan rendered
-as text. Both plain explain and explain-analyze produce the rendered-plan case.
+What a pipeline hands back after it runs: rows written, collected batches, or a plan rendered as
+text. Both plain explain and explain-analyze produce the rendered-plan case.
 _Avoid_: result (too broad), output (ambiguous with a written artifact)
 
 **Combiner**:
@@ -88,10 +96,11 @@ directory named `s=<id>`, which DataFusion reads as a partition column.
 _Avoid_: individual, subject
 
 **Sample set**:
-Which samples a combiner run covers. It is a property of the dataset rather than of the caller or
-the formulation: the samples present under a path are discovered by listing its `s=` directories,
-and a caller may narrow that set but not extend it. A formulation may consume the set by building
-one scan per sample or by leaving the scan to cover all of them.
+Which samples a combiner run covers. It is a nonempty property of the dataset rather than of the
+caller or the formulation: the samples present under a path are discovered by listing its `s=`
+directories, and a caller may narrow that set but neither remove every sample nor extend it. A
+formulation may consume the set by building one scan per sample or by leaving the scan to cover all
+of them.
 _Avoid_: samples (unqualified), sample list, cohort
 
 **Dataset**:

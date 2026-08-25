@@ -41,7 +41,7 @@ pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> 
         Field::new("alleles", DataType::Utf8, false),
     ]));
 
-    let mut lps = Vec::with_capacity(dataset.sample_set().len());
+    let mut plans = Vec::with_capacity(dataset.sample_set().len());
     for sample in dataset.sample_set() {
         let sample_path = dataset.sample_path(sample)?;
         let df = read(
@@ -51,10 +51,9 @@ pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> 
             Some(Arc::clone(&schema)),
         )
         .await?;
-        lps.push(Arc::new(df.into_unoptimized_plan()));
+        plans.push(Arc::new(df.into_unoptimized_plan()));
     }
-    let lp = union_sample_plans(lps)?;
-    let df = DataFrame::new(ctx.state(), lp);
+    let df = DataFrame::new(ctx.state(), union_sample_plans(plans)?);
     let df = df.sort(locus_ordering())?;
     let df = df.distinct()?;
     df.window(vec![

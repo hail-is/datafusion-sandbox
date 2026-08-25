@@ -55,6 +55,26 @@ fn narrows_the_dataset_sample_set() {
 }
 
 #[test]
+fn rejects_an_empty_requested_sample_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fixture::write_sample_tables(dir.path(), &["sample-a"]);
+
+    let error = block_on(async {
+        let table_path = ListingTableUrl::parse(&root).unwrap();
+        Dataset::discover(&LocalFileSystem::new(), table_path, InputFormat::VORTEX)
+            .await
+            .unwrap()
+            .restrict_to(&[])
+            .expect_err("a dataset must retain at least one sample")
+    });
+
+    assert_eq!(
+        error.to_string(),
+        "Execution error: requested sample set contains no samples"
+    );
+}
+
+#[test]
 fn rejects_requested_samples_that_are_not_in_the_dataset() {
     let dir = tempfile::tempdir().unwrap();
     let root = fixture::write_sample_tables(dir.path(), &["sample-a"]);

@@ -1,13 +1,10 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use datafusion::arrow::util::pretty::pretty_format_batches;
-use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::error::Result;
-use datafusion::prelude::DataFrame;
 
+use datafusion_sandbox::Formulation;
+use datafusion_sandbox::combiner_run::{Action, CombinerRun};
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
-use datafusion_sandbox::pipeline::{self, PipelineOptions};
-use datafusion_sandbox::{Dataset, Formulation, Outcome, write};
-use std::path::Path;
+use std::{path::Path, thread::available_parallelism};
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
 
@@ -73,7 +70,7 @@ struct CombinerArgs {
     #[command(flatten)]
     formats: FormatArgs,
     #[command(flatten)]
-    ending: EndingArgs,
+    action: ActionArgs,
     /// Compression to use when writing.
     ///
     /// Parquet accepts uncompressed, snappy, gzip(LEVEL), brotli(LEVEL), lz4, zstd(LEVEL), or lz4_raw.
@@ -149,7 +146,7 @@ impl OutputFormatArg {
 
 #[derive(Args)]
 #[group(required = true, multiple = false)]
-struct EndingArgs {
+struct ActionArgs {
     /// Write the combined rows to PATH.
     #[arg(long, value_name = "PATH")]
     write: Option<String>,
@@ -164,39 +161,32 @@ struct EndingArgs {
     explain_analyze: bool,
 }
 
-enum Ending {
+enum CliAction {
     Write(String),
     Show,
     Explain,
     ExplainAnalyze,
 }
 
-impl Ending {
+impl CliAction {
     fn row_limit(&self, explicit_limit: Option<usize>) -> Option<usize> {
         explicit_limit.or_else(|| matches!(self, Self::Show).then_some(DEFAULT_SHOW_LIMIT))
     }
-
-    fn output_path(&self) -> Option<&str> {
-        match self {
-            Self::Write(path) => Some(path),
-            Self::Show | Self::Explain | Self::ExplainAnalyze => None,
-        }
-    }
 }
 
-impl From<EndingArgs> for Ending {
-    fn from(args: EndingArgs) -> Self {
+impl From<ActionArgs> for CliAction {
+    fn from(args: ActionArgs) -> Self {
         match args {
-            EndingArgs {
+            ActionArgs {
                 write: Some(path), ..
             } => Self::Write(path),
-            EndingArgs { show: true, .. } => Self::Show,
-            EndingArgs { explain: true, .. } => Self::Explain,
-            EndingArgs {
+            ActionArgs { show: true, .. } => Self::Show,
+            ActionArgs { explain: true, .. } => Self::Explain,
+            ActionArgs {
                 explain_analyze: true,
                 ..
             } => Self::ExplainAnalyze,
-            _ => unreachable!("clap requires exactly one ending"),
+            _ => unreachable!("clap requires exactly one action"),
         }
     }
 }
@@ -211,73 +201,49 @@ fn main() -> Result<()> {
     let CombinerArgs {
         path,
         formats,
-        ending,
+        action,
         compression,
         limit,
         sample_set,
     } = args;
-    let ending = Ending::from(ending);
+    let cli_action = CliAction::from(action);
     let input_format = formats.input_format.format();
-    let output_format = formats.output_format().format();
-    validate_output_extension(ending.output_path(), &output_format)?;
-    let output_format = match compression {
-        Some(compression) => output_format.with_compression(&compression)?,
-        None => output_format,
+    let limit = cli_action.row_limit(limit);
+    let action = match cli_action {
+        CliAction::Write(output_path) => {
+            let output_format = formats.output_format().format();
+            validate_output_extension(&output_path, &output_format)?;
+            let output_format = match compression {
+                Some(compression) => output_format.with_compression(&compression)?,
+                None => output_format,
+            };
+            Action::Write {
+                output_path,
+                output_format,
+            }
+        }
+        CliAction::Show => Action::Collect,
+        CliAction::Explain => Action::Explain,
+        CliAction::ExplainAnalyze => Action::ExplainAnalyze,
     };
-    let limit = ending.row_limit(limit);
-    let options = options_for(&path, ending.output_path(), threads);
+    let sample_set = (!sample_set.is_empty()).then_some(sample_set);
+    let threads = threads.unwrap_or_else(|| available_parallelism().map(|n| n.get()).unwrap_or(1));
     println!("formulation: {formulation}");
-    let outcome = pipeline::run(
-        move |ctx| async move {
-            let table_path = ListingTableUrl::parse(path)?;
-            let store = ctx.runtime_env().object_store(&table_path)?;
-            let dataset = Dataset::discover(store.as_ref(), table_path, input_format).await?;
-            let dataset = if sample_set.is_empty() {
-                dataset
-            } else {
-                dataset.restrict_to(&sample_set)?
-            };
-            let df = formulation.plan(&ctx, &dataset).await?;
-            let df = match limit {
-                Some(limit) => df.limit(0, Some(limit))?,
-                None => df,
-            };
-            produce_outcome(df, ending, output_format).await
-        },
-        options,
-    )?;
+    let outcome = CombinerRun {
+        formulation,
+        input_path: path,
+        input_format,
+        action,
+        sample_set,
+        row_limit: limit,
+        threads,
+    }
+    .execute()?;
     println!("{outcome}");
     Ok(())
 }
 
-async fn produce_outcome(
-    df: DataFrame,
-    ending: Ending,
-    output_format: OutputFormat,
-) -> Result<Outcome> {
-    match ending {
-        Ending::Write(output) => Ok(Outcome::RowsWritten(
-            write(df, &output, &output_format).await?,
-        )),
-        Ending::Show => Ok(Outcome::Batches(df.collect().await?)),
-        Ending::Explain => {
-            let batches = df.explain(false, false)?.collect().await?;
-            Ok(Outcome::Plan(pretty_format_batches(&batches)?.to_string()))
-        }
-        Ending::ExplainAnalyze => {
-            let batches = df.explain(false, true)?.collect().await?;
-            Ok(Outcome::Plan(pretty_format_batches(&batches)?.to_string()))
-        }
-    }
-}
-
-fn validate_output_extension(
-    output_path: Option<&str>,
-    output_format: &OutputFormat,
-) -> Result<()> {
-    let Some(output_path) = output_path else {
-        return Ok(());
-    };
+fn validate_output_extension(output_path: &str, output_format: &OutputFormat) -> Result<()> {
     let Some(extension) = Path::new(output_path)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -293,38 +259,6 @@ fn validate_output_extension(
     Ok(())
 }
 
-/// Pipeline options for a combiner reading from `input_path` and optionally writing to
-/// `output_path`: the object stores to register are the ones those paths live on, and local paths
-/// need none at all.
-fn options_for(
-    input_path: &str,
-    output_path: Option<&str>,
-    threads: Option<usize>,
-) -> PipelineOptions {
-    let mut options = PipelineOptions::default();
-    if let Some(threads) = threads {
-        options.threads = threads;
-    }
-    options.object_stores = [Some(input_path), output_path]
-        .into_iter()
-        .flatten()
-        .filter_map(object_store_base_url)
-        .collect();
-    options.object_stores.dedup();
-    options
-}
-
-/// The base URL of the object store `path` lives on, e.g. "gs://my-bucket", or None for a
-/// local path.
-fn object_store_base_url(path: &str) -> Option<String> {
-    let (scheme, rest) = path.split_once("://")?;
-    if scheme == "file" {
-        return None;
-    }
-    let authority = rest.split('/').next().unwrap_or("");
-    Some(format!("{scheme}://{authority}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,29 +272,5 @@ mod tests {
         assert!(err.contains("at least 1"), "got: {err}");
 
         assert!(parse_thread_count("banana").is_err());
-    }
-
-    #[test]
-    fn registers_the_object_stores_of_both_input_and_output() {
-        let options = options_for("gs://bucket-a/path", Some("gs://bucket-b/out.vortex"), None);
-        assert_eq!(options.object_stores, ["gs://bucket-a", "gs://bucket-b"]);
-    }
-
-    #[test]
-    fn registers_a_shared_object_store_once() {
-        let options = options_for("gs://bucket/path/", Some("gs://bucket/out.vortex"), None);
-        assert_eq!(options.object_stores, ["gs://bucket"]);
-    }
-
-    #[test]
-    fn registers_no_object_stores_for_local_paths() {
-        let options = options_for("data/samples", Some("data/out.vortex"), None);
-        assert!(options.object_stores.is_empty());
-    }
-
-    #[test]
-    fn registers_only_the_input_store_when_there_is_no_output() {
-        let options = options_for("gs://bucket-a/path", None, None);
-        assert_eq!(options.object_stores, ["gs://bucket-a"]);
     }
 }

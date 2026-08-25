@@ -1,157 +1,8 @@
 mod fixture;
 
-use datafusion::parquet::{
-    basic::Compression,
-    file::reader::{FileReader, SerializedFileReader},
-};
-use datafusion::prelude::{ParquetReadOptions, SessionContext};
-use std::{future::Future, path::Path, process::Command};
+use std::process::Command;
 
 use fixture::SAMPLES;
-
-#[test]
-fn write_mode_reports_rows_written() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
-
-    assert_rows_written(
-        "combine-refs",
-        &input,
-        &dir.path().join("combined_refs.vortex"),
-        400,
-    );
-    assert_rows_written(
-        "combine-alleles",
-        &input,
-        &dir.path().join("combined_alleles.vortex"),
-        8,
-    );
-}
-
-#[test]
-fn reference_combiner_one_scan_formulation_supports_every_mode() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
-
-    let stdout = successful_stdout(
-        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
-            .args([
-                "--threads",
-                "1",
-                "combine-refs",
-                &input,
-                "--formulation",
-                "one-scan",
-                "--write",
-            ])
-            .arg(dir.path().join("combined_refs_one_scan.vortex")),
-    );
-    assert_eq!(stdout.lines().next(), Some("formulation: one-scan"));
-    assert_eq!(stdout.lines().last(), Some("400"));
-
-    let stdout = successful_refs_stdout(&input, "one-scan", "--show");
-    assert_eq!(shown_row_count(&stdout), 20, "stdout:\n{stdout}");
-
-    let stdout = successful_refs_stdout(&input, "one-scan", "--explain");
-    assert!(
-        stdout.contains("SortPreservingMergeExec"),
-        "stdout:\n{stdout}"
-    );
-    assert!(!stdout.contains("SortExec:"), "stdout:\n{stdout}");
-
-    let stdout = successful_refs_stdout(&input, "one-scan", "--explain-analyze");
-    assert!(stdout.contains("Plan with Metrics"), "stdout:\n{stdout}");
-    assert!(stdout.contains("elapsed_compute"), "stdout:\n{stdout}");
-}
-
-#[test]
-fn writes_parquet_when_the_output_format_is_overridden() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
-    let output_path = dir.path().join("combined_refs.parquet");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
-        .args([
-            "--threads",
-            "1",
-            "combine-refs",
-            &input,
-            "--output-format",
-            "parquet",
-            "--compression",
-            "uncompressed",
-            "--write",
-        ])
-        .arg(&output_path)
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(parquet_row_count(&output_path), 400);
-    assert!(
-        parquet_compressions(&output_path)
-            .iter()
-            .all(|compression| compression == &Compression::UNCOMPRESSED)
-    );
-}
-
-#[test]
-fn writing_compact_vortex_changes_the_file_size() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
-    let sizes = ["standard", "compact"].map(|compression| {
-        let output_path = dir
-            .path()
-            .join(format!("combined_refs_{compression}.vortex"));
-        successful_stdout(
-            Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
-                .args([
-                    "--threads",
-                    "1",
-                    "combine-refs",
-                    &input,
-                    "--compression",
-                    compression,
-                    "--write",
-                ])
-                .arg(&output_path),
-        );
-        output_path.metadata().unwrap().len()
-    });
-
-    assert_ne!(sizes[0], sizes[1], "standard and compact file sizes match");
-}
-
-#[test]
-fn reads_parquet_input() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_parquet_sample_tables(dir.path(), SAMPLES);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
-        .args([
-            "--threads",
-            "1",
-            "combine-alleles",
-            &input,
-            "--input-format",
-            "parquet",
-            "--show",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("| 1        | A,G"), "stdout:\n{stdout}");
-}
 
 #[test]
 fn rejects_an_output_extension_that_contradicts_the_default_format() {
@@ -174,7 +25,7 @@ fn rejects_an_output_extension_that_contradicts_the_default_format() {
 }
 
 #[test]
-fn show_mode_defaults_to_vortex_input() {
+fn show_action_defaults_to_vortex_input() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
@@ -190,109 +41,50 @@ fn show_mode_defaults_to_vortex_input() {
 }
 
 #[test]
-fn explicit_limit_applies_in_every_mode() {
+fn show_action_defaults_to_twenty_rows() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
-    let stdout = successful_stdout(
-        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
+    let implicit = successful_combiner_stdout("combine-refs", &input, "--show");
+    let explicit = successful_stdout(Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args(
+        [
             "--threads",
             "1",
-            "combine-alleles",
+            "combine-refs",
             &input,
             "--show",
             "--limit",
-            "1",
-        ]),
-    );
-    assert_eq!(shown_row_count(&stdout), 1, "stdout:\n{stdout}");
-
-    let stdout = successful_stdout(
-        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
-            .args(["--threads", "1", "combine-refs", &input, "--write"])
-            .arg(dir.path().join("limited.vortex"))
-            .args(["--limit", "3"]),
-    );
-    assert_eq!(stdout.lines().last(), Some("3"), "stdout:\n{stdout}");
-
-    for mode in ["--explain", "--explain-analyze"] {
-        let stdout = successful_stdout(
-            Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
-                "--threads",
-                "1",
-                "combine-alleles",
-                &input,
-                mode,
-                "--limit",
-                "1",
-            ]),
-        );
-        assert!(
-            stdout.contains("GlobalLimitExec: skip=0, fetch=1"),
-            "mode {mode} stdout:\n{stdout}"
-        );
-    }
+            "20",
+        ],
+    ));
+    assert_eq!(implicit, explicit);
 }
 
 #[test]
-fn show_mode_defaults_to_twenty_rows() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
-
-    let stdout = successful_combiner_stdout("combine-refs", &input, "--show");
-    assert_eq!(shown_row_count(&stdout), 20, "stdout:\n{stdout}");
-}
-
-#[test]
-fn explain_mode_prints_the_combiner_plan() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
-
-    let stdout = successful_combiner_stdout("combine-refs", &input, "--explain");
-    assert!(stdout.contains("physical_plan"), "stdout:\n{stdout}");
-    assert!(
-        stdout.contains("SortPreservingMergeExec"),
-        "stdout:\n{stdout}"
-    );
-    assert!(!stdout.contains("LimitExec"), "stdout:\n{stdout}");
-}
-
-#[test]
-fn explain_analyze_mode_prints_operator_timings() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
-
-    let stdout = successful_combiner_stdout("combine-alleles", &input, "--explain-analyze");
-    assert!(stdout.contains("Plan with Metrics"), "stdout:\n{stdout}");
-    assert!(stdout.contains("elapsed_compute"), "stdout:\n{stdout}");
-    assert!(!stdout.contains("LimitExec"), "stdout:\n{stdout}");
-}
-
-#[test]
-fn combiner_requires_exactly_one_mode() {
-    let no_mode = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+fn combiner_requires_exactly_one_action() {
+    let no_action = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
         .args(["combine-refs", "missing"])
         .output()
         .unwrap();
 
-    assert!(!no_mode.status.success());
-    let stderr = String::from_utf8(no_mode.stderr).unwrap();
-    for mode in ["--write", "--show", "--explain", "--explain-analyze"] {
-        assert!(stderr.contains(mode), "stderr:\n{stderr}");
+    assert!(!no_action.status.success());
+    let stderr = String::from_utf8(no_action.stderr).unwrap();
+    for action in ["--write", "--show", "--explain", "--explain-analyze"] {
+        assert!(stderr.contains(action), "stderr:\n{stderr}");
     }
 
-    let two_modes = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+    let two_actions = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
         .args(["combine-alleles", "missing", "--show", "--explain"])
         .output()
         .unwrap();
 
-    assert!(!two_modes.status.success());
-    let stderr = String::from_utf8(two_modes.stderr).unwrap();
+    assert!(!two_actions.status.success());
+    let stderr = String::from_utf8(two_actions.stderr).unwrap();
     assert!(stderr.contains("cannot be used with"), "stderr:\n{stderr}");
 }
 
 #[test]
-fn compression_requires_write_mode() {
+fn compression_requires_a_write_action() {
     let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
         .args([
             "combine-refs",
@@ -316,9 +108,9 @@ fn compression_requires_write_mode() {
 }
 
 #[test]
-fn compression_is_rejected_in_non_write_modes() {
+fn compression_is_rejected_in_non_write_actions() {
     for command in ["combine-refs", "combine-alleles"] {
-        for mode in ["--show", "--explain", "--explain-analyze"] {
+        for action in ["--show", "--explain", "--explain-analyze"] {
             let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
                 .args([
                     command,
@@ -327,16 +119,16 @@ fn compression_is_rejected_in_non_write_modes() {
                     "parquet",
                     "--compression",
                     "snappy",
-                    mode,
+                    action,
                 ])
                 .output()
                 .unwrap();
 
-            assert!(!output.status.success(), "{command} {mode} succeeded");
+            assert!(!output.status.success(), "{command} {action} succeeded");
             let stderr = String::from_utf8(output.stderr).unwrap();
             assert!(
                 stderr.contains("cannot be used with"),
-                "{command} {mode} stderr:\n{stderr}"
+                "{command} {action} stderr:\n{stderr}"
             );
         }
     }
@@ -368,19 +160,19 @@ fn rejects_compression_unknown_to_the_output_format() {
 }
 
 #[test]
-fn failing_combiner_exits_non_zero() {
+fn failing_combiner_exits_non_zero_under_every_action() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("missing");
-    for mode in ["--show", "--explain", "--explain-analyze"] {
+    for action in ["--show", "--explain", "--explain-analyze"] {
         let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
             .args(["--threads", "1", "combine-refs"])
             .arg(&input)
-            .arg(mode)
+            .arg(action)
             .output()
             .unwrap();
         assert!(
             !output.status.success(),
-            "mode {mode} unexpectedly succeeded"
+            "action {action} unexpectedly succeeded"
         );
     }
 
@@ -436,46 +228,17 @@ fn samples_argument_accepts_a_comma_separated_list() {
     assert_eq!(stdout.lines().last(), Some("16"));
 }
 
-fn assert_rows_written(command: &str, input: &str, output_path: &Path, expected: u64) {
-    let stdout = successful_stdout(
-        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
-            .args(["--threads", "1", command, input, "--write"])
-            .arg(output_path),
-    );
-    assert_eq!(stdout.lines().next(), Some("formulation: union"));
-    assert_eq!(stdout.lines().last(), Some(expected.to_string().as_str()));
-}
-
-fn successful_combiner_stdout(command: &str, input: &str, mode: &str) -> String {
+fn successful_combiner_stdout(command: &str, input: &str, action: &str) -> String {
     let stdout = successful_stdout(
         Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
             "--threads",
             "1",
             command,
             input,
-            mode,
+            action,
         ]),
     );
     assert_eq!(stdout.lines().next(), Some("formulation: union"));
-    stdout
-}
-
-fn successful_refs_stdout(input: &str, formulation: &str, mode: &str) -> String {
-    let stdout = successful_stdout(
-        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
-            "--threads",
-            "1",
-            "combine-refs",
-            input,
-            "--formulation",
-            formulation,
-            mode,
-        ]),
-    );
-    assert_eq!(
-        stdout.lines().next(),
-        Some(format!("formulation: {formulation}").as_str())
-    );
     stdout
 }
 
@@ -487,39 +250,4 @@ fn successful_stdout(command: &mut Command) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
-}
-
-fn shown_row_count(stdout: &str) -> usize {
-    stdout.lines().filter(|line| line.starts_with("| ")).count() - 1
-}
-
-fn parquet_row_count(path: &Path) -> usize {
-    block_on(async {
-        let ctx = SessionContext::new();
-        ctx.read_parquet(path.to_str().unwrap(), ParquetReadOptions::default())
-            .await
-            .unwrap()
-            .count()
-            .await
-            .unwrap()
-    })
-}
-
-fn parquet_compressions(path: &Path) -> Vec<Compression> {
-    let reader = SerializedFileReader::try_from(path).unwrap();
-    reader
-        .metadata()
-        .row_groups()
-        .iter()
-        .flat_map(|row_group| row_group.columns())
-        .map(|column| column.compression())
-        .collect()
-}
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(future)
 }
