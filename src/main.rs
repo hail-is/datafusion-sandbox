@@ -1,15 +1,12 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use datafusion::arrow::util::pretty::pretty_format_batches;
+use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::error::Result;
-use datafusion::execution::context::SessionConfig;
 use datafusion::prelude::DataFrame;
 
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
-use datafusion_sandbox::{
-    Outcome, SAMPLES, combine_alleles, combine_refs, combine_refs_one_scan,
-    combiner_session_config, write,
-};
+use datafusion_sandbox::{Dataset, Formulation, Outcome, write};
 use std::path::Path;
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
@@ -23,7 +20,7 @@ struct Cli {
     /// Number of worker threads to execute on.
     ///
     /// Defaults to available parallelism. Does not affect the number of partitions the plan is
-    /// built with, which each combiner sets for itself.
+    /// built with, which each formulation settles for itself.
     #[arg(long, short = 'j', global = true, value_parser = parse_thread_count)]
     threads: Option<usize>,
 }
@@ -40,12 +37,34 @@ fn parse_thread_count(value: &str) -> std::result::Result<usize, String> {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Combine the reference data of all samples under PATH.
-    CombineRefs(CombinerArgs),
-    /// Combine reference data with one shared scan of all samples under PATH.
-    CombineRefsOneScan(CombinerArgs),
-    /// Combine the alleles of all samples under PATH.
+    /// Combine reference data for the dataset's sample set under PATH.
+    CombineRefs(CombineRefsArgs),
+    /// Combine alleles for the dataset's sample set under PATH.
     CombineAlleles(CombinerArgs),
+}
+
+#[derive(Args)]
+struct CombineRefsArgs {
+    #[command(flatten)]
+    combiner: CombinerArgs,
+    /// How to build the reference combiner's plan.
+    #[arg(long, value_enum, default_value = "union")]
+    formulation: CombineRefsFormulationArg,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CombineRefsFormulationArg {
+    Union,
+    OneScan,
+}
+
+impl CombineRefsFormulationArg {
+    fn formulation(self) -> Formulation {
+        match self {
+            Self::Union => Formulation::CombineRefsUnion,
+            Self::OneScan => Formulation::CombineRefsOneScan,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -69,6 +88,9 @@ struct CombinerArgs {
     /// Return at most ROWS combined rows. Defaults to 20 with --show and unlimited otherwise.
     #[arg(long, value_name = "ROWS")]
     limit: Option<usize>,
+    /// Restrict the dataset's sample set to comma-separated sample ids.
+    #[arg(long = "samples", value_delimiter = ',', value_name = "SAMPLE,...")]
+    sample_set: Vec<String>,
 }
 
 #[derive(Args)]
@@ -179,20 +201,12 @@ impl From<EndingArgs> for Ending {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Combiner {
-    Refs,
-    RefsOneScan,
-    Alleles,
-}
-
 fn main() -> Result<()> {
     let Cli { command, threads } = Cli::parse();
 
-    let (combiner, args) = match command {
-        Command::CombineRefs(args) => (Combiner::Refs, args),
-        Command::CombineRefsOneScan(args) => (Combiner::RefsOneScan, args),
-        Command::CombineAlleles(args) => (Combiner::Alleles, args),
+    let (formulation, args) = match command {
+        Command::CombineRefs(args) => (args.formulation.formulation(), args.combiner),
+        Command::CombineAlleles(args) => (Formulation::CombineAllelesUnion, args),
     };
     let CombinerArgs {
         path,
@@ -200,6 +214,7 @@ fn main() -> Result<()> {
         ending,
         compression,
         limit,
+        sample_set,
     } = args;
     let ending = Ending::from(ending);
     let input_format = formats.input_format.format();
@@ -210,22 +225,19 @@ fn main() -> Result<()> {
         None => output_format,
     };
     let limit = ending.row_limit(limit);
-    let session_config = match combiner {
-        Combiner::RefsOneScan => combine_refs_one_scan::session_config(),
-        Combiner::Refs | Combiner::Alleles => combiner_session_config(),
-    };
-    let options = options_for(&path, ending.output_path(), threads, session_config);
+    let options = options_for(&path, ending.output_path(), threads);
+    println!("formulation: {formulation}");
     let outcome = pipeline::run(
         move |ctx| async move {
-            let df = match combiner {
-                Combiner::Refs => combine_refs::plan(&ctx, &path, SAMPLES, input_format).await?,
-                Combiner::RefsOneScan => {
-                    combine_refs_one_scan::plan(&ctx, &path, input_format).await?
-                }
-                Combiner::Alleles => {
-                    combine_alleles::plan(&ctx, &path, SAMPLES, input_format).await?
-                }
+            let table_path = ListingTableUrl::parse(path)?;
+            let store = ctx.runtime_env().object_store(&table_path)?;
+            let dataset = Dataset::discover(store.as_ref(), table_path, input_format).await?;
+            let dataset = if sample_set.is_empty() {
+                dataset
+            } else {
+                dataset.restrict_to(&sample_set)?
             };
+            let df = formulation.plan(&ctx, &dataset).await?;
             let df = match limit {
                 Some(limit) => df.limit(0, Some(limit))?,
                 None => df,
@@ -288,12 +300,8 @@ fn options_for(
     input_path: &str,
     output_path: Option<&str>,
     threads: Option<usize>,
-    session_config: SessionConfig,
 ) -> PipelineOptions {
-    let mut options = PipelineOptions {
-        session_config,
-        ..Default::default()
-    };
+    let mut options = PipelineOptions::default();
     if let Some(threads) = threads {
         options.threads = threads;
     }
@@ -334,40 +342,25 @@ mod tests {
 
     #[test]
     fn registers_the_object_stores_of_both_input_and_output() {
-        let options = options_for(
-            "gs://bucket-a/path",
-            Some("gs://bucket-b/out.vortex"),
-            None,
-            combiner_session_config(),
-        );
+        let options = options_for("gs://bucket-a/path", Some("gs://bucket-b/out.vortex"), None);
         assert_eq!(options.object_stores, ["gs://bucket-a", "gs://bucket-b"]);
     }
 
     #[test]
     fn registers_a_shared_object_store_once() {
-        let options = options_for(
-            "gs://bucket/path/",
-            Some("gs://bucket/out.vortex"),
-            None,
-            combiner_session_config(),
-        );
+        let options = options_for("gs://bucket/path/", Some("gs://bucket/out.vortex"), None);
         assert_eq!(options.object_stores, ["gs://bucket"]);
     }
 
     #[test]
     fn registers_no_object_stores_for_local_paths() {
-        let options = options_for(
-            "data/samples",
-            Some("data/out.vortex"),
-            None,
-            combiner_session_config(),
-        );
+        let options = options_for("data/samples", Some("data/out.vortex"), None);
         assert!(options.object_stores.is_empty());
     }
 
     #[test]
     fn registers_only_the_input_store_when_there_is_no_output() {
-        let options = options_for("gs://bucket-a/path", None, None, combiner_session_config());
+        let options = options_for("gs://bucket-a/path", None, None);
         assert_eq!(options.object_stores, ["gs://bucket-a"]);
     }
 }

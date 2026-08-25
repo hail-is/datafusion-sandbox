@@ -1,11 +1,11 @@
-use crate::{format::InputFormat, read};
+use crate::{Dataset, derived_session, read, union_sample_plans};
 
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema},
     datasource::listing::ListingOptions,
     error::Result,
     functions_window::rank::rank,
-    logical_expr::{LogicalPlan, SortExpr, logical_plan::Union},
+    logical_expr::SortExpr,
     prelude::*,
 };
 
@@ -22,18 +22,14 @@ fn locus_ordering() -> Vec<SortExpr> {
     ]
 }
 
-/// Builds the plan combining the alleles of all `samples` under `table_path`, which is expected
-/// to contain one directory per sample, of the form "s=HG123456". Produces the distinct set of
-/// alleles at each locus, ranked within the locus.
-pub async fn plan(
-    ctx: &SessionContext,
-    table_path: &str,
-    samples: &[&str],
-    input_format: InputFormat,
-) -> Result<DataFrame> {
-    let table_path = table_path.trim_end_matches('/');
-
-    let listing_options = ListingOptions::new(input_format.read_format())
+/// Builds the union-of-per-sample-scans formulation under the session its plan
+/// shape depends on. Produces the distinct set of alleles at each locus,
+/// ranked within the locus.
+pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
+    let ctx = derived_session(ctx, |options| {
+        options.execution.target_partitions = 1;
+    });
+    let listing_options = ListingOptions::new(dataset.input_format().read_format())
         .with_file_sort_order(vec![locus_ordering()])
         .with_table_partition_cols(vec![("contig".to_string(), DataType::Utf8)]);
 
@@ -45,18 +41,19 @@ pub async fn plan(
         Field::new("alleles", DataType::Utf8, false),
     ]));
 
-    let mut lps = Vec::with_capacity(samples.len());
-    for s in samples {
+    let mut lps = Vec::with_capacity(dataset.sample_set().len());
+    for sample in dataset.sample_set() {
+        let sample_path = dataset.sample_path(sample)?;
         let df = read(
-            ctx,
-            format!("{table_path}/s={s}/"),
+            &ctx,
+            sample_path.as_str(),
             listing_options.clone(),
             Some(Arc::clone(&schema)),
         )
         .await?;
         lps.push(Arc::new(df.into_unoptimized_plan()));
     }
-    let lp = LogicalPlan::Union(Union::try_new(lps)?);
+    let lp = union_sample_plans(lps)?;
     let df = DataFrame::new(ctx.state(), lp);
     let df = df.sort(locus_ordering())?;
     let df = df.distinct()?;

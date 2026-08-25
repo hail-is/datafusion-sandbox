@@ -5,8 +5,9 @@ use datafusion::parquet::{
     file::reader::{FileReader, SerializedFileReader},
 };
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
-use datafusion_sandbox::SAMPLES;
 use std::{future::Future, path::Path, process::Command};
+
+use fixture::SAMPLES;
 
 #[test]
 fn write_mode_reports_rows_written() {
@@ -28,28 +29,37 @@ fn write_mode_reports_rows_written() {
 }
 
 #[test]
-fn one_scan_reference_combiner_supports_every_mode() {
+fn reference_combiner_one_scan_formulation_supports_every_mode() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
-    assert_rows_written(
-        "combine-refs-one-scan",
-        &input,
-        &dir.path().join("combined_refs_one_scan.vortex"),
-        400,
+    let stdout = successful_stdout(
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+            .args([
+                "--threads",
+                "1",
+                "combine-refs",
+                &input,
+                "--formulation",
+                "one-scan",
+                "--write",
+            ])
+            .arg(dir.path().join("combined_refs_one_scan.vortex")),
     );
+    assert_eq!(stdout.lines().next(), Some("formulation: one-scan"));
+    assert_eq!(stdout.lines().last(), Some("400"));
 
-    let stdout = successful_combiner_stdout("combine-refs-one-scan", &input, "--show");
+    let stdout = successful_refs_stdout(&input, "one-scan", "--show");
     assert_eq!(shown_row_count(&stdout), 20, "stdout:\n{stdout}");
 
-    let stdout = successful_combiner_stdout("combine-refs-one-scan", &input, "--explain");
+    let stdout = successful_refs_stdout(&input, "one-scan", "--explain");
     assert!(
         stdout.contains("SortPreservingMergeExec"),
         "stdout:\n{stdout}"
     );
     assert!(!stdout.contains("SortExec:"), "stdout:\n{stdout}");
 
-    let stdout = successful_combiner_stdout("combine-refs-one-scan", &input, "--explain-analyze");
+    let stdout = successful_refs_stdout(&input, "one-scan", "--explain-analyze");
     assert!(stdout.contains("Plan with Metrics"), "stdout:\n{stdout}");
     assert!(stdout.contains("elapsed_compute"), "stdout:\n{stdout}");
 }
@@ -384,17 +394,60 @@ fn failing_combiner_exits_non_zero() {
     assert!(!write_output.status.success());
 }
 
+#[test]
+fn combine_alleles_rejects_a_formulation_argument_before_running() {
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args([
+            "combine-alleles",
+            "missing",
+            "--formulation",
+            "one-scan",
+            "--show",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--formulation"), "stderr:\n{stderr}");
+    assert!(stderr.contains("unexpected argument"), "stderr:\n{stderr}");
+}
+
+#[test]
+fn samples_argument_accepts_a_comma_separated_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::write_sample_tables(dir.path(), &SAMPLES[..4]);
+    let requested = format!("{},{}", SAMPLES[0], SAMPLES[1]);
+    let stdout = successful_stdout(
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+            .args([
+                "--threads",
+                "1",
+                "combine-refs",
+                &input,
+                "--samples",
+                &requested,
+                "--write",
+            ])
+            .arg(dir.path().join("restricted.vortex")),
+    );
+
+    assert_eq!(stdout.lines().next(), Some("formulation: union"));
+    assert_eq!(stdout.lines().last(), Some("16"));
+}
+
 fn assert_rows_written(command: &str, input: &str, output_path: &Path, expected: u64) {
     let stdout = successful_stdout(
         Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
             .args(["--threads", "1", command, input, "--write"])
             .arg(output_path),
     );
+    assert_eq!(stdout.lines().next(), Some("formulation: union"));
     assert_eq!(stdout.lines().last(), Some(expected.to_string().as_str()));
 }
 
 fn successful_combiner_stdout(command: &str, input: &str, mode: &str) -> String {
-    successful_stdout(
+    let stdout = successful_stdout(
         Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
             "--threads",
             "1",
@@ -402,7 +455,28 @@ fn successful_combiner_stdout(command: &str, input: &str, mode: &str) -> String 
             input,
             mode,
         ]),
-    )
+    );
+    assert_eq!(stdout.lines().next(), Some("formulation: union"));
+    stdout
+}
+
+fn successful_refs_stdout(input: &str, formulation: &str, mode: &str) -> String {
+    let stdout = successful_stdout(
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox")).args([
+            "--threads",
+            "1",
+            "combine-refs",
+            input,
+            "--formulation",
+            formulation,
+            mode,
+        ]),
+    );
+    assert_eq!(
+        stdout.lines().next(),
+        Some(format!("formulation: {formulation}").as_str())
+    );
+    stdout
 }
 
 fn successful_stdout(command: &mut Command) -> String {
