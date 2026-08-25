@@ -3,7 +3,6 @@ use datafusion::{
         array::{Array, Int32Array, UInt64Array},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
-        util::pretty::pretty_format_batches,
     },
     catalog::streaming::StreamingTable,
     common::{DataFusionError, config::ConfigOptions},
@@ -32,6 +31,7 @@ use crate::format::{InputFormat, OutputFormat};
 pub mod combine_alleles;
 pub mod combine_refs_one_scan;
 pub mod combine_refs_union;
+pub mod combiner_run;
 pub mod cpu_runtime;
 pub mod format;
 pub mod pipeline;
@@ -106,9 +106,14 @@ impl Dataset {
         ListingTableUrl::parse(format!("{}s={sample}/", self.table_path.as_str()))
     }
 
-    /// Restricts this dataset to the requested sample set, rejecting ids that
-    /// are not present rather than silently intersecting the two sets.
+    /// Restricts this dataset to a nonempty requested sample set, rejecting ids
+    /// that are not present rather than silently intersecting the two sets.
     pub fn restrict_to(mut self, requested_sample_set: &[String]) -> Result<Self> {
+        if requested_sample_set.is_empty() {
+            return Err(DataFusionError::Execution(
+                "requested sample set contains no samples".to_string(),
+            ));
+        }
         let available = self
             .sample_set
             .iter()
@@ -185,29 +190,6 @@ fn union_sample_plans(mut plans: Vec<Arc<LogicalPlan>>) -> Result<LogicalPlan> {
         Ok((*plans.pop().expect("a dataset has at least one sample")).clone())
     } else {
         Ok(LogicalPlan::Union(Union::try_new(plans)?))
-    }
-}
-
-/// What a CLI pipeline hands back to its caller.
-pub enum Outcome {
-    /// The number of rows written to an output path.
-    RowsWritten(u64),
-    /// Record batches collected in memory.
-    Batches(Vec<RecordBatch>),
-    /// A plain or analyzed plan rendered as text.
-    Plan(String),
-}
-
-impl fmt::Display for Outcome {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RowsWritten(count) => write!(f, "{count}"),
-            Self::Batches(batches) => {
-                let formatted = pretty_format_batches(batches).map_err(|_| fmt::Error)?;
-                write!(f, "{formatted}")
-            }
-            Self::Plan(plan) => f.write_str(plan),
-        }
     }
 }
 

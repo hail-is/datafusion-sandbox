@@ -35,18 +35,17 @@ pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> 
         ]);
     let df = read(&ctx, dataset.table_path().as_str(), listing_options, None).await?;
 
-    let lps = dataset
+    let plans = dataset
         .sample_set()
         .iter()
-        .map(|s| {
+        .map(|sample| {
             Ok(Arc::new(
                 df.clone()
-                    .filter(col("s").eq(lit(s.as_str())))?
+                    .filter(col("s").eq(lit(sample.as_str())))?
                     .into_unoptimized_plan(),
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    let lp = union_sample_plans(lps)?;
-    let df = DataFrame::new(ctx.state(), lp);
+    let df = DataFrame::new(ctx.state(), union_sample_plans(plans)?);
     df.sort(locus_ordering())
 }
