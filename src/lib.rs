@@ -6,42 +6,187 @@ use datafusion::{
         util::pretty::pretty_format_batches,
     },
     catalog::streaming::StreamingTable,
-    common::DataFusionError,
+    common::{DataFusionError, config::ConfigOptions},
     datasource::{
         file_format::format_as_file_type,
-        listing::{ListingOptions, ListingTable, ListingTableConfig},
+        listing::{
+            ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+            helpers::{describe_partition, list_partitions},
+        },
     },
     error::Result,
-    execution::{
-        SendableRecordBatchStream, TaskContext,
-        context::{DataFilePaths, SessionConfig},
-    },
+    execution::{SendableRecordBatchStream, TaskContext, context::DataFilePaths},
     functions_aggregate::count::count_all,
-    logical_expr::{SortExpr, col, logical_plan::LogicalPlanBuilder},
+    logical_expr::{
+        LogicalPlan, SortExpr, col,
+        logical_plan::{LogicalPlanBuilder, Union},
+    },
     physical_plan::{stream::RecordBatchStreamAdapter, streaming::PartitionStream},
     prelude::*,
 };
-use std::{fmt, sync::Arc};
+use object_store::ObjectStore;
+use std::{collections::BTreeSet, fmt, sync::Arc};
 
-use crate::format::OutputFormat;
+use crate::format::{InputFormat, OutputFormat};
 
 pub mod combine_alleles;
-pub mod combine_refs;
 pub mod combine_refs_one_scan;
+pub mod combine_refs_union;
 pub mod cpu_runtime;
 pub mod format;
 pub mod pipeline;
 
-/// The 50 samples of the `1kg_chr22` benchmark dataset.
-pub const SAMPLES: &[&str] = &[
-    "HG00308", "HG00592", "HG02230", "NA18534", "NA20760", "NA18530", "HG03805", "HG02223",
-    "HG00637", "NA12249", "HG02224", "NA21099", "NA11830", "HG01378", "HG00187", "HG01356",
-    "HG02188", "NA20769", "HG00190", "NA18618", "NA18507", "HG03363", "NA21123", "HG03088",
-    "NA21122", "HG00373", "HG01058", "HG00524", "NA18969", "HG03833", "HG04158", "HG03578",
-    "HG00339", "HG00313", "NA20317", "HG00553", "HG01357", "NA19747", "NA18609", "HG01377",
-    "NA19456", "HG00590", "HG01383", "HG00320", "HG04001", "NA20796", "HG00323", "HG01384",
-    "NA18613", "NA20802",
-];
+/// A directory of per-sample tables, its format, and its sample set.
+#[derive(Debug)]
+pub struct Dataset {
+    table_path: ListingTableUrl,
+    input_format: InputFormat,
+    sample_set: Vec<String>,
+}
+
+impl Dataset {
+    /// Discovers the sample directories immediately below `table_path` with one
+    /// object-store listing request.
+    pub async fn discover(
+        store: &dyn ObjectStore,
+        mut table_path: ListingTableUrl,
+        input_format: InputFormat,
+    ) -> Result<Self> {
+        if !table_path.is_collection() {
+            let path = <ListingTableUrl as AsRef<str>>::as_ref(&table_path);
+            table_path = ListingTableUrl::parse(format!("{}/", path.trim_end_matches('/')))?;
+        }
+        let partitions = list_partitions(store, &table_path, 0, None).await?;
+        let mut sample_set = partitions
+            .iter()
+            .filter_map(|partition| {
+                let (path, depth, _) = describe_partition(partition);
+                (depth == 1)
+                    .then(|| path.trim_end_matches('/').rsplit('/').next())
+                    .flatten()
+                    .and_then(|directory| directory.strip_prefix("s="))
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        sample_set.sort();
+        if sample_set.is_empty() {
+            return Err(DataFusionError::Execution(format!(
+                "dataset '{}' contains no samples",
+                <ListingTableUrl as AsRef<str>>::as_ref(&table_path)
+            )));
+        }
+
+        Ok(Self {
+            table_path,
+            input_format,
+            sample_set,
+        })
+    }
+
+    /// The root every sample directory hangs off, normalised by [`discover`] to
+    /// a collection URL and so always ending in a delimiter.
+    ///
+    /// [`discover`]: Self::discover
+    pub fn table_path(&self) -> &ListingTableUrl {
+        &self.table_path
+    }
+
+    pub fn input_format(&self) -> &InputFormat {
+        &self.input_format
+    }
+
+    pub fn sample_set(&self) -> &[String] {
+        &self.sample_set
+    }
+
+    /// The directory holding one sample's files, which is the only place the
+    /// `s=<sample>` layout is written down for a formulation that reads each
+    /// sample from its own path rather than through a partition column.
+    pub fn sample_path(&self, sample: &str) -> Result<ListingTableUrl> {
+        ListingTableUrl::parse(format!("{}s={sample}/", self.table_path.as_str()))
+    }
+
+    /// Restricts this dataset to the requested sample set, rejecting ids that
+    /// are not present rather than silently intersecting the two sets.
+    pub fn restrict_to(mut self, requested_sample_set: &[String]) -> Result<Self> {
+        let available = self
+            .sample_set
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let missing = requested_sample_set
+            .iter()
+            .map(String::as_str)
+            .filter(|sample| !available.contains(sample))
+            .collect::<BTreeSet<_>>();
+        if !missing.is_empty() {
+            return Err(DataFusionError::Execution(format!(
+                "samples not found in dataset: {}",
+                missing.into_iter().collect::<Vec<_>>().join(", ")
+            )));
+        }
+
+        let requested_sample_set = requested_sample_set
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        self.sample_set
+            .retain(|sample| requested_sample_set.contains(sample.as_str()));
+        Ok(self)
+    }
+}
+
+/// A supported way to build one of the combiners.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Formulation {
+    CombineAllelesUnion,
+    CombineRefsUnion,
+    CombineRefsOneScan,
+}
+
+impl fmt::Display for Formulation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CombineAllelesUnion | Self::CombineRefsUnion => formatter.write_str("union"),
+            Self::CombineRefsOneScan => formatter.write_str("one-scan"),
+        }
+    }
+}
+
+impl Formulation {
+    /// Builds this formulation's plan over `dataset`.
+    pub async fn plan(self, ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
+        match self {
+            Self::CombineAllelesUnion => combine_alleles::plan(ctx, dataset).await,
+            Self::CombineRefsUnion => combine_refs_union::plan(ctx, dataset).await,
+            Self::CombineRefsOneScan => combine_refs_one_scan::plan(ctx, dataset).await,
+        }
+    }
+}
+
+/// Derives a session from `ctx` with `overrides` applied to its config.
+///
+/// [`SessionContext::state`] hands back an owned clone that shares the caller's
+/// `Arc<RuntimeEnv>` and catalog list, so registered object stores and the
+/// file-statistics cache carry over. The caller's `SessionConfig` still holds a
+/// reference to the same `Arc<ConfigOptions>`, so `options_mut` copies rather
+/// than mutating in place and the overrides cannot reach the caller.
+fn derived_session(
+    ctx: &SessionContext,
+    overrides: impl FnOnce(&mut ConfigOptions),
+) -> SessionContext {
+    let mut state = ctx.state();
+    overrides(state.config_mut().options_mut());
+    SessionContext::new_with_state(state)
+}
+
+fn union_sample_plans(mut plans: Vec<Arc<LogicalPlan>>) -> Result<LogicalPlan> {
+    if plans.len() == 1 {
+        Ok((*plans.pop().expect("a dataset has at least one sample")).clone())
+    } else {
+        Ok(LogicalPlan::Union(Union::try_new(plans)?))
+    }
+}
 
 /// What a CLI pipeline hands back to its caller.
 pub enum Outcome {
@@ -64,15 +209,6 @@ impl fmt::Display for Outcome {
             Self::Plan(plan) => f.write_str(plan),
         }
     }
-}
-
-/// The session config the combiners' plan shape depends on. Forcing one partition
-/// per input scan is what leaves one partition per sample going into the
-/// `SortPreservingMergeExec`; run a combiner under a different config and you get
-/// a different plan. Shared so that what the CLI runs and what the plan shape
-/// tests assert on cannot drift apart.
-pub fn combiner_session_config() -> SessionConfig {
-    SessionConfig::new().with_target_partitions(1)
 }
 
 #[derive(Debug)]
