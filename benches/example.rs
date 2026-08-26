@@ -1,6 +1,6 @@
 use datafusion::physical_plan::{ExecutionPlan, execute_stream};
 use datafusion::prelude::*;
-use datafusion_sandbox::*;
+use datafusion_sandbox::synthetic::{make_range_table, make_table_group_by_aggregate_sorted};
 use divan::Bencher;
 use divan::counter::ItemsCount;
 use futures_util::stream::StreamExt;

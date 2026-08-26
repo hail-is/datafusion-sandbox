@@ -9,9 +9,9 @@ use datafusion::{
     },
 };
 use datafusion_sandbox::{
-    Formulation,
     combiner_run::{Action, CombinerRun, Outcome},
     format::{InputFormat, OutputFormat},
+    formulation::Formulation,
 };
 use std::fs;
 

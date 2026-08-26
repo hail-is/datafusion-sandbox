@@ -1,7 +1,8 @@
 //! The one-shared-scan reference combiner formulation preserves one input
 //! partition per file for a sort-preserving merge.
 
-use crate::{Dataset, derived_session, reference_layout};
+use super::{derived_session, reference_layout};
+use crate::dataset::Dataset;
 
 use datafusion::{error::Result, prelude::*};
 

@@ -1,6 +1,6 @@
 use datafusion::error::Result;
 use datafusion::prelude::*;
-use datafusion_sandbox::*;
+use datafusion_sandbox::synthetic::make_table_range_join;
 
 #[tokio::main]
 async fn main() -> Result<()> {

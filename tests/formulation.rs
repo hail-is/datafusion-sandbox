@@ -19,7 +19,11 @@ use datafusion::{
     },
     prelude::{SessionConfig, SessionContext, col},
 };
-use datafusion_sandbox::{Dataset, DatasetLayout, Formulation, format::InputFormat};
+use datafusion_sandbox::{
+    dataset::{Dataset, DatasetLayout},
+    format::InputFormat,
+    formulation::Formulation,
+};
 
 use std::{future::Future, sync::Arc};
 

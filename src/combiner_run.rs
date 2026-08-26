@@ -1,8 +1,9 @@
 //! A resolved combiner run, the action it performs, and its outcome.
 
 use crate::{
-    Dataset, Formulation,
+    dataset::Dataset,
     format::{InputFormat, OutputFormat},
+    formulation::Formulation,
     pipeline::{self, PipelineOptions},
 };
 

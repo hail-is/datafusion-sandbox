@@ -2,8 +2,8 @@ use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::{DataFrame, col, lit};
 use datafusion_sandbox::format::OutputFormat;
-use datafusion_sandbox::make_range_table;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
+use datafusion_sandbox::synthetic::make_range_table;
 
 #[test]
 fn returns_the_pipeline_result_to_the_calling_thread() {

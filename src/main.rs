@@ -1,9 +1,9 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use datafusion::error::Result;
 
-use datafusion_sandbox::Formulation;
 use datafusion_sandbox::combiner_run::{Action, CombinerRun};
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
+use datafusion_sandbox::formulation::Formulation;
 use std::{path::Path, thread::available_parallelism};
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
