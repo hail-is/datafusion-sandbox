@@ -1,4 +1,5 @@
-use crate::{Dataset, DatasetLayout, derived_session, union_sample_plans};
+use super::{derived_session, union_sample_plans};
+use crate::dataset::{Dataset, DatasetLayout};
 
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema},

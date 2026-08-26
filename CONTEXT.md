@@ -113,6 +113,11 @@ optional schema. It describes how rows are distributed across files, separately 
 is encoded.
 _Avoid_: format (the encoding of one file), listing options, storage config
 
+**Synthetic table**:
+A table of generated rows held in memory, used to exercise a seam without reading genomics data. It
+is not genomics-shaped and is not meant to be.
+_Avoid_: fixture (fixtures may contain representative genomics data), mock table
+
 **Locus**:
 A position in the genome: a contig together with a position within it. The unit both combiners
 order and group by.

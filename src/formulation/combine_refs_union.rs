@@ -1,4 +1,5 @@
-use crate::{Dataset, derived_session, reference_layout, union_sample_plans};
+use super::{derived_session, reference_layout, union_sample_plans};
+use crate::dataset::Dataset;
 
 use datafusion::{error::Result, prelude::*};
 

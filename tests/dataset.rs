@@ -7,7 +7,10 @@ use datafusion::{
     object_store::local::LocalFileSystem,
     prelude::SessionContext,
 };
-use datafusion_sandbox::{Dataset, DatasetLayout, format::InputFormat};
+use datafusion_sandbox::{
+    dataset::{Dataset, DatasetLayout},
+    format::InputFormat,
+};
 
 use std::{future::Future, sync::Arc};
 

@@ -1,5 +1,5 @@
 use datafusion::prelude::SessionContext;
-use datafusion_sandbox::{format::OutputFormat, make_range_table};
+use datafusion_sandbox::{format::OutputFormat, synthetic::make_range_table};
 
 use std::future::Future;
 
