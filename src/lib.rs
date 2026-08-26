@@ -1,32 +1,26 @@
 use datafusion::{
     arrow::{
-        array::{Array, Int32Array, UInt64Array},
+        array::Int32Array,
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
     },
     catalog::streaming::StreamingTable,
     common::{DataFusionError, config::ConfigOptions},
-    datasource::{
-        file_format::format_as_file_type,
-        listing::{
-            ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
-            helpers::{describe_partition, list_partitions},
-        },
+    datasource::listing::{
+        ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+        helpers::{describe_partition, list_partitions},
     },
     error::Result,
-    execution::{SendableRecordBatchStream, TaskContext, context::DataFilePaths},
+    execution::{SendableRecordBatchStream, TaskContext},
     functions_aggregate::count::count_all,
-    logical_expr::{
-        LogicalPlan, SortExpr, col,
-        logical_plan::{LogicalPlanBuilder, Union},
-    },
+    logical_expr::{LogicalPlan, SortExpr, col, logical_plan::Union},
     physical_plan::{stream::RecordBatchStreamAdapter, streaming::PartitionStream},
     prelude::*,
 };
 use object_store::ObjectStore;
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
-use crate::format::{InputFormat, OutputFormat};
+use crate::format::InputFormat;
 
 pub mod combine_alleles;
 pub mod combine_refs_one_scan;
@@ -36,11 +30,20 @@ pub mod cpu_runtime;
 pub mod format;
 pub mod pipeline;
 
-/// A directory of per-sample tables, its format, and its sample set.
+/// How a dataset's rows and files are arranged on disk.
+#[derive(Clone, Debug)]
+pub struct DatasetLayout {
+    pub locus_ordering: Vec<SortExpr>,
+    pub partition_columns: Vec<(String, DataType)>,
+    pub schema: Option<SchemaRef>,
+}
+
+/// A directory of per-sample tables, its format, layout, and discovered sample set.
 #[derive(Debug)]
 pub struct Dataset {
     table_path: ListingTableUrl,
     input_format: InputFormat,
+    layout: DatasetLayout,
     sample_set: Vec<String>,
 }
 
@@ -51,6 +54,7 @@ impl Dataset {
         store: &dyn ObjectStore,
         mut table_path: ListingTableUrl,
         input_format: InputFormat,
+        layout: DatasetLayout,
     ) -> Result<Self> {
         if !table_path.is_collection() {
             let path = <ListingTableUrl as AsRef<str>>::as_ref(&table_path);
@@ -79,31 +83,77 @@ impl Dataset {
         Ok(Self {
             table_path,
             input_format,
+            layout,
             sample_set,
         })
-    }
-
-    /// The root every sample directory hangs off, normalised by [`discover`] to
-    /// a collection URL and so always ending in a delimiter.
-    ///
-    /// [`discover`]: Self::discover
-    pub fn table_path(&self) -> &ListingTableUrl {
-        &self.table_path
-    }
-
-    pub fn input_format(&self) -> &InputFormat {
-        &self.input_format
     }
 
     pub fn sample_set(&self) -> &[String] {
         &self.sample_set
     }
 
-    /// The directory holding one sample's files, which is the only place the
-    /// `s=<sample>` layout is written down for a formulation that reads each
-    /// sample from its own path rather than through a partition column.
-    pub fn sample_path(&self, sample: &str) -> Result<ListingTableUrl> {
-        ListingTableUrl::parse(format!("{}s={sample}/", self.table_path.as_str()))
+    /// Reads the dataset's sample set with its declared ordering, partitions, and schema.
+    pub async fn read(&self, ctx: &SessionContext) -> Result<DataFrame> {
+        self.read_path(
+            ctx,
+            self.table_path.clone(),
+            self.layout.partition_columns.clone(),
+        )
+        .await?
+        .filter(
+            col("s").in_list(
+                self.sample_set
+                    .iter()
+                    .map(|sample| lit(sample.as_str()))
+                    .collect(),
+                false,
+            ),
+        )
+    }
+
+    /// Reads one sample directory, dropping the `s` partition column above it.
+    pub async fn read_sample(&self, ctx: &SessionContext, sample: &str) -> Result<DataFrame> {
+        let sample_path =
+            ListingTableUrl::parse(format!("{}s={sample}/", self.table_path.as_str()))?;
+        let partition_columns = self
+            .layout
+            .partition_columns
+            .iter()
+            .filter(|(name, _)| name != "s")
+            .cloned()
+            .collect();
+        self.read_path(ctx, sample_path, partition_columns).await
+    }
+
+    /// Checks that the dataset's locus ordering starts with every required expression.
+    pub fn check_ordering(&self, required: &[SortExpr]) -> Result<()> {
+        if self.layout.locus_ordering.starts_with(required) {
+            return Ok(());
+        }
+
+        Err(DataFusionError::Execution(format!(
+            "dataset locus ordering {:?} does not satisfy required ordering {:?}",
+            self.layout.locus_ordering, required
+        )))
+    }
+
+    async fn read_path(
+        &self,
+        ctx: &SessionContext,
+        table_path: ListingTableUrl,
+        partition_columns: Vec<(String, DataType)>,
+    ) -> Result<DataFrame> {
+        let listing_options = ListingOptions::new(self.input_format.read_format())
+            .with_file_sort_order(vec![self.layout.locus_ordering.clone()])
+            .with_table_partition_cols(partition_columns);
+        let config = ListingTableConfig::new(table_path).with_listing_options(listing_options);
+        let config = match &self.layout.schema {
+            Some(schema) => config.with_schema(Arc::clone(schema)),
+            None => config.infer_schema(&ctx.state()).await?,
+        };
+        let table = ListingTable::try_new(config)?
+            .with_cache(ctx.runtime_env().cache_manager.get_file_statistic_cache());
+        ctx.read_table(Arc::new(table))
     }
 
     /// Restricts this dataset to a nonempty requested sample set, rejecting ids
@@ -159,13 +209,36 @@ impl fmt::Display for Formulation {
 }
 
 impl Formulation {
+    pub fn required_layout(self) -> DatasetLayout {
+        match self {
+            Self::CombineAllelesUnion => combine_alleles::required_layout(),
+            Self::CombineRefsUnion | Self::CombineRefsOneScan => reference_layout(),
+        }
+    }
+
     /// Builds this formulation's plan over `dataset`.
     pub async fn plan(self, ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
+        let required_layout = self.required_layout();
+        dataset.check_ordering(&required_layout.locus_ordering)?;
         match self {
             Self::CombineAllelesUnion => combine_alleles::plan(ctx, dataset).await,
             Self::CombineRefsUnion => combine_refs_union::plan(ctx, dataset).await,
             Self::CombineRefsOneScan => combine_refs_one_scan::plan(ctx, dataset).await,
         }
+    }
+}
+
+fn reference_layout() -> DatasetLayout {
+    DatasetLayout {
+        locus_ordering: vec![
+            col("contig").sort(true, false),
+            col("position").sort(true, false),
+        ],
+        partition_columns: vec![
+            ("s".to_string(), DataType::Utf8),
+            ("contig".to_string(), DataType::Utf8),
+        ],
+        schema: None,
     }
 }
 
@@ -278,83 +351,4 @@ pub fn make_table_range_join(
     let left = make_range_table(ctx, m, batch_size)?;
     let right = make_range_table(ctx, n, batch_size)?.select(vec![col("idx").alias("idx2")])?;
     left.join(right, JoinType::Inner, &["idx"], &["idx2"], None)
-}
-
-/// Reads one or more file collections as a single table.
-///
-/// Takes the same listing options and optional schema that
-/// [`SessionContext::register_listing_table`] does: `listing_options` carries
-/// the file format along with the sort order and partition columns declared on
-/// the files, and `schema` is inferred from the files when `None`.
-///
-/// This exists because DataFusion keeps its generic read entry point private,
-/// exposing only per-format wrappers. It carries over that entry point's
-/// file-statistics cache, so benchmark numbers stay comparable with
-/// DataFusion's own readers rather than running uncached. It drops the
-/// file-extension check, which DataFusion skips for collection paths anyway,
-/// and every path here is a collection.
-pub async fn read<P: DataFilePaths>(
-    ctx: &SessionContext,
-    table_paths: P,
-    listing_options: ListingOptions,
-    schema: Option<SchemaRef>,
-) -> Result<DataFrame> {
-    let table_paths = table_paths.to_urls()?;
-    if table_paths.is_empty() {
-        return Err(DataFusionError::Execution(
-            "No table paths were provided".to_string(),
-        ));
-    }
-    let config =
-        ListingTableConfig::new_with_multi_paths(table_paths).with_listing_options(listing_options);
-    let config = match schema {
-        Some(schema) => config.with_schema(schema),
-        None => config.infer_schema(&ctx.state()).await?,
-    };
-    let table = ListingTable::try_new(config)?
-        .with_cache(ctx.runtime_env().cache_manager.get_file_statistic_cache());
-
-    ctx.read_table(Arc::new(table))
-}
-
-/// Writes all rows in `df` to `path` using one of this project's output
-/// formats, returning the number of rows written.
-///
-/// DataFusion exposes no generic DataFrame-level write-with-format entry point;
-/// its public generic seam is [`LogicalPlanBuilder::copy_to`], one layer below
-/// `DataFrame`, so this uses that supported route.
-pub async fn write(df: DataFrame, path: &str, format: &OutputFormat) -> Result<u64> {
-    let file_type = format_as_file_type(format.output_factory());
-    let (session_state, plan) = df.into_parts();
-    let plan = LogicalPlanBuilder::copy_to(
-        plan,
-        path.into(),
-        file_type,
-        format.format_options(),
-        vec![],
-    )?
-    .build()?;
-    let batches = DataFrame::new(session_state, plan).collect().await?;
-    decode_row_count(&batches)
-}
-
-/// Decodes the number of rows produced by a DataFusion copy-to write.
-///
-/// Copy-to returns exactly one batch of one non-null `UInt64` value; anything
-/// else means that contract moved underneath us.
-fn decode_row_count(batches: &[RecordBatch]) -> Result<u64> {
-    match batches {
-        [batch] if batch.num_columns() == 1 && batch.num_rows() == 1 => batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .filter(|counts| !counts.is_null(0))
-            .map(|counts| counts.value(0)),
-        _ => None,
-    }
-    .ok_or_else(|| {
-        DataFusionError::Internal(format!(
-            "expected one batch with a single non-null count: UInt64 row from copy-to, got {batches:?}"
-        ))
-    })
 }

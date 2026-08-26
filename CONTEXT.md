@@ -46,10 +46,8 @@ _Avoid_: variant, strategy, combiner (a formulation is not itself a combiner)
 
 **Plan builder**:
 The part of a formulation that constructs its DataFrame over a dataset and stops. It does no
-runtime setup, object store registration, writing, or execution — keeping those out is what
-distinguishes a plan builder from a pipeline, and it is why plan-shape tests can assert on a plan
-builder directly. A formulation's locus ordering and the session it derives are part of its plan
-builder rather than inputs to it, because the plan shape depends on all three together.
+runtime setup, object store registration, writing, or execution, which is why plan-shape tests can
+assert on it directly. The session a formulation derives is part of its plan builder.
 _Avoid_: query builder, factory
 
 **Session**:
@@ -104,10 +102,16 @@ of them.
 _Avoid_: samples (unqualified), sample list, cohort
 
 **Dataset**:
-What a combiner run reads: a path, the format of the files under it, and the sample set it covers.
-One value describing one directory, so which path, which format, and which samples cannot disagree
-with each other. A formulation reads a dataset; it does not get to decide what one is.
+One stored instance of a dataset layout: its path, the format of each file, and the sample set found
+there. A formulation reads a dataset and may narrow its sample set, but it does not assemble the
+storage declarations needed to read it.
 _Avoid_: input, table (a dataset holds many per-sample tables), corpus
+
+**Dataset layout**:
+The representation shared by datasets of one kind: their locus ordering, partition columns, and
+optional schema. It describes how rows are distributed across files, separately from how each file
+is encoded.
+_Avoid_: format (the encoding of one file), listing options, storage config
 
 **Locus**:
 A position in the genome: a contig together with a position within it. The unit both combiners
@@ -116,8 +120,8 @@ _Avoid_: site, coordinate, variant (a variant is a locus plus alleles)
 
 **Locus ordering**:
 The sort order that makes a formulation's plan mergeable rather than re-sorting: contig, then
-position, optionally then alleles. It has to be declared identically on the input files and
-requested in the query, or the planner stops believing the inputs are sorted and inserts a sort.
+position, optionally then alleles. A dataset layout declares the ordering on disk, and a formulation
+declares the prefix it requires; a finer ordering satisfies a coarser requirement.
 _Avoid_: sort key, ordering (unqualified)
 
 **Reference data**:
@@ -128,10 +132,11 @@ _Avoid_: ref blocks, non-variant data
 ### Formats
 
 **Format**:
-The encoding of a table on disk, together with how to read and write it, its file extension, and
-the compression modes it accepts. Every format can be read but only some can be written, so the
-code represents input and output format choices as separate types.
-_Avoid_: file format, codec, encoding
+The encoding of one file, together with how to read or write it, its extension, and the compression
+modes it accepts. It does not describe how a dataset distributes rows across files; that belongs to
+the dataset layout. Input and output formats are separate choices because readable formats need not
+be writable.
+_Avoid_: dataset layout, codec, encoding
 
 ### Benchmark settings
 

@@ -8,6 +8,7 @@
 mod fixture;
 
 use datafusion::{
+    arrow::datatypes::{DataType, Field, Schema},
     datasource::{listing::ListingTableUrl, source::DataSourceExec},
     object_store::local::LocalFileSystem,
     physical_plan::{
@@ -16,15 +17,41 @@ use datafusion::{
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
         union::UnionExec,
     },
-    prelude::{SessionConfig, SessionContext},
+    prelude::{SessionConfig, SessionContext, col},
 };
-use datafusion_sandbox::{Dataset, Formulation, format::InputFormat};
+use datafusion_sandbox::{Dataset, DatasetLayout, Formulation, format::InputFormat};
 
 use std::{future::Future, sync::Arc};
 
 use fixture::SAMPLES;
 
 const N_SAMPLES: usize = 4;
+
+#[test]
+fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fixture::write_sample_tables(dir.path(), &[SAMPLES[0]]);
+    let table_path = ListingTableUrl::parse(&root).unwrap();
+    let dataset = block_on(Dataset::discover(
+        &LocalFileSystem::new(),
+        table_path,
+        InputFormat::VORTEX,
+        DatasetLayout {
+            locus_ordering: vec![col("contig").sort(true, false)],
+            partition_columns: vec![
+                ("s".to_string(), DataType::Utf8),
+                ("contig".to_string(), DataType::Utf8),
+            ],
+            schema: None,
+        },
+    ))
+    .unwrap();
+
+    let error = block_on(Formulation::CombineRefsUnion.plan(&SessionContext::new(), &dataset))
+        .expect_err("the formulation requires position ordering");
+
+    assert!(error.to_string().contains("locus ordering"));
+}
 
 #[test]
 fn formulations_derive_the_session_their_plan_shape_needs() {
@@ -204,6 +231,21 @@ fn dataset(root: &str, input_format: InputFormat) -> Dataset {
         &LocalFileSystem::new(),
         table_path,
         input_format,
+        DatasetLayout {
+            locus_ordering: vec![
+                col("contig").sort(true, false),
+                col("position").sort(true, false),
+                col("alleles").sort(true, false),
+            ],
+            partition_columns: vec![
+                ("s".to_string(), DataType::Utf8),
+                ("contig".to_string(), DataType::Utf8),
+            ],
+            schema: Some(Arc::new(Schema::new(vec![
+                Field::new("position", DataType::Int32, false),
+                Field::new("alleles", DataType::Utf8, false),
+            ]))),
+        },
     ))
     .unwrap()
 }
