@@ -12,7 +12,6 @@ use datafusion::{
 };
 use datafusion_sandbox::format::OutputFormat;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
-use datafusion_sandbox::write;
 
 use std::{path::Path, sync::Arc};
 
@@ -106,7 +105,7 @@ fn write_sample_tables_with_format(
         pipeline::run(
             move |ctx: SessionContext| async move {
                 let df = ctx.read_batch(batch)?;
-                write(df, &path, format).await
+                format.write(df, &path).await
             },
             PipelineOptions {
                 threads: 1,

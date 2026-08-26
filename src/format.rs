@@ -1,10 +1,16 @@
 use datafusion::{
+    arrow::{
+        array::{Array, UInt64Array},
+        record_batch::RecordBatch,
+    },
     common::file_options::parquet_writer,
     datasource::file_format::{
-        FileFormat, FileFormatFactory,
+        FileFormat, FileFormatFactory, format_as_file_type,
         parquet::{ParquetFormat, ParquetFormatFactory},
     },
     error::{DataFusionError, Result},
+    logical_expr::logical_plan::LogicalPlanBuilder,
+    prelude::DataFrame,
 };
 use std::{collections::HashMap, fmt, sync::Arc};
 use vortex::{VortexSessionDefault, session::VortexSession};
@@ -23,7 +29,7 @@ impl InputFormat {
     pub const PARQUET: Self = Self(InputRepr::Parquet);
     pub const VORTEX: Self = Self(InputRepr::Vortex);
 
-    pub fn read_format(&self) -> Arc<dyn FileFormat> {
+    pub(crate) fn read_format(&self) -> Arc<dyn FileFormat> {
         match self.0 {
             InputRepr::Parquet => Arc::new(ParquetFormat::default()),
             InputRepr::Vortex => Arc::new(VortexFormat::new(VortexSession::default())),
@@ -78,14 +84,30 @@ impl OutputFormat {
         }
     }
 
-    pub(crate) fn output_factory(&self) -> Arc<dyn FileFormatFactory> {
+    /// Writes all rows in `df` to `path`, returning the number of rows written.
+    pub async fn write(&self, df: DataFrame, path: &str) -> Result<u64> {
+        let file_type = format_as_file_type(self.output_factory());
+        let (session_state, plan) = df.into_parts();
+        let plan = LogicalPlanBuilder::copy_to(
+            plan,
+            path.into(),
+            file_type,
+            self.format_options(),
+            vec![],
+        )?
+        .build()?;
+        let batches = DataFrame::new(session_state, plan).collect().await?;
+        decode_row_count(&batches)
+    }
+
+    fn output_factory(&self) -> Arc<dyn FileFormatFactory> {
         match self.0 {
             OutputRepr::Parquet { .. } => Arc::new(ParquetFormatFactory::new()),
             OutputRepr::Vortex { .. } => Arc::new(VortexFormatFactory::new()),
         }
     }
 
-    pub(crate) fn format_options(&self) -> HashMap<String, String> {
+    fn format_options(&self) -> HashMap<String, String> {
         match &self.0 {
             OutputRepr::Parquet { compression: None } | OutputRepr::Vortex { compact: None } => {
                 HashMap::new()
@@ -101,6 +123,23 @@ impl OutputFormat {
             )]),
         }
     }
+}
+
+fn decode_row_count(batches: &[RecordBatch]) -> Result<u64> {
+    match batches {
+        [batch] if batch.num_columns() == 1 && batch.num_rows() == 1 => batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .filter(|counts| !counts.is_null(0))
+            .map(|counts| counts.value(0)),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        DataFusionError::Internal(format!(
+            "expected one batch with a single non-null count: UInt64 row from copy-to, got {batches:?}"
+        ))
+    })
 }
 
 impl fmt::Display for OutputFormat {

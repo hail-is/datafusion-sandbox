@@ -4,7 +4,6 @@ use crate::{
     Dataset, Formulation,
     format::{InputFormat, OutputFormat},
     pipeline::{self, PipelineOptions},
-    write,
 };
 
 use datafusion::{
@@ -59,7 +58,9 @@ impl CombinerRun {
             move |ctx| async move {
                 let table_path = ListingTableUrl::parse(input_path)?;
                 let store = ctx.runtime_env().object_store(&table_path)?;
-                let dataset = Dataset::discover(store.as_ref(), table_path, input_format).await?;
+                let layout = formulation.required_layout();
+                let dataset =
+                    Dataset::discover(store.as_ref(), table_path, input_format, layout).await?;
                 let dataset = match sample_set {
                     Some(sample_set) => dataset.restrict_to(&sample_set)?,
                     None => dataset,
@@ -75,7 +76,7 @@ impl CombinerRun {
                         output_path,
                         output_format,
                     } => Ok(Outcome::RowsWritten(
-                        write(df, &output_path, &output_format).await?,
+                        output_format.write(df, &output_path).await?,
                     )),
                     Action::Collect => Ok(Outcome::Batches(df.collect().await?)),
                     action @ (Action::Explain | Action::ExplainAnalyze) => {
