@@ -32,7 +32,7 @@ is exactly the configuration a current-thread runtime would have taken away.
 
 Only the CPU runtime's flavor is observable to DataFusion: the pipeline is spawned with
 `spawn_on(.., cpu_runtime.handle())`, so `Handle::try_current()` inside execution always resolves
-to the CPU runtime. `tests/pipeline.rs` asserts this from inside a one-thread pipeline, which is
+to the CPU runtime. `tests/it/pipeline.rs` asserts this from inside a one-thread pipeline, which is
 the same vantage point `spawn_buffered` sees.
 
 ## Why the IO runtime is multi-thread

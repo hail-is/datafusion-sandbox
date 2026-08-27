@@ -16,7 +16,6 @@ use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use std::{path::Path, sync::Arc};
 
 /// The sample set of the `1kg_chr22` benchmark dataset.
-#[allow(dead_code)]
 pub const SAMPLES: &[&str] = &[
     "HG00308", "HG00592", "HG02230", "NA18534", "NA20760", "NA18530", "HG03805", "HG02223",
     "HG00637", "NA12249", "HG02224", "NA21099", "NA11830", "HG01378", "HG00187", "HG01356",
@@ -47,23 +46,18 @@ const SPLITTABLE_ROWS_PER_SAMPLE: i32 = 20_000;
 ///
 /// Every sample covers the same loci with the same alleles, so a plan that
 /// de-duplicates across the sample set has something to de-duplicate.
-#[allow(dead_code)]
 pub fn write_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
     write_sample_tables_with_format(dir, sample_set, &OutputFormat::VORTEX, ROWS_PER_SAMPLE)
 }
 
 /// The parquet counterpart of [`write_sample_tables`], laid out identically so
 /// the two formats' plan shapes are compared over the same data.
-// Each integration test crate compiles this shared module separately, and not
-// all of them use every writer here.
-#[allow(dead_code)]
 pub fn write_parquet_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
     write_sample_tables_with_format(dir, sample_set, &OutputFormat::PARQUET, ROWS_PER_SAMPLE)
 }
 
 /// [`write_sample_tables`] at [`SPLITTABLE_ROWS_PER_SAMPLE`], for tests that
 /// need the optimizer to be willing to split a per-sample scan.
-#[allow(dead_code)]
 pub fn write_splittable_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
     write_sample_tables_with_format(
         dir,
@@ -74,7 +68,6 @@ pub fn write_splittable_sample_tables(dir: &Path, sample_set: &[&str]) -> String
 }
 
 /// The parquet counterpart of [`write_splittable_sample_tables`].
-#[allow(dead_code)]
 pub fn write_splittable_parquet_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
     write_sample_tables_with_format(
         dir,

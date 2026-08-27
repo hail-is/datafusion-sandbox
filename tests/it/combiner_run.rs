@@ -1,4 +1,4 @@
-mod fixture;
+use crate::fixture;
 
 use datafusion::{
     arrow::{array::StringArray, record_batch::RecordBatch},
