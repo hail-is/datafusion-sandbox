@@ -38,6 +38,9 @@ impl Default for PipelineOptions {
 /// Owns both runtimes: an IO runtime for object store requests, and a separate
 /// CPU runtime the plan executes on, so that IO and CPU-bound work don't
 /// contend for the same threads.
+///
+/// Every DataFusion plan in this crate runs through here, test fixtures
+/// included. See docs/adr/0006-run-every-plan-through-the-pipeline-runner.md.
 pub fn run<T, Fut>(
     pipeline: impl FnOnce(SessionContext) -> Fut + Send + 'static,
     options: PipelineOptions,
