@@ -71,7 +71,8 @@ _Avoid_: query plan (ambiguous between logical and physical), execution graph
 **CPU runtime**:
 The Tokio runtime a pipeline's plan executes on. Separate from the IO runtime so that plan
 execution and object store requests do not compete for the same threads. It has no IO driver, so
-a task that attempts IO on it fails rather than quietly taking time from the plan.
+a task that attempts IO on it fails rather than quietly taking time from the plan. See
+[ADR 0006](docs/adr/0006-run-every-plan-through-the-pipeline-runner.md).
 _Avoid_: worker pool, executor, thread pool
 
 **IO runtime**:
