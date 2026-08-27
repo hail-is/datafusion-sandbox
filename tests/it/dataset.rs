@@ -1,4 +1,4 @@
-mod fixture;
+use crate::fixture;
 
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema},
