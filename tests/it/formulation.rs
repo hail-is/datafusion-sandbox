@@ -29,8 +29,6 @@ use std::{future::Future, sync::Arc};
 
 use fixture::SAMPLES;
 
-const N_SAMPLES: usize = 4;
-
 #[test]
 fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
     let dir = tempfile::tempdir().unwrap();
@@ -60,7 +58,7 @@ fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
 #[test]
 fn formulations_derive_the_session_their_plan_shape_needs() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), &SAMPLES[..N_SAMPLES]);
+    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
     let dataset = dataset(&root, InputFormat::VORTEX);
 
     for formulation in [
@@ -69,7 +67,7 @@ fn formulations_derive_the_session_their_plan_shape_needs() {
         Formulation::CombineAllelesUnion,
     ] {
         let plan = physical_plan(formulation, &dataset);
-        assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+        assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
     }
 }
 
@@ -82,7 +80,7 @@ fn formulations_derive_the_session_their_plan_shape_needs() {
 #[test]
 fn deriving_a_session_leaves_the_callers_session_untouched() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), &SAMPLES[..N_SAMPLES]);
+    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
     let dataset = dataset(&root, InputFormat::VORTEX);
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(8));
 
@@ -111,14 +109,14 @@ fn deriving_a_session_leaves_the_callers_session_untouched() {
 #[test]
 fn combine_refs_union_parquet_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_parquet_sample_tables(dir.path(), &SAMPLES[..N_SAMPLES]);
+    let root = fixture::write_splittable_parquet_sample_tables(dir.path(), SAMPLES);
 
     let plan = physical_plan(
         Formulation::CombineRefsUnion,
         &dataset(&root, InputFormat::PARQUET),
     );
 
-    assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
 }
 
 /// The reference combiner's union formulation merges its per-sample inputs
@@ -126,14 +124,14 @@ fn combine_refs_union_parquet_merges_one_partition_per_sample_without_re_sorting
 #[test]
 fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), &SAMPLES[..N_SAMPLES]);
+    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
 
     let plan = physical_plan(
         Formulation::CombineRefsUnion,
         &dataset(&root, InputFormat::VORTEX),
     );
 
-    assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
 }
 
 /// DataFusion's parquet reader preserves the declared locus ordering through the
@@ -142,14 +140,14 @@ fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting(
 #[test]
 fn combine_alleles_union_parquet_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_parquet_sample_tables(dir.path(), &SAMPLES[..N_SAMPLES]);
+    let root = fixture::write_splittable_parquet_sample_tables(dir.path(), SAMPLES);
 
     let plan = physical_plan(
         Formulation::CombineAllelesUnion,
         &dataset(&root, InputFormat::PARQUET),
     );
 
-    assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
 }
 
 /// The allele combiner merges its per-sample inputs rather than re-sorting them,
@@ -157,14 +155,14 @@ fn combine_alleles_union_parquet_merges_one_partition_per_sample_without_re_sort
 #[test]
 fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), &SAMPLES[..N_SAMPLES]);
+    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
 
     let plan = physical_plan(
         Formulation::CombineAllelesUnion,
         &dataset(&root, InputFormat::VORTEX),
     );
 
-    assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
 }
 
 /// The one-scan reference formulation preserves every file partition from its
@@ -172,14 +170,14 @@ fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorti
 #[test]
 fn combine_refs_one_scan_vortex_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), &SAMPLES[..N_SAMPLES]);
+    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
 
     let plan = physical_plan(
         Formulation::CombineRefsOneScan,
         &dataset(&root, InputFormat::VORTEX),
     );
 
-    assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
     assert_one_shared_scan(&plan);
 }
 
@@ -188,21 +186,21 @@ fn combine_refs_one_scan_vortex_merges_one_partition_per_sample_without_re_sorti
 #[test]
 fn combine_refs_one_scan_parquet_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_parquet_sample_tables(dir.path(), &SAMPLES[..N_SAMPLES]);
+    let root = fixture::write_splittable_parquet_sample_tables(dir.path(), SAMPLES);
 
     let plan = physical_plan(
         Formulation::CombineRefsOneScan,
         &dataset(&root, InputFormat::PARQUET),
     );
 
-    assert_merges_one_partition_per_sample(&plan, N_SAMPLES);
+    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
     assert_one_shared_scan(&plan);
 }
 
 #[test]
 fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), &SAMPLES[..N_SAMPLES]);
+    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
     let requested = SAMPLES[..2]
         .iter()
         .map(|sample| sample.to_string())
