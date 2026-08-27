@@ -23,7 +23,7 @@ fn both_combiners_report_rows_written() {
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);
 
     for (formulation, output_name, expected) in [
-        (Formulation::CombineRefsUnion, "combined_refs.vortex", 400),
+        (Formulation::CombineRefsUnion, "combined_refs.vortex", 32),
         (
             Formulation::CombineAllelesUnion,
             "combined_alleles.vortex",
@@ -75,7 +75,7 @@ fn one_scan_reference_formulation_supports_every_action() {
     let Outcome::RowsWritten(rows) = outcome else {
         panic!("expected rows written, got {outcome:?}");
     };
-    assert_eq!(rows, 400);
+    assert_eq!(rows, 32);
 
     let batches = expect_batches(
         run(
@@ -144,9 +144,9 @@ fn writes_uncompressed_parquet() {
     let Outcome::RowsWritten(rows) = outcome else {
         panic!("expected rows written, got {outcome:?}");
     };
-    assert_eq!(rows, 400);
+    assert_eq!(rows, 32);
     let reader = SerializedFileReader::try_from(output_path.as_path()).unwrap();
-    assert_eq!(reader.metadata().file_metadata().num_rows(), 400);
+    assert_eq!(reader.metadata().file_metadata().num_rows(), 32);
     assert!(
         reader
             .metadata()
@@ -180,7 +180,7 @@ fn compact_and_standard_vortex_have_different_file_sizes() {
         let Outcome::RowsWritten(rows) = outcome else {
             panic!("expected rows written, got {outcome:?}");
         };
-        assert_eq!(rows, 400);
+        assert_eq!(rows, 32);
         output_path.metadata().unwrap().len()
     });
 
@@ -315,7 +315,7 @@ fn explain_actions_return_plain_and_analyzed_plans() {
 #[test]
 fn restricts_the_dataset_to_the_requested_sample_set() {
     let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), &SAMPLES[..4]);
+    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
     let output_path = dir.path().join("restricted.vortex");
 
     let outcome = run(

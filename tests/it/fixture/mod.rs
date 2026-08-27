@@ -15,22 +15,14 @@ use datafusion_sandbox::pipeline::{self, PipelineOptions};
 
 use std::{path::Path, sync::Arc};
 
-/// The sample set of the `1kg_chr22` benchmark dataset.
-pub const SAMPLES: &[&str] = &[
-    "HG00308", "HG00592", "HG02230", "NA18534", "NA20760", "NA18530", "HG03805", "HG02223",
-    "HG00637", "NA12249", "HG02224", "NA21099", "NA11830", "HG01378", "HG00187", "HG01356",
-    "HG02188", "NA20769", "HG00190", "NA18618", "NA18507", "HG03363", "NA21123", "HG03088",
-    "NA21122", "HG00373", "HG01058", "HG00524", "NA18969", "HG03833", "HG04158", "HG03578",
-    "HG00339", "HG00313", "NA20317", "HG00553", "HG01357", "NA19747", "NA18609", "HG01377",
-    "NA19456", "HG00590", "HG01383", "HG00320", "HG04001", "NA20796", "HG00323", "HG01384",
-    "NA18613", "NA20802",
-];
+/// Four samples from the `1kg_chr22` benchmark dataset, the most any test needs.
+pub const SAMPLES: &[&str] = &["HG00308", "HG00592", "HG02230", "NA18534"];
 
 /// The single contig the fixture writes, so that each sample is exactly one file
 /// and a plan's partition count is its sample count.
 const CONTIG: &str = "chr22";
 
-/// Loci per sample. Small enough that writing fifty samples is instant.
+/// Loci per sample. Small enough that writing the fixture is quick.
 const ROWS_PER_SAMPLE: i32 = 8;
 
 /// Loci per sample for a fixture the optimizer is willing to byte-range split,
@@ -85,28 +77,30 @@ fn write_sample_tables_with_format(
     rows_per_sample: i32,
 ) -> String {
     let root = dir.join("samples");
-    for sample in sample_set {
-        let path = root
-            .join(format!("s={sample}"))
-            .join(format!("contig={CONTIG}"));
-        let path = path.join(format!("fixture.{}", format.extension()));
-        let path = path
-            .to_str()
-            .expect("fixture path is valid UTF-8")
-            .to_string();
-        let batch = sample_batch(rows_per_sample);
-        pipeline::run(
-            move |ctx: SessionContext| async move {
-                let df = ctx.read_batch(batch)?;
-                format.write(df, &path).await
-            },
-            PipelineOptions {
-                threads: 1,
-                ..Default::default()
-            },
-        )
-        .expect("writing a fixture table");
-    }
+    let pipeline_root = root.clone();
+    let sample_set = sample_set
+        .iter()
+        .map(|sample| sample.to_string())
+        .collect::<Vec<_>>();
+    pipeline::run(
+        move |ctx: SessionContext| async move {
+            for sample in sample_set {
+                let path = pipeline_root
+                    .join(format!("s={sample}"))
+                    .join(format!("contig={CONTIG}"))
+                    .join(format!("fixture.{}", format.extension()));
+                let path = path.to_str().expect("fixture path is valid UTF-8");
+                let df = ctx.read_batch(sample_batch(rows_per_sample))?;
+                format.write(df, path).await?;
+            }
+            Ok(())
+        },
+        PipelineOptions {
+            threads: 1,
+            ..Default::default()
+        },
+    )
+    .expect("writing fixture tables");
     root.to_str()
         .expect("fixture path is valid UTF-8")
         .to_string()

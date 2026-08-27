@@ -208,7 +208,7 @@ fn combine_alleles_rejects_a_formulation_argument_before_running() {
 #[test]
 fn samples_argument_accepts_a_comma_separated_list() {
     let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), &SAMPLES[..4]);
+    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
     let requested = format!("{},{}", SAMPLES[0], SAMPLES[1]);
     let stdout = successful_stdout(
         Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
