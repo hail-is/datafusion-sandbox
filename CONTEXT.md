@@ -119,6 +119,13 @@ A table of generated rows held in memory, used to exercise a seam without readin
 is not genomics-shaped and is not meant to be.
 _Avoid_: fixture (fixtures may contain representative genomics data), mock table
 
+**Sorted table**:
+A file-backed table that verifies and orders its files from column statistics, then scans them as one
+ordered partition. Its partition count belongs to the table rather than the session. It may attach
+one scalar field to every row through partition values, but has no knowledge of samples, contigs, or
+genomics.
+_Avoid_: listing table, sample table, sorted scan
+
 **Locus**:
 A position in the genome: a contig together with a position within it. The unit both combiners
 order and group by.
