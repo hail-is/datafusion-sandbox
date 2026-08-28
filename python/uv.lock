@@ -720,6 +720,7 @@ source = { editable = "." }
 dependencies = [
     { name = "hail" },
     { name = "numpy" },
+    { name = "pyarrow" },
     { name = "typer" },
     { name = "vortex-data" },
 ]
@@ -733,6 +734,7 @@ dev = [
 requires-dist = [
     { name = "hail", specifier = "==0.2.138" },
     { name = "numpy", specifier = ">=2,<3" },
+    { name = "pyarrow", specifier = ">=25.0.0" },
     { name = "typer", specifier = ">=0.24.0" },
     { name = "vortex-data", specifier = ">=0.83.0" },
 ]
