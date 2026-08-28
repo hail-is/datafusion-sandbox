@@ -8,11 +8,11 @@
 use crate::fixture;
 
 use datafusion::{
-    arrow::datatypes::DataType,
     datasource::listing::ListingTableUrl,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
+        union::UnionExec,
     },
     prelude::{SessionConfig, SessionContext, col},
 };
@@ -26,6 +26,11 @@ use std::{future::Future, sync::Arc};
 
 use fixture::SAMPLES;
 
+const FORMULATIONS: [Formulation; 2] = [
+    Formulation::CombineRefsUnion,
+    Formulation::CombineAllelesUnion,
+];
+
 #[test]
 fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
     let dir = tempfile::tempdir().unwrap();
@@ -38,10 +43,6 @@ fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
         InputFormat::VORTEX,
         DatasetLayout {
             locus_ordering: vec![col("contig").sort(true, false)],
-            partition_columns: vec![
-                ("s".to_string(), DataType::Utf8),
-                ("contig".to_string(), DataType::Utf8),
-            ],
             schema: None,
         },
     ))
@@ -54,43 +55,46 @@ fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
 }
 
 #[test]
-fn formulations_derive_the_session_their_plan_shape_needs() {
+fn formulations_keep_their_plan_shape_under_a_hostile_session() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
+    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
     let dataset = dataset(&root, InputFormat::VORTEX);
 
-    for formulation in [
-        Formulation::CombineRefsUnion,
-        Formulation::CombineAllelesUnion,
-    ] {
+    for formulation in FORMULATIONS {
         let plan = physical_plan(formulation, &dataset);
         assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
     }
 }
 
-/// Deriving a session must not reach back into the one it derived from.
-/// `SessionContext::clone` shares a single `Arc<RwLock<SessionState>>`, so a
-/// formulation that overrode settings on the context it was handed would leave
-/// them in place for whatever ran next.
 #[test]
-fn deriving_a_session_leaves_the_callers_session_untouched() {
+fn target_partitions_do_not_change_either_formulation_plan_shape() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
+    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
+    let dataset = dataset(&root, InputFormat::VORTEX);
+
+    for formulation in FORMULATIONS {
+        let single_target = physical_plan_with_target(formulation, &dataset, 1);
+        let eight_targets = physical_plan_with_target(formulation, &dataset, 8);
+        assert_eq!(displayed(&single_target), displayed(&eight_targets));
+    }
+}
+
+/// The allele formulation still derives a single-target session for its
+/// downstream distinct. That override must not reach back into the caller.
+#[test]
+fn allele_session_derivation_leaves_the_callers_session_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
     let dataset = dataset(&root, InputFormat::VORTEX);
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(8));
 
-    for formulation in [
-        Formulation::CombineRefsUnion,
-        Formulation::CombineAllelesUnion,
-    ] {
-        block_on(formulation.plan(&ctx, &dataset)).unwrap();
+    block_on(Formulation::CombineAllelesUnion.plan(&ctx, &dataset)).unwrap();
 
-        let options = ctx.state().config().options().clone();
-        assert_eq!(
-            options.execution.target_partitions, 8,
-            "{formulation:?} overrode target_partitions on the caller's session",
-        );
-    }
+    let options = ctx.state().config().options().clone();
+    assert_eq!(
+        options.execution.target_partitions, 8,
+        "the allele formulation overrode target_partitions on the caller's session",
+    );
 }
 
 /// DataFusion's parquet reader preserves the declared locus ordering through
@@ -99,7 +103,7 @@ fn deriving_a_session_leaves_the_callers_session_untouched() {
 #[test]
 fn combine_refs_union_parquet_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_parquet_sample_tables(dir.path(), SAMPLES);
+    let root = fixture::write_parquet_sample_tables(dir.path(), SAMPLES);
 
     let plan = physical_plan(
         Formulation::CombineRefsUnion,
@@ -114,7 +118,7 @@ fn combine_refs_union_parquet_merges_one_partition_per_sample_without_re_sorting
 #[test]
 fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
+    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
 
     let plan = physical_plan(
         Formulation::CombineRefsUnion,
@@ -130,7 +134,7 @@ fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting(
 #[test]
 fn combine_alleles_union_parquet_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_parquet_sample_tables(dir.path(), SAMPLES);
+    let root = fixture::write_parquet_sample_tables(dir.path(), SAMPLES);
 
     let plan = physical_plan(
         Formulation::CombineAllelesUnion,
@@ -145,7 +149,7 @@ fn combine_alleles_union_parquet_merges_one_partition_per_sample_without_re_sort
 #[test]
 fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorting() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
+    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
 
     let plan = physical_plan(
         Formulation::CombineAllelesUnion,
@@ -158,7 +162,7 @@ fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorti
 #[test]
 fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
+    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
     let requested = SAMPLES[..2]
         .iter()
         .map(|sample| sample.to_string())
@@ -166,10 +170,7 @@ fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
     let dataset = dataset(&root, InputFormat::VORTEX)
         .restrict_to(&requested)
         .unwrap();
-    for formulation in [
-        Formulation::CombineRefsUnion,
-        Formulation::CombineAllelesUnion,
-    ] {
+    for formulation in FORMULATIONS {
         let plan = physical_plan(formulation, &dataset);
 
         assert_merges_one_partition_per_sample(&plan, 2);
@@ -189,27 +190,25 @@ fn dataset(root: &str, input_format: InputFormat) -> Dataset {
                 col("position").sort(true, false),
                 col("alleles").sort(true, false),
             ],
-            partition_columns: vec![
-                ("s".to_string(), DataType::Utf8),
-                ("contig".to_string(), DataType::Utf8),
-            ],
             schema: None,
         },
     ))
     .unwrap()
 }
 
-/// Builds a formulation under settings that would change its plan shape if it
-/// accepted the caller's session unchanged.
-///
-/// Both settings are needed. `target_partitions` above the sample count is what
-/// the derivation has to override, and `repartition_file_min_size` at zero is
-/// what lets the optimizer act on it: at its 1 MiB default no fixture file is
-/// big enough to be worth byte-range splitting, so every assertion below would
-/// pass with the derivation deleted. `ROWS_PER_SAMPLE` is the third half of
-/// this — see the note on it in `tests/fixture`.
+/// Builds a formulation under settings that would split an unpinned file scan.
+/// The sorted table must keep one partition per sample even when the optimizer
+/// is allowed to split files of any size.
 fn physical_plan(formulation: Formulation, dataset: &Dataset) -> Arc<dyn ExecutionPlan> {
-    let mut hostile_config = SessionConfig::new().with_target_partitions(8);
+    physical_plan_with_target(formulation, dataset, 8)
+}
+
+fn physical_plan_with_target(
+    formulation: Formulation,
+    dataset: &Dataset,
+    target_partitions: usize,
+) -> Arc<dyn ExecutionPlan> {
+    let mut hostile_config = SessionConfig::new().with_target_partitions(target_partitions);
     hostile_config
         .options_mut()
         .optimizer
@@ -237,6 +236,21 @@ fn block_on<F: Future>(future: F) -> F::Output {
 /// Exactly one sort-preserving merge, no re-sort, and one input partition per
 /// sample feeding the merge.
 fn assert_merges_one_partition_per_sample(plan: &Arc<dyn ExecutionPlan>, n_samples: usize) {
+    let unions = nodes_of::<UnionExec>(plan);
+    assert_eq!(
+        unions.len(),
+        1,
+        "expected exactly one UnionExec, got {}:\n{}",
+        unions.len(),
+        displayed(plan),
+    );
+    assert_eq!(
+        unions[0].children().len(),
+        n_samples,
+        "expected one union input per sample:\n{}",
+        displayed(plan),
+    );
+
     let merges = nodes_of::<SortPreservingMergeExec>(plan);
     assert_eq!(
         merges.len(),

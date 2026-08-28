@@ -6,7 +6,6 @@ mod combine_refs_union;
 use crate::dataset::{Dataset, DatasetLayout};
 
 use datafusion::{
-    arrow::datatypes::DataType,
     common::config::ConfigOptions,
     error::Result,
     logical_expr::{LogicalPlan, logical_plan::Union},
@@ -53,10 +52,6 @@ fn reference_layout() -> DatasetLayout {
         locus_ordering: vec![
             col("contig").sort(true, false),
             col("position").sort(true, false),
-        ],
-        partition_columns: vec![
-            ("s".to_string(), DataType::Utf8),
-            ("contig".to_string(), DataType::Utf8),
         ],
         schema: None,
     }
