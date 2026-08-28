@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "hail==0.2.138",
+    "pyarrow>=25.0.0",
     "typer>=0.24.0",
     "vortex-data>=0.83.0",
     "numpy>=2,<3",

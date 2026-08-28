@@ -8,7 +8,10 @@ grows unwieldy we can split them into a `commands/` subpackage later.
 import logging
 from pathlib import Path, PurePath
 import subprocess
-import shutil
+import tempfile
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 import typer
 
 import hail as hl
@@ -139,12 +142,27 @@ def spark_df_to_parquet(df, dest: Path, filename: str) -> None:
 def vds_to_reference(vds: hl.vds.VariantDataset, name: str, dest: Path) -> None:
     ref_mt = vds.reference_data
     ref_mt = ref_mt.transmute_entries(ploidy=ref_mt.LGT.ploidy)
-    df = ref_mt.entries().key_by('locus').drop('s', 'END').to_spark().drop('locus.contig').withColumnRenamed('locus.position', 'position')
+    df = (
+        ref_mt.entries()
+        .key_by('locus')
+        .drop('s', 'END')
+        .to_spark()
+        .withColumnRenamed('locus.contig', 'contig')
+        .withColumnRenamed('locus.position', 'position')
+    )
     spark_df_to_parquet(df, dest, f'{name}.reference')
 
 def vds_to_alleles(vds: hl.vds.VariantDataset, name: str, dest: Path) -> None:
     var_mt = vds.variant_data
-    df = var_mt.rows().drop('rsid').key_by('locus').explode('alleles').to_spark().drop('locus.contig').withColumnRenamed('locus.position', 'position')
+    df = (
+        var_mt.rows()
+        .drop('rsid')
+        .key_by('locus')
+        .explode('alleles')
+        .to_spark()
+        .withColumnRenamed('locus.contig', 'contig')
+        .withColumnRenamed('locus.position', 'position')
+    )
     spark_df_to_parquet(df, dest, f'{name}.alleles')
 
 @app.command()
@@ -170,15 +188,36 @@ def convert_vdss(path: Path, dest: Path, alleles_dest: Path | None = None) -> No
     for gvcf in path.glob('*.vds'):
         name = gvcf.stem
         sample_id = name.split('.')[0]
-        ref_dir = dest / f's={sample_id}' / 'contig=chr22'
+        ref_dir = dest / f's={sample_id}'
         ref_dir.mkdir(parents=True)
 
         alleles_dir = None
         if alleles_dest is not None:
-            alleles_dir = alleles_dest / f's={sample_id}' / 'contig=chr22'
+            alleles_dir = alleles_dest / f's={sample_id}'
             alleles_dir.mkdir(parents=True)
 
         convert_vds(gvcf, ref_dir, alleles_dir)
+
+
+def rewrite_parquet_contig(source: Path, destination: Path, contig: str) -> None:
+    parquet = pq.ParquetFile(source)
+    contig_index = parquet.schema_arrow.get_field_index('contig')
+    if contig_index == -1:
+        raise ValueError(f"{source} has no contig column")
+
+    contig_field = parquet.schema_arrow.field(contig_index)
+    with pq.ParquetWriter(destination, parquet.schema_arrow, compression='zstd') as writer:
+        for batch in parquet.iter_batches():
+            contigs = pa.array([contig] * batch.num_rows, type=contig_field.type)
+            writer.write_batch(batch.set_column(contig_index, contig_field, contigs))
+
+
+def parquet_to_vortex(source: Path, destination: Path, compact: bool) -> None:
+    if compact:
+        subprocess.check_call(['uv', 'run', 'vx', 'convert', '-s', 'compact', source])
+    else:
+        subprocess.check_call(['uv', 'run', 'vx', 'convert', source])
+    source.with_suffix('.vortex').replace(destination)
 
 
 @app.command()
@@ -196,16 +235,15 @@ def convert_parquets(path: Path, dest: Path, compact: bool = False, scale_factor
         name = tmp.name
         part_path = (dest / parquet.relative_to(path)).with_name(f'{name}.vortex')
         part_path.parent.mkdir(parents=True, exist_ok=True)
-        if compact:
-            subprocess.check_call(['uv', 'run', 'vx', 'convert', '-s', 'compact', parquet])
-        else:
-            subprocess.check_call(['uv', 'run', 'vx', 'convert', parquet])
-        parquet.with_suffix('.vortex').rename(part_path)
+        parquet_to_vortex(parquet, part_path, compact)
 
-    contigs = [f'contig=chr{22-i}' for i in range(1, scale_factor)]
-    for subdir in dest.iterdir():
-        for contig in contigs:
-            shutil.copytree(subdir / "contig=chr22", subdir / contig)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for i in range(1, scale_factor):
+                contig = f'chr{22-i}'
+                scaled_parquet = Path(temp_dir) / f'{name}.{contig}.parquet'
+                rewrite_parquet_contig(parquet, scaled_parquet, contig)
+                scaled_path = part_path.with_name(f'{name}.{contig}.vortex')
+                parquet_to_vortex(scaled_parquet, scaled_path, compact)
 
 
 @app.command()
