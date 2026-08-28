@@ -79,52 +79,6 @@ fn dataset_with_ordering(locus_ordering: Vec<datafusion::logical_expr::SortExpr>
 }
 
 #[test]
-fn reads_a_whole_dataset() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_parquet_sample_tables(dir.path(), &["sample-a", "sample-b"]);
-
-    block_on(async {
-        let table_path = ListingTableUrl::parse(&root).unwrap();
-        let dataset = Dataset::discover(
-            &LocalFileSystem::new(),
-            table_path,
-            InputFormat::PARQUET,
-            reference_layout(),
-        )
-        .await
-        .unwrap();
-        let df = dataset.read(&SessionContext::new()).await.unwrap();
-
-        assert!(df.schema().has_column_with_unqualified_name("s"));
-        assert!(df.schema().has_column_with_unqualified_name("contig"));
-        assert_eq!(df.count().await.unwrap(), 16);
-    });
-}
-
-#[test]
-fn reads_only_the_restricted_sample_set() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_parquet_sample_tables(dir.path(), &["sample-a", "sample-b"]);
-
-    block_on(async {
-        let table_path = ListingTableUrl::parse(&root).unwrap();
-        let dataset = Dataset::discover(
-            &LocalFileSystem::new(),
-            table_path,
-            InputFormat::PARQUET,
-            reference_layout(),
-        )
-        .await
-        .unwrap()
-        .restrict_to(&["sample-b".to_string()])
-        .unwrap();
-        let df = dataset.read(&SessionContext::new()).await.unwrap();
-
-        assert_eq!(df.count().await.unwrap(), 8);
-    });
-}
-
-#[test]
 fn reads_one_sample_without_the_sample_partition_column() {
     let dir = tempfile::tempdir().unwrap();
     let root = fixture::write_sample_tables(dir.path(), &["sample-a", "sample-b"]);
@@ -262,20 +216,6 @@ fn rejects_requested_samples_that_are_not_in_the_dataset() {
     let message = error.to_string();
     assert!(message.contains("missing-a"), "unexpected error: {message}");
     assert!(message.contains("missing-b"), "unexpected error: {message}");
-}
-
-fn reference_layout() -> DatasetLayout {
-    DatasetLayout {
-        locus_ordering: vec![
-            col("contig").sort(true, false),
-            col("position").sort(true, false),
-        ],
-        partition_columns: vec![
-            ("s".to_string(), DataType::Utf8),
-            ("contig".to_string(), DataType::Utf8),
-        ],
-        schema: None,
-    }
 }
 
 fn allele_layout() -> DatasetLayout {

@@ -39,9 +39,9 @@ _Avoid_: merger, joiner
 **Formulation**:
 One way of building a combiner's plan. Two formulations of the same combiner return the same rows
 and differ in plan shape, which is what makes them worth having separately: comparing them is the
-point of the repo. The reference combiner has a union-of-per-sample-scans formulation and a
-one-shared-scan formulation; the allele combiner has one. A CLI subcommand names the combiner and
-an argument chooses the formulation, so the two stay separable at the surface as well.
+point of the repo. The reference combiner has a union-of-per-sample-scans formulation; the allele
+combiner has one. A CLI subcommand names the combiner and an argument chooses the formulation, so
+the two stay separable at the surface as well.
 _Avoid_: variant, strategy, combiner (a formulation is not itself a combiner)
 
 **Plan builder**:

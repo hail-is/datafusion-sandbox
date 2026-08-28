@@ -9,13 +9,11 @@ use crate::fixture;
 
 use datafusion::{
     arrow::datatypes::DataType,
-    datasource::{listing::ListingTableUrl, source::DataSourceExec},
+    datasource::listing::ListingTableUrl,
     object_store::local::LocalFileSystem,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties,
-        filter::FilterExec,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
-        union::UnionExec,
     },
     prelude::{SessionConfig, SessionContext, col},
 };
@@ -63,7 +61,6 @@ fn formulations_derive_the_session_their_plan_shape_needs() {
 
     for formulation in [
         Formulation::CombineRefsUnion,
-        Formulation::CombineRefsOneScan,
         Formulation::CombineAllelesUnion,
     ] {
         let plan = physical_plan(formulation, &dataset);
@@ -74,9 +71,7 @@ fn formulations_derive_the_session_their_plan_shape_needs() {
 /// Deriving a session must not reach back into the one it derived from.
 /// `SessionContext::clone` shares a single `Arc<RwLock<SessionState>>`, so a
 /// formulation that overrode settings on the context it was handed would leave
-/// them in place for whatever ran next — one-scan's
-/// `preserve_file_partitions` would silently reshape a union plan built
-/// afterwards.
+/// them in place for whatever ran next.
 #[test]
 fn deriving_a_session_leaves_the_callers_session_untouched() {
     let dir = tempfile::tempdir().unwrap();
@@ -86,7 +81,6 @@ fn deriving_a_session_leaves_the_callers_session_untouched() {
 
     for formulation in [
         Formulation::CombineRefsUnion,
-        Formulation::CombineRefsOneScan,
         Formulation::CombineAllelesUnion,
     ] {
         block_on(formulation.plan(&ctx, &dataset)).unwrap();
@@ -95,10 +89,6 @@ fn deriving_a_session_leaves_the_callers_session_untouched() {
         assert_eq!(
             options.execution.target_partitions, 8,
             "{formulation:?} overrode target_partitions on the caller's session",
-        );
-        assert_eq!(
-            options.optimizer.preserve_file_partitions, 0,
-            "{formulation:?} overrode preserve_file_partitions on the caller's session",
         );
     }
 }
@@ -165,38 +155,6 @@ fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorti
     assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
 }
 
-/// The one-scan reference formulation preserves every file partition from its
-/// shared Vortex scan and merges them without re-sorting.
-#[test]
-fn combine_refs_one_scan_vortex_merges_one_partition_per_sample_without_re_sorting() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_sample_tables(dir.path(), SAMPLES);
-
-    let plan = physical_plan(
-        Formulation::CombineRefsOneScan,
-        &dataset(&root, InputFormat::VORTEX),
-    );
-
-    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
-    assert_one_shared_scan(&plan);
-}
-
-/// DataFusion's parquet reader preserves every file partition from the one-scan
-/// formulation's shared scan, so it too merges without re-sorting.
-#[test]
-fn combine_refs_one_scan_parquet_merges_one_partition_per_sample_without_re_sorting() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_splittable_parquet_sample_tables(dir.path(), SAMPLES);
-
-    let plan = physical_plan(
-        Formulation::CombineRefsOneScan,
-        &dataset(&root, InputFormat::PARQUET),
-    );
-
-    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
-    assert_one_shared_scan(&plan);
-}
-
 #[test]
 fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
     let dir = tempfile::tempdir().unwrap();
@@ -210,20 +168,11 @@ fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
         .unwrap();
     for formulation in [
         Formulation::CombineRefsUnion,
-        Formulation::CombineRefsOneScan,
         Formulation::CombineAllelesUnion,
     ] {
         let plan = physical_plan(formulation, &dataset);
 
         assert_merges_one_partition_per_sample(&plan, 2);
-        if formulation == Formulation::CombineRefsOneScan {
-            assert_one_shared_scan(&plan);
-            assert!(
-                nodes_of::<FilterExec>(&plan).is_empty(),
-                "expected sample pruning at listing time:\n{}",
-                displayed(&plan),
-            );
-        }
     }
 }
 
@@ -282,21 +231,6 @@ fn block_on<F: Future>(future: F) -> F::Output {
         .build()
         .unwrap()
         .block_on(future)
-}
-
-/// One scan feeding the merge rather than a union of per-sample scans.
-fn assert_one_shared_scan(plan: &Arc<dyn ExecutionPlan>) {
-    assert_eq!(
-        nodes_of::<DataSourceExec>(plan).len(),
-        1,
-        "expected one shared scan:\n{}",
-        displayed(plan),
-    );
-    assert!(
-        nodes_of::<UnionExec>(plan).is_empty(),
-        "expected no union of per-sample scans:\n{}",
-        displayed(plan),
-    );
 }
 
 /// Exactly one sort-preserving merge, no re-sort, and one input partition per
