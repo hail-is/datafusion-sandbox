@@ -10,3 +10,4 @@ mod fixture;
 mod format;
 mod formulation;
 mod pipeline;
+mod sorted_table;
