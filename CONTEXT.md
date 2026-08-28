@@ -47,16 +47,16 @@ _Avoid_: variant, strategy, combiner (a formulation is not itself a combiner)
 **Plan builder**:
 The part of a formulation that constructs its DataFrame over a dataset and stops. It does no
 runtime setup, object store registration, writing, or execution, which is why plan-shape tests can
-assert on it directly. The session a formulation derives is part of its plan builder.
+assert on it directly. Any session a formulation derives is part of its plan builder.
 _Avoid_: query builder, factory
 
 **Session**:
 The DataFusion configuration and state a plan is built against. Part of what decides plan shape,
 not merely a performance knob: target partitions and whether file partitions are preserved change
-which operators appear. A formulation does not build under whatever session it is handed — it
-derives its own, overriding the settings its plan shape depends on and inheriting the rest, so no
-caller can change a plan's shape by changing a session. The settings a formulation overrides are
-the list of dependencies it has yet to shed.
+which operators appear. A formulation overrides the settings its plan shape still depends on and
+inherits the rest. The reference formulation has shed those dependencies. The allele formulation
+still pins target partitions because DataFusion otherwise repartitions its distinct and inserts
+sorts. The settings a formulation overrides are the dependencies it has yet to shed.
 _Avoid_: context, config (either alone is narrower than what plan shape depends on)
 
 **Plan shape**:
@@ -91,7 +91,8 @@ _Avoid_: runtime type, threading mode, runtime kind
 
 **Sample**:
 One sequenced individual, identified by a string id such as `HG00308`. Sample data lives under a
-directory named `s=<id>`, which DataFusion reads as a partition column.
+directory named `s=<id>`. The dataset reader attaches that id as a scalar field to the sample's
+sorted table.
 _Avoid_: individual, subject
 
 **Sample set**:
@@ -104,14 +105,13 @@ _Avoid_: samples (unqualified), sample list, cohort
 
 **Dataset**:
 One stored instance of a dataset layout: its path, the format of each file, and the sample set found
-there. A formulation reads a dataset and may narrow its sample set, but it does not assemble the
-storage declarations needed to read it.
+there. It lists each sample's files and builds the sorted table that reads them. A formulation may
+narrow the sample set, but it does not list paths or assemble readers.
 _Avoid_: input, table (a dataset holds many per-sample tables), corpus
 
 **Dataset layout**:
-The representation shared by datasets of one kind: their locus ordering, partition columns, and
-optional schema. It describes how rows are distributed across files, separately from how each file
-is encoded.
+The representation shared by datasets of one kind: their locus ordering and optional schema. It
+describes how rows are arranged across files, separately from how each file is encoded.
 _Avoid_: format (the encoding of one file), listing options, storage config
 
 **Synthetic table**:
@@ -133,8 +133,9 @@ _Avoid_: site, coordinate, variant (a variant is a locus plus alleles)
 
 **Locus ordering**:
 The sort order that makes a formulation's plan mergeable rather than re-sorting: contig, then
-position, optionally then alleles. A dataset layout declares the ordering on disk, and a formulation
-declares the prefix it requires; a finer ordering satisfies a coarser requirement.
+position, optionally then alleles. Contig is a stored field, so file statistics prove this ordering
+without relying on directory names. A dataset layout declares the ordering on disk, and a
+formulation declares the prefix it requires; a finer ordering satisfies a coarser requirement.
 _Avoid_: sort key, ordering (unqualified)
 
 **Reference data**:

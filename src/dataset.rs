@@ -1,26 +1,28 @@
 //! Stored datasets and their shared layouts.
 
-use crate::format::InputFormat;
+use crate::{
+    format::InputFormat,
+    sorted_table::{AttachedScalar, SortedTable},
+};
 
 use datafusion::{
-    arrow::datatypes::{DataType, SchemaRef},
-    common::DataFusionError,
+    arrow::datatypes::{DataType, Field, SchemaRef},
+    common::{DataFusionError, ScalarValue},
     datasource::listing::{
-        ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+        ListingTableUrl, PartitionedFile,
         helpers::{describe_partition, list_partitions},
     },
     error::Result,
     logical_expr::SortExpr,
     prelude::*,
 };
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use std::{collections::BTreeSet, sync::Arc};
 
 /// How a dataset's rows and files are arranged on disk.
 #[derive(Clone, Debug)]
 pub struct DatasetLayout {
     pub locus_ordering: Vec<SortExpr>,
-    pub partition_columns: Vec<(String, DataType)>,
     pub schema: Option<SchemaRef>,
 }
 
@@ -31,11 +33,7 @@ impl DatasetLayout {
             .iter()
             .flat_map(|ordering| ordering.expr.column_refs())
         {
-            let is_partition_column = self
-                .partition_columns
-                .iter()
-                .any(|(name, _)| name == &column.name);
-            if schema.field_with_name(&column.name).is_err() && !is_partition_column {
+            if schema.field_with_name(&column.name).is_err() {
                 return Err(DataFusionError::Plan(format!(
                     "locus ordering column '{}' is missing from the dataset schema",
                     column.name
@@ -132,18 +130,32 @@ impl Dataset {
         &self.schema
     }
 
-    /// Reads one sample directory, dropping the `s` partition column above it.
+    /// Reads one sample directory as a sorted table and attaches its sample id.
     pub async fn read_sample(&self, ctx: &SessionContext, sample: &str) -> Result<DataFrame> {
         let sample_path =
             ListingTableUrl::parse(format!("{}s={sample}/", self.table_path.as_str()))?;
-        let partition_columns = self
-            .layout
-            .partition_columns
-            .iter()
-            .filter(|(name, _)| name != "s")
-            .cloned()
-            .collect();
-        self.read_path(ctx, sample_path, partition_columns).await
+        let state = ctx.state();
+        let store = ctx.runtime_env().object_store(&sample_path)?;
+        let format = self.input_format.read_format();
+        let extension = format.get_ext();
+        let files = sample_path
+            .list_all_files(&state, store.as_ref(), &extension)
+            .await?
+            .map_ok(PartitionedFile::new_from_meta)
+            .try_collect()
+            .await?;
+        let table = SortedTable::new(
+            sample_path.object_store(),
+            format,
+            files,
+            Arc::clone(&self.schema),
+            self.layout.locus_ordering.clone(),
+            Some(AttachedScalar {
+                field: Arc::new(Field::new("s", DataType::Utf8, false)),
+                value: ScalarValue::Utf8(Some(sample.to_string())),
+            }),
+        );
+        ctx.read_table(Arc::new(table))
     }
 
     /// Checks that the dataset's locus ordering starts with every required expression.
@@ -156,23 +168,6 @@ impl Dataset {
             "dataset locus ordering {:?} does not satisfy required ordering {:?}",
             self.layout.locus_ordering, required
         )))
-    }
-
-    async fn read_path(
-        &self,
-        ctx: &SessionContext,
-        table_path: ListingTableUrl,
-        partition_columns: Vec<(String, DataType)>,
-    ) -> Result<DataFrame> {
-        let listing_options = ListingOptions::new(self.input_format.read_format())
-            .with_file_sort_order(vec![self.layout.locus_ordering.clone()])
-            .with_table_partition_cols(partition_columns);
-        let config = ListingTableConfig::new(table_path)
-            .with_listing_options(listing_options)
-            .with_schema(Arc::clone(&self.schema));
-        let table = ListingTable::try_new(config)?
-            .with_cache(ctx.runtime_env().cache_manager.get_file_statistic_cache());
-        ctx.read_table(Arc::new(table))
     }
 
     /// Restricts this dataset to a nonempty requested sample set, rejecting ids

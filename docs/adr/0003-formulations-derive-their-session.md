@@ -1,13 +1,12 @@
 # Formulations derive the session their plan shape needs
 
-A formulation's plan shape depends on session settings: `target_partitions` for the union
-formulations, and `target_partitions` together with `optimizer.preserve_file_partitions` for the
-one-scan formulation. A plan built under the wrong session returns identical rows through a
-substantially slower plan, so the mistake is invisible without a plan-shape assertion. Rather than
-have callers pair each plan builder with a matching `SessionConfig` — a pairing that was re-done
-independently in `main.rs` and in `tests/plan_shape.rs` — each plan builder derives its own session
-from the one it is handed, overriding only the settings its shape depends on and inheriting the
-rest.
+A formulation may still depend on a session setting for its plan shape. The allele formulation
+pins `target_partitions` to one because DataFusion otherwise repartitions its `distinct()` and
+inserts sorts above the sample merge. A plan built under the wrong session returns identical rows
+through a substantially slower plan, so the mistake is invisible without a plan-shape assertion.
+Rather than have callers pair the plan builder with a matching `SessionConfig`, the formulation
+derives a session from the one it is handed, overriding only the setting its shape depends on and
+inheriting the rest.
 
 The derivation clones the caller's *state*, mutates the clone's config in place, and wraps the
 result: `SessionContext::state` already returns an owned `SessionState` clone that shares the
@@ -49,5 +48,7 @@ they currently get for free. That trade should be measured rather than assumed.
 
 ## Consequences
 
-The settings a formulation overrides are exactly its remaining config dependencies, listed in one
-place. #44 removes them one at a time; when the list is empty, the derivation goes with it.
+The sorted table removed the reference formulation's session dependencies. The allele
+formulation's `target_partitions` override remains until its distinct and ranking can request a
+single-partition plan without changing session configuration. When that dependency is gone, the
+derivation goes with it.

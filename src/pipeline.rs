@@ -16,8 +16,8 @@ use std::{future::Future, sync::Arc, thread::available_parallelism};
 
 /// Everything the runner needs besides the pipeline closure itself.
 pub struct PipelineOptions {
-    /// Number of worker threads for each runtime. Independent of `target_partitions`, which
-    /// each formulation settles for itself.
+    /// Number of worker threads for each runtime. Independent of any target-partition setting
+    /// a formulation still needs for its plan shape.
     pub threads: usize,
     /// Base URLs of the object stores to register on the session, e.g.
     /// "gs://my-bucket". Only gs:// URLs are supported.

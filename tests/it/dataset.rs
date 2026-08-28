@@ -78,10 +78,6 @@ fn dataset_with_ordering(locus_ordering: Vec<datafusion::logical_expr::SortExpr>
         InputFormat::VORTEX,
         DatasetLayout {
             locus_ordering,
-            partition_columns: vec![
-                ("s".to_string(), DataType::Utf8),
-                ("contig".to_string(), DataType::Utf8),
-            ],
             schema: None,
         },
     ))
@@ -89,7 +85,7 @@ fn dataset_with_ordering(locus_ordering: Vec<datafusion::logical_expr::SortExpr>
 }
 
 #[test]
-fn reads_one_sample_without_the_sample_partition_column() {
+fn reads_one_sample_with_its_sample_id_attached() {
     let dir = tempfile::tempdir().unwrap();
     let root = fixture::write_sample_tables(dir.path(), &["sample-a", "sample-b"]);
 
@@ -108,10 +104,20 @@ fn reads_one_sample_without_the_sample_partition_column() {
             .await
             .unwrap();
 
-        assert!(!df.schema().has_column_with_unqualified_name("s"));
+        assert!(df.schema().has_column_with_unqualified_name("s"));
         assert!(df.schema().has_column_with_unqualified_name("contig"));
         assert!(df.schema().has_column_with_unqualified_name("alleles"));
-        assert_eq!(df.count().await.unwrap(), 8);
+        let batches = df.collect().await.unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 8);
+        for batch in batches {
+            let sample_ids = batch
+                .column_by_name("s")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert!((0..batch.num_rows()).all(|row| sample_ids.value(row) == "sample-b"));
+        }
     });
 }
 
@@ -128,7 +134,6 @@ fn rejects_an_inferred_schema_missing_a_locus_ordering_column() {
             InputFormat::VORTEX,
             DatasetLayout {
                 locus_ordering: vec![col("missing").sort(true, false)],
-                partition_columns: vec![],
                 schema: None,
             },
         )
@@ -178,7 +183,6 @@ fn infers_the_schema_from_one_input_file() {
             InputFormat::VORTEX,
             DatasetLayout {
                 locus_ordering: vec![col("position").sort(true, false)],
-                partition_columns: vec![("s".to_string(), DataType::Utf8)],
                 schema: None,
             },
         )
@@ -210,7 +214,6 @@ fn uses_a_pinned_schema_without_inference() {
             InputFormat::VORTEX,
             DatasetLayout {
                 locus_ordering: vec![col("position").sort(true, false)],
-                partition_columns: vec![("s".to_string(), DataType::Utf8)],
                 schema: Some(Arc::clone(&schema)),
             },
         )
@@ -341,10 +344,6 @@ fn allele_layout() -> DatasetLayout {
             col("position").sort(true, false),
             col("alleles").sort(true, false),
         ],
-        partition_columns: vec![
-            ("s".to_string(), DataType::Utf8),
-            ("contig".to_string(), DataType::Utf8),
-        ],
         schema: None,
     }
 }
@@ -352,7 +351,6 @@ fn allele_layout() -> DatasetLayout {
 fn empty_layout() -> DatasetLayout {
     DatasetLayout {
         locus_ordering: vec![],
-        partition_columns: vec![],
         schema: None,
     }
 }

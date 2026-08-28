@@ -35,7 +35,7 @@ fn show_action_defaults_to_vortex_input() {
         "stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("| 1        | A,G     | chr22  | 1"),
+        stdout.contains("| 1        | A,G     | chr1   | 1"),
         "stdout:\n{stdout}"
     );
 }

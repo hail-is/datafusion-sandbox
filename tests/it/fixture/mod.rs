@@ -18,55 +18,27 @@ use std::{path::Path, sync::Arc};
 /// Four samples from the `1kg_chr22` benchmark dataset, the most any test needs.
 pub const SAMPLES: &[&str] = &["HG00308", "HG00592", "HG02230", "NA18534"];
 
-/// The single contig the fixture writes, so that each sample is exactly one file
-/// and a plan's partition count is its sample count.
-const CONTIG: &str = "chr22";
+/// Contigs and filenames in locus order. The filenames sort in the opposite
+/// order, so a reader must use statistics rather than path order.
+const CONTIG_FILES: &[(&str, &str)] = &[("chr1", "d"), ("chr2", "c"), ("chr3", "b"), ("chr4", "a")];
 
-/// Loci per sample. Small enough that writing the fixture is quick.
-const ROWS_PER_SAMPLE: i32 = 8;
+/// Loci per contig. Four contigs keep the existing eight rows per sample.
+const ROWS_PER_CONTIG: i32 = 2;
 
-/// Loci per sample for a fixture the optimizer is willing to byte-range split,
-/// which is more than the 8192-row `batch_size` default: `enforce_distribution`
-/// refuses to split a scan of fewer rows than one batch. Below this the hostile
-/// session in `tests/plan_shape` is not hostile at all, and every assertion
-/// there passes with the session derivation deleted.
-const SPLITTABLE_ROWS_PER_SAMPLE: i32 = 20_000;
-
-/// Writes one vortex table per sample under `dir`, as
-/// `s=<sample>/contig=<contig>/fixture.vortex`, with rows in locus order.
+/// Writes one Vortex table per sample under `dir`, as several files in
+/// `s=<sample>/`, with `contig` stored in every file.
 /// Returns the root path the combiners read.
 ///
 /// Every sample covers the same loci with the same alleles, so a plan that
 /// de-duplicates across the sample set has something to de-duplicate.
 pub fn write_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
-    write_sample_tables_with_format(dir, sample_set, &OutputFormat::VORTEX, ROWS_PER_SAMPLE)
+    write_sample_tables_with_format(dir, sample_set, &OutputFormat::VORTEX)
 }
 
 /// The parquet counterpart of [`write_sample_tables`], laid out identically so
 /// the two formats' plan shapes are compared over the same data.
 pub fn write_parquet_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
-    write_sample_tables_with_format(dir, sample_set, &OutputFormat::PARQUET, ROWS_PER_SAMPLE)
-}
-
-/// [`write_sample_tables`] at [`SPLITTABLE_ROWS_PER_SAMPLE`], for tests that
-/// need the optimizer to be willing to split a per-sample scan.
-pub fn write_splittable_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
-    write_sample_tables_with_format(
-        dir,
-        sample_set,
-        &OutputFormat::VORTEX,
-        SPLITTABLE_ROWS_PER_SAMPLE,
-    )
-}
-
-/// The parquet counterpart of [`write_splittable_sample_tables`].
-pub fn write_splittable_parquet_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
-    write_sample_tables_with_format(
-        dir,
-        sample_set,
-        &OutputFormat::PARQUET,
-        SPLITTABLE_ROWS_PER_SAMPLE,
-    )
+    write_sample_tables_with_format(dir, sample_set, &OutputFormat::PARQUET)
 }
 
 /// Writes the sample tables in `format`, deriving every filename from it.
@@ -74,7 +46,6 @@ fn write_sample_tables_with_format(
     dir: &Path,
     sample_set: &[&str],
     format: &'static OutputFormat,
-    rows_per_sample: i32,
 ) -> String {
     let root = dir.join("samples");
     let pipeline_root = root.clone();
@@ -85,13 +56,14 @@ fn write_sample_tables_with_format(
     pipeline::run(
         move |ctx: SessionContext| async move {
             for sample in sample_set {
-                let path = pipeline_root
-                    .join(format!("s={sample}"))
-                    .join(format!("contig={CONTIG}"))
-                    .join(format!("fixture.{}", format.extension()));
-                let path = path.to_str().expect("fixture path is valid UTF-8");
-                let df = ctx.read_batch(sample_batch(rows_per_sample))?;
-                format.write(df, path).await?;
+                for &(contig, filename) in CONTIG_FILES {
+                    let path = pipeline_root
+                        .join(format!("s={sample}"))
+                        .join(format!("{filename}.{}", format.extension()));
+                    let path = path.to_str().expect("fixture path is valid UTF-8");
+                    let df = ctx.read_batch(sample_batch(contig))?;
+                    format.write(df, path).await?;
+                }
             }
             Ok(())
         },
@@ -108,15 +80,21 @@ fn write_sample_tables_with_format(
 
 /// One sample's rows, sorted by the locus ordering: one locus per position, with
 /// alleles alternating between two values.
-fn sample_batch(rows_per_sample: i32) -> RecordBatch {
+fn sample_batch(contig: &str) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
+        Field::new("contig", DataType::Utf8, false),
         Field::new("position", DataType::Int32, false),
         Field::new("alleles", DataType::Utf8, false),
     ]));
-    let positions = Int32Array::from_iter_values(1..=rows_per_sample);
+    let contigs =
+        StringArray::from_iter_values(std::iter::repeat_n(contig, ROWS_PER_CONTIG as usize));
+    let positions = Int32Array::from_iter_values(1..=ROWS_PER_CONTIG);
     let alleles = StringArray::from_iter_values(
-        (1..=rows_per_sample).map(|p| if p % 2 == 0 { "A,C" } else { "A,G" }),
+        (1..=ROWS_PER_CONTIG).map(|p| if p % 2 == 0 { "A,C" } else { "A,G" }),
     );
-    RecordBatch::try_new(schema, vec![Arc::new(positions), Arc::new(alleles)])
-        .expect("fixture batch matches its schema")
+    RecordBatch::try_new(
+        schema,
+        vec![Arc::new(contigs), Arc::new(positions), Arc::new(alleles)],
+    )
+    .expect("fixture batch matches its schema")
 }
