@@ -13,7 +13,7 @@ use datafusion::{
     logical_expr::SortExpr,
     prelude::*,
 };
-use object_store::ObjectStore;
+use futures_util::StreamExt;
 use std::{collections::BTreeSet, sync::Arc};
 
 /// How a dataset's rows and files are arranged on disk.
@@ -24,20 +24,43 @@ pub struct DatasetLayout {
     pub schema: Option<SchemaRef>,
 }
 
+impl DatasetLayout {
+    fn check_locus_ordering_columns(&self, schema: &SchemaRef) -> Result<()> {
+        for column in self
+            .locus_ordering
+            .iter()
+            .flat_map(|ordering| ordering.expr.column_refs())
+        {
+            let is_partition_column = self
+                .partition_columns
+                .iter()
+                .any(|(name, _)| name == &column.name);
+            if schema.field_with_name(&column.name).is_err() && !is_partition_column {
+                return Err(DataFusionError::Plan(format!(
+                    "locus ordering column '{}' is missing from the dataset schema",
+                    column.name
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A directory of per-sample tables, its format, layout, and discovered sample set.
 #[derive(Debug)]
 pub struct Dataset {
     table_path: ListingTableUrl,
     input_format: InputFormat,
     layout: DatasetLayout,
+    schema: SchemaRef,
     sample_set: Vec<String>,
 }
 
 impl Dataset {
     /// Discovers the sample directories immediately below `table_path` with one
-    /// object-store listing request.
+    /// object-store listing request, and resolves the dataset schema.
     pub async fn discover(
-        store: &dyn ObjectStore,
+        ctx: &SessionContext,
         mut table_path: ListingTableUrl,
         input_format: InputFormat,
         layout: DatasetLayout,
@@ -46,7 +69,9 @@ impl Dataset {
             let path = <ListingTableUrl as AsRef<str>>::as_ref(&table_path);
             table_path = ListingTableUrl::parse(format!("{}/", path.trim_end_matches('/')))?;
         }
-        let partitions = list_partitions(store, &table_path, 0, None).await?;
+        let state = ctx.state();
+        let store = ctx.runtime_env().object_store(&table_path)?;
+        let partitions = list_partitions(store.as_ref(), &table_path, 0, None).await?;
         let mut sample_set = partitions
             .iter()
             .filter_map(|partition| {
@@ -65,17 +90,46 @@ impl Dataset {
                 <ListingTableUrl as AsRef<str>>::as_ref(&table_path)
             )));
         }
+        let schema = match &layout.schema {
+            Some(schema) => Arc::clone(schema),
+            None => {
+                let format = input_format.read_format();
+                let extension = format.get_ext();
+                let mut files = table_path
+                    .list_all_files(&state, store.as_ref(), &extension)
+                    .await?;
+                let input_file = loop {
+                    match files.next().await.transpose()? {
+                        Some(file) if file.size > 0 => break file,
+                        Some(_) => continue,
+                        None => {
+                            return Err(DataFusionError::Plan(format!(
+                                "no input files found in dataset '{}'",
+                                table_path.as_str()
+                            )));
+                        }
+                    }
+                };
+                format.infer_schema(&state, &store, &[input_file]).await?
+            }
+        };
+        layout.check_locus_ordering_columns(&schema)?;
 
         Ok(Self {
             table_path,
             input_format,
             layout,
+            schema,
             sample_set,
         })
     }
 
     pub fn sample_set(&self) -> &[String] {
         &self.sample_set
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 
     /// Reads one sample directory, dropping the `s` partition column above it.
@@ -113,11 +167,9 @@ impl Dataset {
         let listing_options = ListingOptions::new(self.input_format.read_format())
             .with_file_sort_order(vec![self.layout.locus_ordering.clone()])
             .with_table_partition_cols(partition_columns);
-        let config = ListingTableConfig::new(table_path).with_listing_options(listing_options);
-        let config = match &self.layout.schema {
-            Some(schema) => config.with_schema(Arc::clone(schema)),
-            None => config.infer_schema(&ctx.state()).await?,
-        };
+        let config = ListingTableConfig::new(table_path)
+            .with_listing_options(listing_options)
+            .with_schema(Arc::clone(&self.schema));
         let table = ListingTable::try_new(config)?
             .with_cache(ctx.runtime_env().cache_manager.get_file_statistic_cache());
         ctx.read_table(Arc::new(table))
