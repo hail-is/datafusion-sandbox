@@ -58,10 +58,8 @@ impl CombinerRun {
         pipeline::run(
             move |ctx| async move {
                 let table_path = ListingTableUrl::parse(input_path)?;
-                let store = ctx.runtime_env().object_store(&table_path)?;
                 let layout = formulation.required_layout();
-                let dataset =
-                    Dataset::discover(store.as_ref(), table_path, input_format, layout).await?;
+                let dataset = Dataset::discover(&ctx, table_path, input_format, layout).await?;
                 let dataset = match sample_set {
                     Some(sample_set) => dataset.restrict_to(&sample_set)?,
                     None => dataset,

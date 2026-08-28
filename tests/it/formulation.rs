@@ -10,7 +10,6 @@ use crate::fixture;
 use datafusion::{
     arrow::datatypes::DataType,
     datasource::listing::ListingTableUrl,
-    object_store::local::LocalFileSystem,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
@@ -32,8 +31,9 @@ fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
     let dir = tempfile::tempdir().unwrap();
     let root = fixture::write_sample_tables(dir.path(), &[SAMPLES[0]]);
     let table_path = ListingTableUrl::parse(&root).unwrap();
+    let ctx = SessionContext::new();
     let dataset = block_on(Dataset::discover(
-        &LocalFileSystem::new(),
+        &ctx,
         table_path,
         InputFormat::VORTEX,
         DatasetLayout {
@@ -178,8 +178,9 @@ fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
 
 fn dataset(root: &str, input_format: InputFormat) -> Dataset {
     let table_path = ListingTableUrl::parse(root).unwrap();
+    let ctx = SessionContext::new();
     block_on(Dataset::discover(
-        &LocalFileSystem::new(),
+        &ctx,
         table_path,
         input_format,
         DatasetLayout {
