@@ -206,6 +206,31 @@ fn combine_alleles_rejects_a_formulation_argument_before_running() {
 }
 
 #[test]
+fn combine_refs_rejects_the_removed_one_scan_formulation_before_running() {
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args([
+            "combine-refs",
+            "missing",
+            "--formulation",
+            "one-scan",
+            "--show",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("invalid value 'one-scan'"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("possible values: union"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn samples_argument_accepts_a_comma_separated_list() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::write_sample_tables(dir.path(), SAMPLES);

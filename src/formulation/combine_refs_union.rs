@@ -8,10 +8,8 @@ use std::sync::Arc;
 /// Builds the union-of-per-sample-scans formulation under the session its plan
 /// shape depends on.
 ///
-/// The generated physical plan still has a `SortPreservingMergeExec` doing the main work. The
-/// difference from the one-scan formulation is that many `DataSourceExec`s feed
-/// a `UnionExec`, which still feeds `SortPreservingMergeExec` with one partition
-/// per input sample.
+/// Many `DataSourceExec`s feed a `UnionExec`, which feeds a
+/// `SortPreservingMergeExec` with one partition per input sample.
 pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
     let ctx = derived_session(ctx, |options| {
         options.execution.target_partitions = 1;

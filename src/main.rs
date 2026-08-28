@@ -52,14 +52,12 @@ struct CombineRefsArgs {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum CombineRefsFormulationArg {
     Union,
-    OneScan,
 }
 
 impl CombineRefsFormulationArg {
     fn formulation(self) -> Formulation {
         match self {
             Self::Union => Formulation::CombineRefsUnion,
-            Self::OneScan => Formulation::CombineRefsOneScan,
         }
     }
 }

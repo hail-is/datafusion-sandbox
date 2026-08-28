@@ -78,25 +78,6 @@ impl Dataset {
         &self.sample_set
     }
 
-    /// Reads the dataset's sample set with its declared ordering, partitions, and schema.
-    pub async fn read(&self, ctx: &SessionContext) -> Result<DataFrame> {
-        self.read_path(
-            ctx,
-            self.table_path.clone(),
-            self.layout.partition_columns.clone(),
-        )
-        .await?
-        .filter(
-            col("s").in_list(
-                self.sample_set
-                    .iter()
-                    .map(|sample| lit(sample.as_str()))
-                    .collect(),
-                false,
-            ),
-        )
-    }
-
     /// Reads one sample directory, dropping the `s` partition column above it.
     pub async fn read_sample(&self, ctx: &SessionContext, sample: &str) -> Result<DataFrame> {
         let sample_path =
