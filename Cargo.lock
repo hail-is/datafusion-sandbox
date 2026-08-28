@@ -58,7 +58,7 @@ version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41ceb950ed9f82837662e3f3c470403987f32e3a25e5b741c8f17b3b0cca394d"
 dependencies = [
- "fastlanes",
+ "fastlanes 0.6.1",
  "itertools 0.15.0",
  "num-traits",
 ]
@@ -1988,6 +1988,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastlanes"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34f6c951d711d8a10f08524071f6171bc95c5f857e8b39d91e36ad6353fc4f4f"
+dependencies = [
+ "const_for",
+ "num-traits",
+ "pastey",
+ "seq-macro",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3145,12 +3157,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "oneshot"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfe21416a02c693fb9f980befcb230ecc70b0b3d1cc4abf88b9675c4c1457f0c"
 
 [[package]]
 name = "onpair"
@@ -4481,7 +4487,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vortex"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "vortex-alp",
  "vortex-array",
@@ -4517,7 +4523,7 @@ dependencies = [
 [[package]]
 name = "vortex-alp"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "alp",
  "itertools 0.14.0",
@@ -4534,7 +4540,7 @@ dependencies = [
 [[package]]
 name = "vortex-array"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "arc-swap",
  "arcref",
@@ -4580,7 +4586,7 @@ dependencies = [
 [[package]]
 name = "vortex-array-macros"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4590,7 +4596,7 @@ dependencies = [
 [[package]]
 name = "vortex-arrow"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -4613,7 +4619,7 @@ dependencies = [
 [[package]]
 name = "vortex-btrblocks"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "itertools 0.14.0",
  "pco",
@@ -4639,7 +4645,7 @@ dependencies = [
 [[package]]
 name = "vortex-buffer"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "arrow-buffer",
  "bitvec",
@@ -4652,7 +4658,7 @@ dependencies = [
 [[package]]
 name = "vortex-bytebool"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "num-traits",
  "vortex-array",
@@ -4664,7 +4670,7 @@ dependencies = [
 [[package]]
 name = "vortex-compressor"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "itertools 0.14.0",
  "num-traits",
@@ -4682,7 +4688,7 @@ dependencies = [
 [[package]]
 name = "vortex-compute"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "vortex-buffer",
 ]
@@ -4690,7 +4696,7 @@ dependencies = [
 [[package]]
 name = "vortex-datafusion"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -4722,7 +4728,7 @@ dependencies = [
 [[package]]
 name = "vortex-datetime-parts"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "num-traits",
  "prost",
@@ -4736,7 +4742,7 @@ dependencies = [
 [[package]]
 name = "vortex-decimal-byte-parts"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "num-traits",
  "prost",
@@ -4750,7 +4756,7 @@ dependencies = [
 [[package]]
 name = "vortex-edition"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "parking_lot",
  "vortex-session",
@@ -4759,7 +4765,7 @@ dependencies = [
 [[package]]
 name = "vortex-error"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "arrow-schema",
  "flatbuffers",
@@ -4772,9 +4778,9 @@ dependencies = [
 [[package]]
 name = "vortex-fastlanes"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
- "fastlanes",
+ "fastlanes 0.7.0",
  "itertools 0.14.0",
  "lending-iterator",
  "num-traits",
@@ -4789,8 +4795,9 @@ dependencies = [
 [[package]]
 name = "vortex-file"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
+ "async-stream",
  "async-trait",
  "bytes",
  "flatbuffers",
@@ -4799,7 +4806,6 @@ dependencies = [
  "kanal",
  "moka",
  "object_store",
- "oneshot",
  "parking_lot",
  "pin-project-lite",
  "tokio",
@@ -4836,7 +4842,7 @@ dependencies = [
 [[package]]
 name = "vortex-flatbuffers"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "flatbuffers",
  "vortex-buffer",
@@ -4846,7 +4852,7 @@ dependencies = [
 [[package]]
 name = "vortex-fsst"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "fsst-rs",
  "num-traits",
@@ -4861,8 +4867,9 @@ dependencies = [
 [[package]]
 name = "vortex-io"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
+ "async-executor",
  "async-fs",
  "async-stream",
  "async-trait",
@@ -4873,7 +4880,6 @@ dependencies = [
  "glob",
  "kanal",
  "object_store",
- "oneshot",
  "parking_lot",
  "pin-project-lite",
  "smol",
@@ -4891,7 +4897,7 @@ dependencies = [
 [[package]]
 name = "vortex-ipc"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "bytes",
  "flatbuffers",
@@ -4908,7 +4914,7 @@ dependencies = [
 [[package]]
 name = "vortex-layout"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "arcref",
  "arrow-array",
@@ -4922,7 +4928,6 @@ dependencies = [
  "kanal",
  "moka",
  "once_cell",
- "oneshot",
  "parking_lot",
  "paste",
  "pin-project-lite",
@@ -4932,6 +4937,7 @@ dependencies = [
  "termtree",
  "tokio",
  "tracing",
+ "uuid",
  "vortex-array",
  "vortex-arrow",
  "vortex-btrblocks",
@@ -4951,7 +4957,7 @@ dependencies = [
 [[package]]
 name = "vortex-mask"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "itertools 0.14.0",
  "vortex-buffer",
@@ -4961,7 +4967,7 @@ dependencies = [
 [[package]]
 name = "vortex-metrics"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "parking_lot",
  "sketches-ddsketch",
@@ -4970,7 +4976,7 @@ dependencies = [
 [[package]]
 name = "vortex-onpair"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "num-traits",
  "onpair",
@@ -4985,7 +4991,7 @@ dependencies = [
 [[package]]
 name = "vortex-pco"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "pco",
  "prost",
@@ -4999,7 +5005,7 @@ dependencies = [
 [[package]]
 name = "vortex-proto"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "prost",
  "prost-types",
@@ -5008,7 +5014,7 @@ dependencies = [
 [[package]]
 name = "vortex-runend"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "itertools 0.14.0",
  "num-traits",
@@ -5023,7 +5029,7 @@ dependencies = [
 [[package]]
 name = "vortex-scan"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "async-trait",
  "futures",
@@ -5039,7 +5045,7 @@ dependencies = [
 [[package]]
 name = "vortex-sequence"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "num-traits",
  "prost",
@@ -5055,7 +5061,7 @@ dependencies = [
 [[package]]
 name = "vortex-session"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "arc-swap",
  "lasso",
@@ -5067,7 +5073,7 @@ dependencies = [
 [[package]]
 name = "vortex-sparse"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "itertools 0.14.0",
  "num-traits",
@@ -5082,7 +5088,7 @@ dependencies = [
 [[package]]
 name = "vortex-utils"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "dashmap",
  "hashbrown 0.17.1",
@@ -5091,7 +5097,7 @@ dependencies = [
 [[package]]
 name = "vortex-zigzag"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "vortex-array",
  "vortex-buffer",
@@ -5104,7 +5110,7 @@ dependencies = [
 [[package]]
 name = "vortex-zstd"
 version = "0.1.0"
-source = "git+https://github.com/patrick-schultz/vortex?branch=pschulz%2Fcompact-encodings-df-55#7569880497c230b33284791321f09dd84c093021"
+source = "git+https://github.com/patrick-schultz/vortex?branch=file-stats-type-fix#080328390515542ca0d824482c4e6b8a7b2b2cce"
 dependencies = [
  "itertools 0.14.0",
  "num-traits",

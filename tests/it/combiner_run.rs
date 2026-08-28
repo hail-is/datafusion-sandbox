@@ -1,7 +1,7 @@
 use crate::fixture;
 
 use datafusion::{
-    arrow::{array::StringArray, record_batch::RecordBatch},
+    arrow::{array::StringViewArray, record_batch::RecordBatch},
     error::Result,
     parquet::{
         basic::Compression,
@@ -210,7 +210,7 @@ fn reads_parquet_dataset_into_record_batches() {
         .column_by_name("alleles")
         .unwrap()
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<StringViewArray>()
         .unwrap();
     assert_eq!(alleles.value(0), "A,G");
 }

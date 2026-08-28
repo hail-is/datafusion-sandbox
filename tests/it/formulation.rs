@@ -8,7 +8,7 @@
 use crate::fixture;
 
 use datafusion::{
-    arrow::datatypes::{DataType, Field, Schema},
+    arrow::datatypes::DataType,
     datasource::{listing::ListingTableUrl, source::DataSourceExec},
     object_store::local::LocalFileSystem,
     physical_plan::{
@@ -243,10 +243,7 @@ fn dataset(root: &str, input_format: InputFormat) -> Dataset {
                 ("s".to_string(), DataType::Utf8),
                 ("contig".to_string(), DataType::Utf8),
             ],
-            schema: Some(Arc::new(Schema::new(vec![
-                Field::new("position", DataType::Int32, false),
-                Field::new("alleles", DataType::Utf8, false),
-            ]))),
+            schema: None,
         },
     ))
     .unwrap()

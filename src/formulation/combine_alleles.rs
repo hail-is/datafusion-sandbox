@@ -2,11 +2,8 @@ use super::{derived_session, union_sample_plans};
 use crate::dataset::{Dataset, DatasetLayout};
 
 use datafusion::{
-    arrow::datatypes::{DataType, Field, Schema},
-    error::Result,
-    functions_window::rank::rank,
-    logical_expr::SortExpr,
-    prelude::*,
+    arrow::datatypes::DataType, error::Result, functions_window::rank::rank,
+    logical_expr::SortExpr, prelude::*,
 };
 
 use std::sync::Arc;
@@ -23,19 +20,13 @@ fn locus_ordering() -> Vec<SortExpr> {
 }
 
 pub(crate) fn required_layout() -> DatasetLayout {
-    // Leaving the schema to be inferred produces Utf8View for `alleles`. The planner then fails to
-    // recognize the declared file ordering, so this formulation pins that field to Utf8.
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("position", DataType::Int32, false),
-        Field::new("alleles", DataType::Utf8, false),
-    ]));
     DatasetLayout {
         locus_ordering: locus_ordering(),
         partition_columns: vec![
             ("s".to_string(), DataType::Utf8),
             ("contig".to_string(), DataType::Utf8),
         ],
-        schema: Some(schema),
+        schema: None,
     }
 }
 

@@ -1,18 +1,15 @@
 use crate::fixture;
 
 use datafusion::{
-    arrow::datatypes::{DataType, Field, Schema},
-    datasource::listing::ListingTableUrl,
-    logical_expr::col,
-    object_store::local::LocalFileSystem,
-    prelude::SessionContext,
+    arrow::datatypes::DataType, datasource::listing::ListingTableUrl, logical_expr::col,
+    object_store::local::LocalFileSystem, prelude::SessionContext,
 };
 use datafusion_sandbox::{
     dataset::{Dataset, DatasetLayout},
     format::InputFormat,
 };
 
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 
 #[test]
 fn accepts_an_exact_locus_ordering() {
@@ -292,10 +289,7 @@ fn allele_layout() -> DatasetLayout {
             ("s".to_string(), DataType::Utf8),
             ("contig".to_string(), DataType::Utf8),
         ],
-        schema: Some(Arc::new(Schema::new(vec![
-            Field::new("position", DataType::Int32, false),
-            Field::new("alleles", DataType::Utf8, false),
-        ]))),
+        schema: None,
     }
 }
 
