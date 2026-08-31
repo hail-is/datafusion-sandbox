@@ -16,8 +16,7 @@ struct Cli {
 
     /// Number of worker threads to execute on.
     ///
-    /// Defaults to available parallelism. Does not affect the number of partitions the plan is
-    /// built with, which each formulation settles for itself.
+    /// Defaults to available parallelism. Independent of the session's target-partition setting.
     #[arg(long, short = 'j', global = true, value_parser = parse_thread_count)]
     threads: Option<usize>,
 }

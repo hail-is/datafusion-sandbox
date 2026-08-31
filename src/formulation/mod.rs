@@ -6,7 +6,6 @@ mod combine_refs_union;
 use crate::dataset::{Dataset, DatasetLayout};
 
 use datafusion::{
-    common::config::ConfigOptions,
     error::Result,
     logical_expr::{LogicalPlan, logical_plan::Union},
     prelude::*,
@@ -55,22 +54,6 @@ fn reference_layout() -> DatasetLayout {
         ],
         schema: None,
     }
-}
-
-/// Derives a session from `ctx` with `overrides` applied to its config.
-///
-/// [`SessionContext::state`] hands back an owned clone that shares the caller's
-/// `Arc<RuntimeEnv>` and catalog list, so registered object stores and the
-/// file-statistics cache carry over. The caller's `SessionConfig` still holds a
-/// reference to the same `Arc<ConfigOptions>`, so `options_mut` copies rather
-/// than mutating in place and the overrides cannot reach the caller.
-fn derived_session(
-    ctx: &SessionContext,
-    overrides: impl FnOnce(&mut ConfigOptions),
-) -> SessionContext {
-    let mut state = ctx.state();
-    overrides(state.config_mut().options_mut());
-    SessionContext::new_with_state(state)
 }
 
 fn union_sample_plans(mut plans: Vec<Arc<LogicalPlan>>) -> Result<LogicalPlan> {

@@ -8,7 +8,7 @@ use datafusion::{
     error::{DataFusionError, Result},
     execution::object_store::ObjectStoreUrl,
     object_store::{client::SpawnedReqwestConnector, gcp::GoogleCloudStorageBuilder},
-    prelude::SessionContext,
+    prelude::{SessionConfig, SessionContext},
 };
 use tokio::runtime::Handle;
 
@@ -16,8 +16,8 @@ use std::{future::Future, sync::Arc, thread::available_parallelism};
 
 /// Everything the runner needs besides the pipeline closure itself.
 pub struct PipelineOptions {
-    /// Number of worker threads for each runtime. Independent of any target-partition setting
-    /// a formulation still needs for its plan shape.
+    /// Number of worker threads for each runtime. Independent of the session's target-partition
+    /// setting.
     pub threads: usize,
     /// Base URLs of the object stores to register on the session, e.g.
     /// "gs://my-bucket". Only gs:// URLs are supported.
@@ -31,6 +31,13 @@ impl Default for PipelineOptions {
             object_stores: Vec::new(),
         }
     }
+}
+
+/// The shared DataFusion configuration used by every pipeline.
+pub fn session_config() -> SessionConfig {
+    let mut config = SessionConfig::new();
+    config.options_mut().optimizer.prefer_existing_sort = true;
+    config
 }
 
 /// Runs `pipeline` to completion and returns its result to the calling thread.
@@ -58,7 +65,7 @@ where
         .build()?;
     let cpu_runtime = CpuRuntime::try_new(options.threads)?;
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_config(session_config());
     for base_url in &options.object_stores {
         register_object_store(&ctx, base_url, io_runtime.handle())?;
     }
