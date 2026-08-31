@@ -197,10 +197,7 @@ fn explicit_limit_applies_under_every_action() {
         let Outcome::Plan(plan) = outcome else {
             panic!("expected a plan, got {outcome:?}");
         };
-        assert!(
-            plan.contains("GlobalLimitExec: skip=0, fetch=1"),
-            "plan:\n{plan}"
-        );
+        assert!(plan.contains("fetch=1"), "plan:\n{plan}");
     }
 }
 

@@ -47,16 +47,12 @@ _Avoid_: variant, strategy, combiner (a formulation is not itself a combiner)
 **Plan builder**:
 The part of a formulation that constructs its DataFrame over a dataset and stops. It does no
 runtime setup, object store registration, writing, or execution, which is why plan-shape tests can
-assert on it directly. Any session a formulation derives is part of its plan builder.
+assert on it directly. It uses the session it is handed.
 _Avoid_: query builder, factory
 
 **Session**:
-The DataFusion configuration and state a plan is built against. Part of what decides plan shape,
-not merely a performance knob: target partitions and whether file partitions are preserved change
-which operators appear. A formulation overrides the settings its plan shape still depends on and
-inherits the rest. The reference formulation has shed those dependencies. The allele formulation
-still pins target partitions because DataFusion otherwise repartitions its distinct and inserts
-sorts. The settings a formulation overrides are the dependencies it has yet to shed.
+The DataFusion configuration and state a plan is built against. Every formulation uses the session
+it is handed and carries no private session settings.
 _Avoid_: context, config (either alone is narrower than what plan shape depends on)
 
 **Plan shape**:
@@ -162,6 +158,5 @@ _Avoid_: compression codec (too narrow for Vortex), encoding (ambiguous without 
 
 **Thread count**:
 The number of worker threads given to both of a pipeline's runtimes, defaulting to available
-parallelism. Independent of how many partitions a plan is built with, which each formulation
-settles for itself, so plan shape and thread count are separate axes.
+parallelism. Independent of the session's target-partition setting.
 _Avoid_: parallelism, cores, degree of parallelism

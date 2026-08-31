@@ -6,7 +6,7 @@ The split is between a type and an instance. A layout describes how one kind of 
 
 A formulation declares the layout it requires and checks the dataset's locus ordering before it builds a plan. The check accepts a finer ordering when the required ordering is its prefix. A wrong ordering otherwise produces correct rows through a slower plan, so relying on DataFusion to insert a sort would hide the declaration error. The dataset also checks that its resolved schema contains the stored columns named by the locus ordering. It reports a missing column as a plan error before building a reader.
 
-`CombinerRun` currently creates the dataset layout from the chosen formulation. That makes the check look redundant, but the declared locus ordering is a claim about stored data and will eventually come from Parquet or Vortex metadata. ADR 0003 rejected making callers pair a plan builder with the session settings it needs because those settings are configuration choices the formulation can derive. A dataset's locus ordering is different: it is an external fact that a formulation can only require and validate.
+`CombinerRun` currently creates the dataset layout from the chosen formulation. That makes the check look redundant, but the declared locus ordering is a claim about stored data and will eventually come from Parquet or Vortex metadata. ADR 0003 rejected making callers pair a plan builder with private session settings; the pipeline supplies shared defaults and formulations use the session they are handed. A dataset's locus ordering is different: it is an external fact that a formulation can only require and validate.
 
 ## Consequences
 

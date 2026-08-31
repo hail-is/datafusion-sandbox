@@ -14,12 +14,13 @@ use datafusion::{
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
         union::UnionExec,
     },
-    prelude::{SessionConfig, SessionContext, col},
+    prelude::{SessionContext, col},
 };
 use datafusion_sandbox::{
     dataset::{Dataset, DatasetLayout},
     format::InputFormat,
     formulation::Formulation,
+    pipeline,
 };
 
 use std::{future::Future, sync::Arc};
@@ -67,7 +68,7 @@ fn formulations_keep_their_plan_shape_under_a_hostile_session() {
 }
 
 #[test]
-fn target_partitions_do_not_change_either_formulation_plan_shape() {
+fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
     let dir = tempfile::tempdir().unwrap();
     let root = fixture::write_sample_tables(dir.path(), SAMPLES);
     let dataset = dataset(&root, InputFormat::VORTEX);
@@ -75,26 +76,9 @@ fn target_partitions_do_not_change_either_formulation_plan_shape() {
     for formulation in FORMULATIONS {
         let single_target = physical_plan_with_target(formulation, &dataset, 1);
         let eight_targets = physical_plan_with_target(formulation, &dataset, 8);
-        assert_eq!(displayed(&single_target), displayed(&eight_targets));
+        assert_has_no_sorts(&single_target);
+        assert_has_no_sorts(&eight_targets);
     }
-}
-
-/// The allele formulation still derives a single-target session for its
-/// downstream distinct. That override must not reach back into the caller.
-#[test]
-fn allele_session_derivation_leaves_the_callers_session_untouched() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
-    let dataset = dataset(&root, InputFormat::VORTEX);
-    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(8));
-
-    block_on(Formulation::CombineAllelesUnion.plan(&ctx, &dataset)).unwrap();
-
-    let options = ctx.state().config().options().clone();
-    assert_eq!(
-        options.execution.target_partitions, 8,
-        "the allele formulation overrode target_partitions on the caller's session",
-    );
 }
 
 /// DataFusion's parquet reader preserves the declared locus ordering through
@@ -208,11 +192,9 @@ fn physical_plan_with_target(
     dataset: &Dataset,
     target_partitions: usize,
 ) -> Arc<dyn ExecutionPlan> {
-    let mut hostile_config = SessionConfig::new().with_target_partitions(target_partitions);
-    hostile_config
-        .options_mut()
-        .optimizer
-        .repartition_file_min_size = 0;
+    let mut hostile_config = pipeline::session_config().with_target_partitions(target_partitions);
+    let optimizer = &mut hostile_config.options_mut().optimizer;
+    optimizer.repartition_file_min_size = 0;
     block_on(async {
         let ctx = SessionContext::new_with_config(hostile_config);
         formulation
@@ -233,8 +215,8 @@ fn block_on<F: Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
-/// Exactly one sort-preserving merge, no re-sort, and one input partition per
-/// sample feeding the merge.
+/// A sort-preserving merge over one input partition per sample, with no
+/// re-sort. A formulation may merge again after parallel operators.
 fn assert_merges_one_partition_per_sample(plan: &Arc<dyn ExecutionPlan>, n_samples: usize) {
     let unions = nodes_of::<UnionExec>(plan);
     assert_eq!(
@@ -252,20 +234,15 @@ fn assert_merges_one_partition_per_sample(plan: &Arc<dyn ExecutionPlan>, n_sampl
     );
 
     let merges = nodes_of::<SortPreservingMergeExec>(plan);
-    assert_eq!(
-        merges.len(),
-        1,
-        "expected exactly one SortPreservingMergeExec, got {}:\n{}",
-        merges.len(),
-        displayed(plan),
-    );
-    assert!(
-        nodes_of::<SortExec>(plan).is_empty(),
-        "expected no re-sort, but the plan contains a SortExec:\n{}",
-        displayed(plan),
-    );
+    let sample_merge = merges.last().unwrap_or_else(|| {
+        panic!(
+            "expected a SortPreservingMergeExec over the sample scans:\n{}",
+            displayed(plan),
+        )
+    });
+    assert_has_no_sorts(plan);
 
-    let merged_partitions = merges[0]
+    let merged_partitions = sample_merge
         .children()
         .first()
         .map(|input| input.output_partitioning().partition_count())
@@ -274,6 +251,14 @@ fn assert_merges_one_partition_per_sample(plan: &Arc<dyn ExecutionPlan>, n_sampl
         merged_partitions,
         n_samples,
         "expected one merged partition per sample:\n{}",
+        displayed(plan),
+    );
+}
+
+fn assert_has_no_sorts(plan: &Arc<dyn ExecutionPlan>) {
+    assert!(
+        nodes_of::<SortExec>(plan).is_empty(),
+        "expected no re-sort, but the plan contains a SortExec:\n{}",
         displayed(plan),
     );
 }
