@@ -8,6 +8,7 @@
 use crate::fixture;
 
 use datafusion::{
+    common::DataFusionError,
     datasource::listing::ListingTableUrl,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties,
@@ -20,6 +21,7 @@ use datafusion_sandbox::{
     dataset::{Dataset, DatasetLayout},
     format::InputFormat,
     formulation::Formulation,
+    locus::LocusRepresentation,
     pipeline,
 };
 
@@ -31,6 +33,52 @@ const FORMULATIONS: [Formulation; 2] = [
     Formulation::CombineRefsUnion,
     Formulation::CombineAllelesUnion,
 ];
+const REPRESENTATIONS: [LocusRepresentation; 2] = [
+    LocusRepresentation::ContigPosition,
+    LocusRepresentation::Packed,
+];
+
+#[test]
+fn rejects_a_dataset_with_both_locus_representations() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fixture::write_half_packed_sample_table(dir.path());
+    let table_path = ListingTableUrl::parse(&root).unwrap();
+
+    let error = block_on(Dataset::discover(
+        &SessionContext::new(),
+        table_path,
+        InputFormat::VORTEX,
+        None,
+    ))
+    .expect_err("a half-packed dataset must be rejected during discovery");
+
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    let message = error.to_string();
+    assert!(message.contains("both"), "unexpected error: {message}");
+    assert!(message.contains("locus"), "unexpected error: {message}");
+    assert!(message.contains("contig"), "unexpected error: {message}");
+}
+
+#[test]
+fn rejects_a_packed_dataset_with_a_non_int64_locus() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fixture::write_string_locus_sample_table(dir.path());
+    let table_path = ListingTableUrl::parse(&root).unwrap();
+
+    let error = block_on(Dataset::discover(
+        &SessionContext::new(),
+        table_path,
+        InputFormat::VORTEX,
+        None,
+    ))
+    .expect_err("a packed locus must be stored as Int64");
+
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    let message = error.to_string();
+    assert!(message.contains("locus"), "unexpected error: {message}");
+    assert!(message.contains("Int64"), "unexpected error: {message}");
+    assert!(message.contains("Utf8"), "unexpected error: {message}");
+}
 
 #[test]
 fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
@@ -42,11 +90,12 @@ fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
         &ctx,
         table_path,
         InputFormat::VORTEX,
-        DatasetLayout {
-            locus_ordering: vec![col("contig").sort(true, false)],
-            schema: None,
-        },
+        None,
     ))
+    .unwrap()
+    .with_layout(DatasetLayout {
+        locus_ordering: vec![col("contig").sort(true, false)],
+    })
     .unwrap();
 
     let error = block_on(Formulation::CombineRefsUnion.plan(&SessionContext::new(), &dataset))
@@ -57,27 +106,31 @@ fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
 
 #[test]
 fn formulations_keep_their_plan_shape_under_a_hostile_session() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
-    let dataset = dataset(&root, InputFormat::VORTEX);
+    for representation in REPRESENTATIONS {
+        let dir = tempfile::tempdir().unwrap();
+        let root = vortex_fixture(dir.path(), representation);
+        let dataset = dataset(&root, InputFormat::VORTEX);
 
-    for formulation in FORMULATIONS {
-        let plan = physical_plan(formulation, &dataset);
-        assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+        for formulation in FORMULATIONS {
+            let plan = physical_plan(formulation, &dataset);
+            assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+        }
     }
 }
 
 #[test]
 fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
-    let dataset = dataset(&root, InputFormat::VORTEX);
+    for representation in REPRESENTATIONS {
+        let dir = tempfile::tempdir().unwrap();
+        let root = vortex_fixture(dir.path(), representation);
+        let dataset = dataset(&root, InputFormat::VORTEX);
 
-    for formulation in FORMULATIONS {
-        let single_target = physical_plan_with_target(formulation, &dataset, 1);
-        let eight_targets = physical_plan_with_target(formulation, &dataset, 8);
-        assert_has_no_sorts(&single_target);
-        assert_has_no_sorts(&eight_targets);
+        for formulation in FORMULATIONS {
+            let single_target = physical_plan_with_target(formulation, &dataset, 1);
+            let eight_targets = physical_plan_with_target(formulation, &dataset, 8);
+            assert_has_no_sorts(&single_target);
+            assert_has_no_sorts(&eight_targets);
+        }
     }
 }
 
@@ -86,30 +139,30 @@ fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
 /// no re-sort.
 #[test]
 fn combine_refs_union_parquet_merges_one_partition_per_sample_without_re_sorting() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_parquet_sample_tables(dir.path(), SAMPLES);
-
-    let plan = physical_plan(
-        Formulation::CombineRefsUnion,
-        &dataset(&root, InputFormat::PARQUET),
-    );
-
-    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+    for representation in REPRESENTATIONS {
+        let dir = tempfile::tempdir().unwrap();
+        let root = parquet_fixture(dir.path(), representation);
+        let plan = physical_plan(
+            Formulation::CombineRefsUnion,
+            &dataset(&root, InputFormat::PARQUET),
+        );
+        assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+    }
 }
 
 /// The reference combiner's union formulation merges its per-sample inputs
 /// rather than re-sorting them.
 #[test]
 fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
-
-    let plan = physical_plan(
-        Formulation::CombineRefsUnion,
-        &dataset(&root, InputFormat::VORTEX),
-    );
-
-    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+    for representation in REPRESENTATIONS {
+        let dir = tempfile::tempdir().unwrap();
+        let root = vortex_fixture(dir.path(), representation);
+        let plan = physical_plan(
+            Formulation::CombineRefsUnion,
+            &dataset(&root, InputFormat::VORTEX),
+        );
+        assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+    }
 }
 
 /// DataFusion's parquet reader preserves the declared locus ordering through the
@@ -117,30 +170,30 @@ fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting(
 /// a sort.
 #[test]
 fn combine_alleles_union_parquet_merges_one_partition_per_sample_without_re_sorting() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_parquet_sample_tables(dir.path(), SAMPLES);
-
-    let plan = physical_plan(
-        Formulation::CombineAllelesUnion,
-        &dataset(&root, InputFormat::PARQUET),
-    );
-
-    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+    for representation in REPRESENTATIONS {
+        let dir = tempfile::tempdir().unwrap();
+        let root = parquet_fixture(dir.path(), representation);
+        let plan = physical_plan(
+            Formulation::CombineAllelesUnion,
+            &dataset(&root, InputFormat::PARQUET),
+        );
+        assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+    }
 }
 
 /// The allele combiner merges its per-sample inputs rather than re-sorting them,
 /// and the de-duplication and ranking it stacks on top don't reintroduce a sort.
 #[test]
 fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorting() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
-
-    let plan = physical_plan(
-        Formulation::CombineAllelesUnion,
-        &dataset(&root, InputFormat::VORTEX),
-    );
-
-    assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+    for representation in REPRESENTATIONS {
+        let dir = tempfile::tempdir().unwrap();
+        let root = vortex_fixture(dir.path(), representation);
+        let plan = physical_plan(
+            Formulation::CombineAllelesUnion,
+            &dataset(&root, InputFormat::VORTEX),
+        );
+        assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+    }
 }
 
 #[test]
@@ -164,20 +217,23 @@ fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
 fn dataset(root: &str, input_format: InputFormat) -> Dataset {
     let table_path = ListingTableUrl::parse(root).unwrap();
     let ctx = SessionContext::new();
-    block_on(Dataset::discover(
-        &ctx,
-        table_path,
-        input_format,
-        DatasetLayout {
-            locus_ordering: vec![
-                col("contig").sort(true, false),
-                col("position").sort(true, false),
-                col("alleles").sort(true, false),
-            ],
-            schema: None,
-        },
-    ))
-    .unwrap()
+    let dataset = block_on(Dataset::discover(&ctx, table_path, input_format, None)).unwrap();
+    let layout = Formulation::CombineAllelesUnion.required_layout(dataset.locus_representation());
+    dataset.with_layout(layout).unwrap()
+}
+
+fn vortex_fixture(dir: &std::path::Path, representation: LocusRepresentation) -> String {
+    match representation {
+        LocusRepresentation::ContigPosition => fixture::write_sample_tables(dir, SAMPLES),
+        LocusRepresentation::Packed => fixture::write_packed_sample_tables(dir, SAMPLES),
+    }
+}
+
+fn parquet_fixture(dir: &std::path::Path, representation: LocusRepresentation) -> String {
+    match representation {
+        LocusRepresentation::ContigPosition => fixture::write_parquet_sample_tables(dir, SAMPLES),
+        LocusRepresentation::Packed => fixture::write_packed_parquet_sample_tables(dir, SAMPLES),
+    }
 }
 
 /// Builds a formulation under settings that would split an unpinned file scan.
@@ -232,27 +288,24 @@ fn assert_merges_one_partition_per_sample(plan: &Arc<dyn ExecutionPlan>, n_sampl
         "expected one union input per sample:\n{}",
         displayed(plan),
     );
-
-    let merges = nodes_of::<SortPreservingMergeExec>(plan);
-    let sample_merge = merges.last().unwrap_or_else(|| {
-        panic!(
-            "expected a SortPreservingMergeExec over the sample scans:\n{}",
-            displayed(plan),
-        )
-    });
-    assert_has_no_sorts(plan);
-
-    let merged_partitions = sample_merge
-        .children()
-        .first()
-        .map(|input| input.output_partitioning().partition_count())
-        .expect("a SortPreservingMergeExec has an input");
-    assert_eq!(
-        merged_partitions,
-        n_samples,
-        "expected one merged partition per sample:\n{}",
+    assert!(
+        unions[0]
+            .children()
+            .iter()
+            .all(|input| input.output_partitioning().partition_count() == 1),
+        "expected one partition per sample input:\n{}",
         displayed(plan),
     );
+
+    let merges = nodes_of::<SortPreservingMergeExec>(plan);
+    assert_eq!(
+        merges.len(),
+        1,
+        "expected exactly one SortPreservingMergeExec, got {}:\n{}",
+        merges.len(),
+        displayed(plan),
+    );
+    assert_has_no_sorts(plan);
 }
 
 fn assert_has_no_sorts(plan: &Arc<dyn ExecutionPlan>) {

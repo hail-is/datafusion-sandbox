@@ -5,6 +5,7 @@
 //! - [`dataset`] describes and reads stored datasets.
 //! - [`format`] reads and writes supported file formats.
 //! - [`formulation`] builds the alternative combiner plans under comparison.
+//! - [`locus`] describes the supported stored locus representations.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
 //! - [`sorted_table`] scans files as one ordered partition.
 //! - [`synthetic`] builds generated in-memory tables for tests and benchmarks.
@@ -16,6 +17,7 @@ pub mod cpu_runtime;
 pub mod dataset;
 pub mod format;
 pub mod formulation;
+pub mod locus;
 pub mod pipeline;
 pub mod sorted_table;
 pub mod synthetic;
