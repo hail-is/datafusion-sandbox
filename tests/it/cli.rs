@@ -31,11 +31,27 @@ fn show_action_defaults_to_vortex_input() {
 
     let stdout = successful_combiner_stdout("combine-alleles", &input, "--show");
     assert!(
-        stdout.contains("| position | alleles | contig |"),
+        stdout.contains("| contig | position | alleles |"),
         "stdout:\n{stdout}"
     );
     assert!(
-        stdout.contains("| 1        | A,G     | chr1   | 1"),
+        stdout.contains("| chr1   | 1        | A,G     | 1"),
+        "stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn show_action_detects_a_packed_locus_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::write_packed_sample_tables(dir.path(), SAMPLES);
+
+    let stdout = successful_combiner_stdout("combine-alleles", &input, "--show");
+    assert!(
+        stdout.contains("| locus       | alleles |"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("| 4294967297  | A,G     | 1"),
         "stdout:\n{stdout}"
     );
 }

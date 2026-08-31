@@ -106,8 +106,9 @@ narrow the sample set, but it does not list paths or assemble readers.
 _Avoid_: input, table (a dataset holds many per-sample tables), corpus
 
 **Dataset layout**:
-The representation shared by datasets of one kind: their locus ordering and optional schema. It
-describes how rows are arranged across files, separately from how each file is encoded.
+The representation shared by datasets of one kind: their locus ordering. It describes how rows
+are arranged across files, separately from how each file is encoded. A formulation declares the
+layout it requires after the dataset detects its locus representation.
 _Avoid_: format (the encoding of one file), listing options, storage config
 
 **Synthetic table**:
@@ -127,11 +128,18 @@ A position in the genome: a contig together with a position within it. The unit 
 order and group by.
 _Avoid_: site, coordinate, variant (a variant is a locus plus alleles)
 
+**Locus representation**:
+How one stored row records its locus. `contig-position` uses separate `contig` and `position`
+fields. `packed` uses one `Int64` `locus` field. A dataset detects the representation from its
+resolved schema; callers and formulations do not select it.
+_Avoid_: encoding (ambiguous next to compression and Vortex encoding sets), locus format
+
 **Locus ordering**:
-The sort order that makes a formulation's plan mergeable rather than re-sorting: contig, then
-position, optionally then alleles. Contig is a stored field, so file statistics prove this ordering
-without relying on directory names. A dataset layout declares the ordering on disk, and a
-formulation declares the prefix it requires; a finer ordering satisfies a coarser requirement.
+The sort order that makes a formulation's plan mergeable rather than re-sorting: `contig` then
+`position`, or packed `locus`, optionally followed by `alleles`. The ordering uses stored fields, so
+file statistics prove it without relying on directory names. A dataset layout declares the
+ordering on disk, and a formulation declares the prefix it requires; a finer ordering satisfies a
+coarser requirement.
 _Avoid_: sort key, ordering (unqualified)
 
 **Reference data**:

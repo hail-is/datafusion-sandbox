@@ -7,6 +7,7 @@ grows unwieldy we can split them into a `commands/` subpackage later.
 
 import logging
 from pathlib import Path, PurePath
+import re
 import subprocess
 import tempfile
 
@@ -72,8 +73,25 @@ def gce_verify(family: str | None = None) -> None:
 def setup() -> None:
     download()
     convert_gvcfs(Path('gvcfs_chr22'), Path('vdss_chr22'))
-    convert_vdss(Path('vdss_chr22'), Path('parquets_chr22'))
+    convert_vdss(
+        Path('vdss_chr22'),
+        Path('parquets_chr22'),
+        Path('parquets_alleles_chr22'),
+    )
+    scale_parquets(Path('parquets_chr22'), 1)
+    scale_parquets(Path('parquets_alleles_chr22'), 1)
+    pack_loci(Path('parquets_chr22'), Path('parquets_packed_chr22'))
+    pack_loci(
+        Path('parquets_alleles_chr22'),
+        Path('parquets_alleles_packed_chr22'),
+    )
     convert_parquets(Path('parquets_chr22'), Path('vortices_chr22'))
+    convert_parquets(Path('parquets_alleles_chr22'), Path('vortices_alleles_chr22'))
+    convert_parquets(Path('parquets_packed_chr22'), Path('vortices_packed_chr22'))
+    convert_parquets(
+        Path('parquets_alleles_packed_chr22'),
+        Path('vortices_alleles_packed_chr22'),
+    )
 
 
 gs_curl_root = PurePath('https://storage.googleapis.com/hail-common/benchmark')
@@ -212,12 +230,154 @@ def rewrite_parquet_contig(source: Path, destination: Path, contig: str) -> None
             writer.write_batch(batch.set_column(contig_index, contig_field, contigs))
 
 
+def _pack_locus(contigs: pa.Array, positions: pa.Array) -> pa.Array:
+    packed = []
+    for contig, position in zip(contigs.to_pylist(), positions.to_pylist(), strict=True):
+        if contig is None or position is None:
+            raise ValueError("contig and position must not contain null values")
+        match = re.fullmatch(r"chr([0-9]+)", contig)
+        if match is None:
+            raise ValueError(f"invalid contig name: {contig}")
+        packed.append((int(match.group(1)) << 32) | position)
+    return pa.array(packed, type=pa.int64())
+
+
+def _required_non_null_schema(schema: pa.Schema) -> pa.Schema:
+    required = {"contig", "position", "alleles"}
+    fields = [
+        field.with_nullable(False) if field.name in required else field
+        for field in schema
+    ]
+    return pa.schema(fields, metadata=schema.metadata)
+
+
+def _packed_schema(schema: pa.Schema) -> pa.Schema:
+    fields = []
+    for field in schema:
+        if field.name == "contig":
+            fields.append(pa.field("locus", pa.int64(), nullable=False))
+        elif field.name != "position":
+            fields.append(field)
+    return pa.schema(fields, metadata=schema.metadata)
+
+
+def _pack_batch(batch: pa.RecordBatch, schema: pa.Schema) -> pa.RecordBatch:
+    position_index = batch.schema.get_field_index("position")
+    arrays = []
+    for index, field in enumerate(batch.schema):
+        if field.name == "contig":
+            arrays.append(_pack_locus(batch.column(index), batch.column(position_index)))
+        elif field.name != "position":
+            arrays.append(batch.column(index))
+    return pa.RecordBatch.from_arrays(arrays, schema=schema)
+
+
+def _pack_parquet(source: Path, destination: Path) -> None:
+    parquet = pq.ParquetFile(source)
+    source_schema = _required_non_null_schema(parquet.schema_arrow)
+    for name in ("contig", "position"):
+        if source_schema.get_field_index(name) == -1:
+            raise ValueError(f"{source} has no {name} column")
+    packed_schema = _packed_schema(source_schema)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=source.parent,
+        prefix=f".{source.name}.",
+        suffix=".parquet",
+        delete=False,
+    ) as temporary:
+        normalized_path = Path(temporary.name)
+    with tempfile.NamedTemporaryFile(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".parquet",
+        delete=False,
+    ) as temporary:
+        packed_path = Path(temporary.name)
+    try:
+        with (
+            pq.ParquetWriter(normalized_path, source_schema, compression="zstd") as source_writer,
+            pq.ParquetWriter(packed_path, packed_schema, compression="zstd") as packed_writer,
+        ):
+            for batch in parquet.iter_batches():
+                for field in source_schema:
+                    if not field.nullable:
+                        column = batch.column(batch.schema.get_field_index(field.name))
+                        if column.null_count:
+                            raise ValueError(f"{source} has null values in {field.name}")
+                normalized = pa.RecordBatch.from_arrays(batch.columns, schema=source_schema)
+                source_writer.write_batch(normalized)
+                packed_writer.write_batch(_pack_batch(normalized, packed_schema))
+        normalized_path.replace(source)
+        packed_path.replace(destination)
+    finally:
+        normalized_path.unlink(missing_ok=True)
+        packed_path.unlink(missing_ok=True)
+
+
+def _stored_contig(source: Path) -> str:
+    contigs = set()
+    parquet = pq.ParquetFile(source)
+    for batch in parquet.iter_batches(columns=["contig"]):
+        contigs.update(batch.column(0).to_pylist())
+    if len(contigs) != 1:
+        raise ValueError(f"{source} contains contigs: {sorted(contigs)}")
+    return contigs.pop()
+
+
+def _parquet_name_with_contig(source: Path, contig: str) -> str:
+    suffix = ".zstd.parquet" if source.name.endswith(".zstd.parquet") else ".parquet"
+    stem = source.name.removesuffix(suffix)
+    return f"{stem}.{contig}{suffix}"
+
+
+@app.command("pack-loci")
+def pack_loci(path: Path, dest: Path) -> None:
+    """Write a packed copy of a contig-position parquet dataset."""
+    path = resolve_path(path)
+    dest = resolve_path(dest)
+
+    assert path.is_dir()
+    dest.mkdir(exist_ok=True)
+    for parquet in path.rglob("*.parquet"):
+        relative = parquet.relative_to(path)
+        contig = _stored_contig(parquet)
+        packed_name = (
+            parquet.name
+            if f".{contig}." in parquet.name
+            else _parquet_name_with_contig(parquet, contig)
+        )
+        destination = (dest / relative).with_name(packed_name)
+        _pack_parquet(parquet, destination)
+
+
 def parquet_to_vortex(source: Path, destination: Path, compact: bool) -> None:
     if compact:
         subprocess.check_call(['uv', 'run', 'vx', 'convert', '-s', 'compact', source])
     else:
         subprocess.check_call(['uv', 'run', 'vx', 'convert', source])
     source.with_suffix('.vortex').replace(destination)
+
+
+def _scale_parquets(path: Path, scale_factor: int) -> None:
+    originals = [
+        parquet
+        for parquet in path.rglob("*.parquet")
+        if re.search(r"\.chr[0-9]{2}(?:\.zstd)?\.parquet$", parquet.name) is None
+    ]
+    for parquet in originals:
+        for offset in range(1, scale_factor):
+            contig = f"chr{22 - offset:02d}"
+            scaled = parquet.with_name(_parquet_name_with_contig(parquet, contig))
+            rewrite_parquet_contig(parquet, scaled, contig)
+
+
+@app.command("scale-parquets")
+def scale_parquets(path: Path, scale_factor: int = 1) -> None:
+    """Persist synthetic contigs in an existing parquet dataset."""
+    path = resolve_path(path)
+    assert path.is_dir()
+    _scale_parquets(path, scale_factor)
 
 
 @app.command()
@@ -228,6 +388,8 @@ def convert_parquets(path: Path, dest: Path, compact: bool = False, scale_factor
     assert(path.is_dir())
     dest.mkdir(exist_ok=True)
 
+    _scale_parquets(path, scale_factor)
+
     for parquet in path.rglob('*.parquet'):
         tmp = parquet.with_suffix('')
         if tmp.suffix == '.zstd':
@@ -236,14 +398,6 @@ def convert_parquets(path: Path, dest: Path, compact: bool = False, scale_factor
         part_path = (dest / parquet.relative_to(path)).with_name(f'{name}.vortex')
         part_path.parent.mkdir(parents=True, exist_ok=True)
         parquet_to_vortex(parquet, part_path, compact)
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            for i in range(1, scale_factor):
-                contig = f'chr{22-i}'
-                scaled_parquet = Path(temp_dir) / f'{name}.{contig}.parquet'
-                rewrite_parquet_contig(parquet, scaled_parquet, contig)
-                scaled_path = part_path.with_name(f'{name}.{contig}.vortex')
-                parquet_to_vortex(scaled_parquet, scaled_path, compact)
 
 
 @app.command()

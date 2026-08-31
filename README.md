@@ -11,8 +11,9 @@ This repo is to help us start to experiment with implementing hail style pipelin
   - I used `cargo install vortex-tui --locked -F unstable_encodings` to build from source with the `unstable_encodings` feature, which enables
     the run-end encoder, which makes a significant difference on our `locus.position` columns.
   - See the [official instructions](https://github.com/vortex-data/vortex#command-line-ui-vx) for other installation options.
-2. Run `uv run --directory python hailtools setup`. This will download the `1kg_chr22` data from our benchmarks bucket, and convert them to vds,
-   parquet, and vortex (only the reference data for the last two, for now).
+2. Run `uv run --directory python hailtools setup`. This downloads the `1kg_chr22` data from our
+   benchmarks bucket and creates VDS, Parquet, and Vortex datasets for reference and allele data.
+   It writes both contig-position and packed locus representations.
 
 ### Python tools (`python/`)
 
@@ -35,7 +36,11 @@ directory containing one subdirectory per sample, of the form `s=HG123456`, eith
 ```
 cargo run -r -- combine-refs data/vortices_chr22        # -> data/combined.vortex
 cargo run -r -- combine-alleles data/vortices_alleles_chr22  # -> data/combined_alleles.vortex
+cargo run -r -- combine-refs data/vortices_packed_chr22
+cargo run -r -- combine-alleles data/vortices_alleles_packed_chr22
 ```
+The directory alone selects the representation. Packed input produces packed output; there is no
+representation flag.
 An earlier variant of the reference combiner is still available as `cargo run -r --example combiner1`.
 
 ### Building for a specific GCE instance family

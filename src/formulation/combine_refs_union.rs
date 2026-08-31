@@ -1,4 +1,4 @@
-use super::{reference_layout, union_sample_plans};
+use super::union_sample_plans;
 use crate::dataset::Dataset;
 
 use datafusion::{error::Result, prelude::*};
@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// Many `DataSourceExec`s feed a `UnionExec`, which feeds a
 /// `SortPreservingMergeExec` with one partition per input sample.
 pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
-    let locus_ordering = reference_layout().locus_ordering;
+    let locus_ordering = dataset.locus_representation().ordering();
     let mut plans = Vec::with_capacity(dataset.sample_set().len());
     for sample in dataset.sample_set() {
         let df = dataset.read_sample(ctx, sample).await?;

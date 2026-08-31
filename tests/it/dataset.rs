@@ -8,6 +8,7 @@ use datafusion::{
     },
     common::DataFusionError,
     datasource::listing::ListingTableUrl,
+    error::Result,
     logical_expr::col,
     prelude::SessionContext,
 };
@@ -72,14 +73,11 @@ fn dataset_with_ordering(locus_ordering: Vec<datafusion::logical_expr::SortExpr>
     let dir = tempfile::tempdir().unwrap();
     let root = fixture::write_sample_tables(dir.path(), &["sample-a"]);
     let table_path = ListingTableUrl::parse(&root).unwrap();
-    block_on(Dataset::discover(
+    block_on(discover_with_layout(
         &SessionContext::new(),
         table_path,
         InputFormat::VORTEX,
-        DatasetLayout {
-            locus_ordering,
-            schema: None,
-        },
+        DatasetLayout { locus_ordering },
     ))
     .unwrap()
 }
@@ -91,7 +89,7 @@ fn reads_one_sample_with_its_sample_id_attached() {
 
     block_on(async {
         let table_path = ListingTableUrl::parse(&root).unwrap();
-        let dataset = Dataset::discover(
+        let dataset = discover_with_layout(
             &SessionContext::new(),
             table_path,
             InputFormat::VORTEX,
@@ -128,13 +126,12 @@ fn rejects_an_inferred_schema_missing_a_locus_ordering_column() {
 
     let error = block_on(async {
         let table_path = ListingTableUrl::parse(&root).unwrap();
-        Dataset::discover(
+        discover_with_layout(
             &SessionContext::new(),
             table_path,
             InputFormat::VORTEX,
             DatasetLayout {
                 locus_ordering: vec![col("missing").sort(true, false)],
-                schema: None,
             },
         )
         .await
@@ -157,15 +154,15 @@ fn infers_the_schema_from_one_input_file() {
 
     block_on(async {
         let ctx = SessionContext::new();
-        let int_batch = RecordBatch::try_from_iter(vec![(
-            "position",
-            Arc::new(Int32Array::from(vec![1])) as _,
-        )])
+        let int_batch = RecordBatch::try_from_iter(vec![
+            ("contig", Arc::new(StringArray::from(vec!["chr1"])) as _),
+            ("position", Arc::new(Int32Array::from(vec![1])) as _),
+        ])
         .unwrap();
-        let string_batch = RecordBatch::try_from_iter(vec![(
-            "position",
-            Arc::new(StringArray::from(vec!["one"])) as _,
-        )])
+        let string_batch = RecordBatch::try_from_iter(vec![
+            ("contig", Arc::new(StringArray::from(vec!["chr1"])) as _),
+            ("position", Arc::new(StringArray::from(vec!["one"])) as _),
+        ])
         .unwrap();
         for (name, batch) in [("a.vortex", int_batch), ("b.vortex", string_batch)] {
             let path = sample_dir.join(name);
@@ -177,13 +174,12 @@ fn infers_the_schema_from_one_input_file() {
         }
 
         let table_path = ListingTableUrl::parse(root.to_str().unwrap()).unwrap();
-        let dataset = Dataset::discover(
+        let dataset = discover_with_layout(
             &ctx,
             table_path,
             InputFormat::VORTEX,
             DatasetLayout {
                 locus_ordering: vec![col("position").sort(true, false)],
-                schema: None,
             },
         )
         .await
@@ -200,11 +196,10 @@ fn uses_a_pinned_schema_without_inference() {
     let sample_dir = root.join("s=sample-a");
     std::fs::create_dir_all(&sample_dir).unwrap();
     std::fs::write(sample_dir.join("invalid.vortex"), b"not a vortex file").unwrap();
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        "position",
-        DataType::Int32,
-        false,
-    )]));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("contig", DataType::Utf8, false),
+        Field::new("position", DataType::Int32, false),
+    ]));
 
     let dataset = block_on(async {
         let table_path = ListingTableUrl::parse(root.to_str().unwrap()).unwrap();
@@ -212,12 +207,14 @@ fn uses_a_pinned_schema_without_inference() {
             &SessionContext::new(),
             table_path,
             InputFormat::VORTEX,
-            DatasetLayout {
-                locus_ordering: vec![col("position").sort(true, false)],
-                schema: Some(Arc::clone(&schema)),
-            },
+            Some(Arc::clone(&schema)),
         )
         .await
+        .and_then(|dataset| {
+            dataset.with_layout(DatasetLayout {
+                locus_ordering: vec![col("position").sort(true, false)],
+            })
+        })
         .expect("a pinned schema must bypass inference")
     });
 
@@ -231,7 +228,7 @@ fn discovers_the_dataset_sample_set() {
 
     let dataset = block_on(async {
         let table_path = ListingTableUrl::parse(&root).unwrap();
-        Dataset::discover(
+        discover_with_layout(
             &SessionContext::new(),
             table_path,
             InputFormat::VORTEX,
@@ -250,7 +247,7 @@ fn rejects_a_dataset_with_no_samples() {
 
     let error = block_on(async {
         let table_path = ListingTableUrl::parse(dir.path().to_str().unwrap()).unwrap();
-        Dataset::discover(
+        discover_with_layout(
             &SessionContext::new(),
             table_path,
             InputFormat::VORTEX,
@@ -273,7 +270,7 @@ fn narrows_the_dataset_sample_set() {
 
     let dataset = block_on(async {
         let table_path = ListingTableUrl::parse(&root).unwrap();
-        Dataset::discover(
+        discover_with_layout(
             &SessionContext::new(),
             table_path,
             InputFormat::VORTEX,
@@ -295,7 +292,7 @@ fn rejects_an_empty_requested_sample_set() {
 
     let error = block_on(async {
         let table_path = ListingTableUrl::parse(&root).unwrap();
-        Dataset::discover(
+        discover_with_layout(
             &SessionContext::new(),
             table_path,
             InputFormat::VORTEX,
@@ -320,7 +317,7 @@ fn rejects_requested_samples_that_are_not_in_the_dataset() {
 
     let error = block_on(async {
         let table_path = ListingTableUrl::parse(&root).unwrap();
-        Dataset::discover(
+        discover_with_layout(
             &SessionContext::new(),
             table_path,
             InputFormat::VORTEX,
@@ -344,15 +341,24 @@ fn allele_layout() -> DatasetLayout {
             col("position").sort(true, false),
             col("alleles").sort(true, false),
         ],
-        schema: None,
     }
 }
 
 fn empty_layout() -> DatasetLayout {
     DatasetLayout {
         locus_ordering: vec![],
-        schema: None,
     }
+}
+
+async fn discover_with_layout(
+    ctx: &SessionContext,
+    table_path: ListingTableUrl,
+    input_format: InputFormat,
+    layout: DatasetLayout,
+) -> Result<Dataset> {
+    Dataset::discover(ctx, table_path, input_format, None)
+        .await?
+        .with_layout(layout)
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {

@@ -58,8 +58,9 @@ impl CombinerRun {
         pipeline::run(
             move |ctx| async move {
                 let table_path = ListingTableUrl::parse(input_path)?;
-                let layout = formulation.required_layout();
-                let dataset = Dataset::discover(&ctx, table_path, input_format, layout).await?;
+                let dataset = Dataset::discover(&ctx, table_path, input_format, None).await?;
+                let layout = formulation.required_layout(dataset.locus_representation());
+                let dataset = dataset.with_layout(layout)?;
                 let dataset = match sample_set {
                     Some(sample_set) => dataset.restrict_to(&sample_set)?,
                     None => dataset,

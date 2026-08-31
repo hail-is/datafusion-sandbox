@@ -2,6 +2,7 @@
 
 use crate::{
     format::InputFormat,
+    locus::LocusRepresentation,
     sorted_table::{AttachedScalar, SortedTable},
 };
 
@@ -23,7 +24,6 @@ use std::{collections::BTreeSet, sync::Arc};
 #[derive(Clone, Debug)]
 pub struct DatasetLayout {
     pub locus_ordering: Vec<SortExpr>,
-    pub schema: Option<SchemaRef>,
 }
 
 impl DatasetLayout {
@@ -52,6 +52,7 @@ pub struct Dataset {
     layout: DatasetLayout,
     schema: SchemaRef,
     sample_set: Vec<String>,
+    locus_representation: LocusRepresentation,
 }
 
 impl Dataset {
@@ -61,7 +62,7 @@ impl Dataset {
         ctx: &SessionContext,
         mut table_path: ListingTableUrl,
         input_format: InputFormat,
-        layout: DatasetLayout,
+        schema: Option<SchemaRef>,
     ) -> Result<Self> {
         if !table_path.is_collection() {
             let path = <ListingTableUrl as AsRef<str>>::as_ref(&table_path);
@@ -88,8 +89,8 @@ impl Dataset {
                 <ListingTableUrl as AsRef<str>>::as_ref(&table_path)
             )));
         }
-        let schema = match &layout.schema {
-            Some(schema) => Arc::clone(schema),
+        let schema = match schema {
+            Some(schema) => schema,
             None => {
                 let format = input_format.read_format();
                 let extension = format.get_ext();
@@ -111,15 +112,25 @@ impl Dataset {
                 format.infer_schema(&state, &store, &[input_file]).await?
             }
         };
-        layout.check_locus_ordering_columns(&schema)?;
+        let locus_representation = LocusRepresentation::detect(&schema)?;
 
         Ok(Self {
             table_path,
             input_format,
-            layout,
+            layout: DatasetLayout {
+                locus_ordering: vec![],
+            },
             schema,
             sample_set,
+            locus_representation,
         })
+    }
+
+    /// Validates and attaches the layout declared by a formulation.
+    pub fn with_layout(mut self, layout: DatasetLayout) -> Result<Self> {
+        layout.check_locus_ordering_columns(&self.schema)?;
+        self.layout = layout;
+        Ok(self)
     }
 
     pub fn sample_set(&self) -> &[String] {
@@ -128,6 +139,10 @@ impl Dataset {
 
     pub fn schema(&self) -> &SchemaRef {
         &self.schema
+    }
+
+    pub fn locus_representation(&self) -> LocusRepresentation {
+        self.locus_representation
     }
 
     /// Reads one sample directory as a sorted table and attaches its sample id.
