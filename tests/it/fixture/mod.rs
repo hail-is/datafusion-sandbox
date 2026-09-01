@@ -70,17 +70,13 @@ pub fn write_packed_parquet_sample_tables(dir: &Path, sample_set: &[&str]) -> St
     )
 }
 
-pub fn write_half_packed_sample_table(dir: &Path) -> String {
-    write_single_sample_table(dir, half_packed_batch(), "half-packed")
-}
-
-pub fn write_string_locus_sample_table(dir: &Path) -> String {
+pub fn write_sample_table_without_alleles(dir: &Path) -> String {
     let batch = RecordBatch::try_from_iter(vec![
-        ("locus", Arc::new(StringArray::from(vec!["chr1:1"])) as _),
-        ("alleles", Arc::new(StringArray::from(vec!["A,G"])) as _),
+        ("contig", Arc::new(StringArray::from(vec!["chr1"])) as _),
+        ("position", Arc::new(Int32Array::from(vec![1])) as _),
     ])
-    .expect("string-locus fixture batch matches its schema");
-    write_single_sample_table(dir, batch, "string-locus")
+    .expect("no-alleles fixture batch matches its schema");
+    write_single_sample_table(dir, batch, "no-alleles")
 }
 
 fn write_single_sample_table(dir: &Path, batch: RecordBatch, description: &str) -> String {
@@ -182,23 +178,4 @@ fn sample_batch(contig: &str, representation: LocusRepresentation) -> RecordBatc
     };
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
         .expect("fixture batch matches its schema")
-}
-
-fn half_packed_batch() -> RecordBatch {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("contig", DataType::Utf8, false),
-        Field::new("position", DataType::Int32, false),
-        Field::new("locus", DataType::Int64, false),
-        Field::new("alleles", DataType::Utf8, false),
-    ]));
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(StringArray::from(vec!["chr1"])),
-            Arc::new(Int32Array::from(vec![1])),
-            Arc::new(Int64Array::from(vec![(1_i64 << 32) | 1])),
-            Arc::new(StringArray::from(vec!["A,G"])),
-        ],
-    )
-    .expect("half-packed fixture batch matches its schema")
 }

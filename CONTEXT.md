@@ -52,7 +52,8 @@ _Avoid_: query builder, factory
 
 **Session**:
 The DataFusion configuration and state a plan is built against. Every formulation uses the session
-it is handed and carries no private session settings.
+it is handed and carries no private session settings. Nothing stores a session. A session is an
+argument to the operation that needs it, including listing, schema resolution, and scanning.
 _Avoid_: context, config (either alone is narrower than what plan shape depends on)
 
 **Plan shape**:
@@ -102,13 +103,15 @@ _Avoid_: samples (unqualified), sample list, cohort
 **Dataset**:
 One stored instance of a dataset layout: its path, the format of each file, and the sample set found
 there. It lists each sample's files and builds the sorted table that reads them. A formulation may
-narrow the sample set, but it does not list paths or assemble readers.
+narrow the sample set, but it does not list paths or assemble readers. A dataset takes its layout
+when it is constructed and validates it against the resolved schema, so a dataset without a layout
+does not exist.
 _Avoid_: input, table (a dataset holds many per-sample tables), corpus
 
 **Dataset layout**:
 The representation shared by datasets of one kind: their locus ordering. It describes how rows
 are arranged across files, separately from how each file is encoded. A formulation declares the
-layout it requires after the dataset detects its locus representation.
+layout it requires without reading a schema, and a dataset takes that layout when it is constructed.
 _Avoid_: format (the encoding of one file), listing options, storage config
 
 **Synthetic table**:
@@ -131,16 +134,25 @@ _Avoid_: site, coordinate, variant (a variant is a locus plus alleles)
 **Locus representation**:
 How one stored row records its locus. `contig-position` uses separate `contig` and `position`
 fields. `packed` uses one `Int64` `locus` field. A dataset detects the representation from its
-resolved schema; callers and formulations do not select it.
+resolved schema; callers and formulations do not select it. Detection requires every field the
+representation names, so a schema with `contig` and no `position` is rejected rather than detected.
 _Avoid_: encoding (ambiguous next to compression and Vortex encoding sets), locus format
 
 **Locus ordering**:
-The sort order that makes a formulation's plan mergeable rather than re-sorting: `contig` then
-`position`, or packed `locus`, optionally followed by `alleles`. The ordering uses stored fields, so
-file statistics prove it without relying on directory names. A dataset layout declares the
-ordering on disk, and a formulation declares the prefix it requires; a finer ordering satisfies a
-coarser requirement.
-_Avoid_: sort key, ordering (unqualified)
+The sort order that makes a formulation's plan mergeable rather than re-sorting, declared as a
+sequence of locus components: the locus, optionally followed by alleles. It names no stored field,
+so one ordering is declarable against either locus representation. A dataset layout declares the
+ordering on disk and a formulation declares the prefix it requires; a finer ordering satisfies a
+coarser requirement. An ordering is never empty and always begins with the locus.
+_Avoid_: sort key, ordering (unqualified), stored ordering (the expansion, a separate term)
+
+**Stored ordering**:
+The expansion of a locus ordering into stored fields under a dataset's locus representation:
+`contig` then `position`, or the packed `locus` field, optionally followed by `alleles`. It uses
+stored fields, so file statistics prove it without relying on directory names, and it is what a
+sorted table verifies and scans by. Only a dataset attaches one to stored files, when the dataset is
+constructed.
+_Avoid_: sort expressions, physical ordering, locus ordering (the declaration, a separate term)
 
 **Reference data**:
 The per-sample records covering loci where a sample matches the reference genome, stored as

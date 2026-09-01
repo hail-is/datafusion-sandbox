@@ -1,23 +1,14 @@
 use super::union_sample_plans;
 use crate::dataset::{Dataset, DatasetLayout};
-use crate::locus::LocusRepresentation;
+use crate::locus::LocusOrdering;
 
-use datafusion::{error::Result, functions_window::rank::rank, logical_expr::SortExpr, prelude::*};
+use datafusion::{error::Result, functions_window::rank::rank, prelude::*};
 
 use std::sync::Arc;
 
-/// The locus ordering declared on the input files and requested in the query: contig, position,
-/// then alleles. Declaring all three identically is what keeps the plan mergeable rather than
-/// re-sorting.
-fn locus_ordering(representation: LocusRepresentation) -> Vec<SortExpr> {
-    let mut ordering = representation.ordering();
-    ordering.push(col("alleles").sort(true, false));
-    ordering
-}
-
-pub(crate) fn required_layout(representation: LocusRepresentation) -> DatasetLayout {
+pub(crate) fn required_layout() -> DatasetLayout {
     DatasetLayout {
-        locus_ordering: locus_ordering(representation),
+        locus_ordering: LocusOrdering::locus_then_alleles(),
     }
 }
 
@@ -25,6 +16,7 @@ pub(crate) fn required_layout(representation: LocusRepresentation) -> DatasetLay
 /// of alleles at each locus, ranked within the locus.
 pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
     let representation = dataset.locus_representation();
+    let query_ordering = dataset.query_ordering(&LocusOrdering::locus_then_alleles())?;
     let mut plans = Vec::with_capacity(dataset.sample_set().len());
     for sample in dataset.sample_set() {
         let df = dataset.read_sample(ctx, sample).await?;
@@ -37,9 +29,9 @@ pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> 
     let df = df.distinct()?;
     let df = df.window(vec![
         rank()
-            .order_by(locus_ordering(representation))
+            .order_by(query_ordering.clone())
             .partition_by(representation.window_partition())
             .build()?,
     ])?;
-    df.sort(locus_ordering(representation))
+    df.sort(query_ordering)
 }
