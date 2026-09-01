@@ -75,7 +75,9 @@ where
         join_set.spawn_on(async move { pipeline(ctx).await }, cpu_runtime.handle());
         match join_set.join_next().await {
             Some(result) => result.map_err(|e| DataFusionError::External(Box::new(e)))?,
-            None => unreachable!("the pipeline join set always contains one task"),
+            None => Err(DataFusionError::Internal(
+                "pipeline task was missing from its join set".to_string(),
+            )),
         }
     })
 }

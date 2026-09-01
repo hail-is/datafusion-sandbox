@@ -128,7 +128,11 @@ impl SortedTable {
                     .iter()
                     .flat_map(FileGroup::iter)
                     .next()
-                    .expect("an extra statistics group contains a file");
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "statistics splitting produced an empty overlap group".to_string(),
+                        )
+                    })?;
                 Err(DataFusionError::Plan(format!(
                     "sorted table file '{}' overlaps another file in its declared ordering",
                     offending_file.object_meta.location

@@ -24,3 +24,19 @@ tempfile = "3.27.0"
 [[bench]]
 name = "example"
 harness = false
+
+[lints.clippy]
+# Don't Panic - prevent panics from unwraps and unsafe slicing or indexing
+unwrap_used = "warn"
+expect_used = "warn"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"
+unreachable = "warn"
+unimplemented = "warn"
+unchecked_time_subtraction = "warn"
+todo = "warn"
+string_slice = "warn"
+panic_in_result_fn = "warn"
+panic = "warn"
+exit = "warn"
+as_conversions = "warn"
