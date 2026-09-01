@@ -66,6 +66,28 @@ def cpuinfo(tmp_path):
     return make
 
 
+# -------------------------------------------------------------- rustc invocation
+
+
+def test_rustc_uses_stable_toolchain(monkeypatch):
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append((command, kwargs))
+        return gce.subprocess.CompletedProcess(command, 0, stdout="features\n")
+
+    monkeypatch.setattr(gce.shutil, "which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(gce.subprocess, "run", run)
+
+    assert gce._rustc("--print", "cfg") == "features\n"
+    assert commands == [
+        (
+            ["rustc", "+stable", "--print", "cfg"],
+            {"capture_output": True, "text": True, "check": True},
+        )
+    ]
+
+
 # --------------------------------------------------------------- the family table
 
 

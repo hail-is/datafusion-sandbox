@@ -94,7 +94,7 @@ def _rustc(*args: str) -> str:
         raise GceCpuError("rustc not found on PATH")
     try:
         return subprocess.run(
-            ["rustc", *args], capture_output=True, text=True, check=True
+            ["rustc", "+stable", *args], capture_output=True, text=True, check=True
         ).stdout
     except subprocess.CalledProcessError as e:
         raise GceCpuError(f"rustc failed: {e.stderr.strip()}") from e
