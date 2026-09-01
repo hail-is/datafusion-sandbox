@@ -208,6 +208,23 @@ fn discovers_the_dataset_sample_set_in_memory() {
 }
 
 #[test]
+fn discovery_surfaces_a_locus_representation_error() {
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "locus",
+        DataType::Utf8,
+        false,
+    )]));
+    let error = block_on(discover_in_memory_with_schema(&["sample-a"], schema))
+        .expect_err("discovery must reject a non-Int64 packed locus");
+
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    let message = error.to_string();
+    assert!(message.contains("locus"), "unexpected error: {message}");
+    assert!(message.contains("Int64"), "unexpected error: {message}");
+    assert!(message.contains("Utf8"), "unexpected error: {message}");
+}
+
+#[test]
 fn rejects_a_dataset_with_no_samples_in_memory() {
     let error = block_on(discover_in_memory(&[]))
         .expect_err("an object store with no sample paths is not a dataset");
@@ -265,6 +282,10 @@ fn dataset_from_data(sample_set: &[&str]) -> Dataset {
 }
 
 async fn discover_in_memory(sample_set: &[&str]) -> Result<Dataset> {
+    discover_in_memory_with_schema(sample_set, contig_position_schema(false)).await
+}
+
+async fn discover_in_memory_with_schema(sample_set: &[&str], schema: SchemaRef) -> Result<Dataset> {
     let ctx = SessionContext::new();
     let store = Arc::new(InMemory::new());
     for sample in sample_set {
@@ -282,7 +303,7 @@ async fn discover_in_memory(sample_set: &[&str]) -> Result<Dataset> {
         ListingTableUrl::parse("memory:///samples")?,
         InputFormat::VORTEX,
         locus_layout(),
-        Some(contig_position_schema(false)),
+        Some(schema),
     )
     .await
 }
