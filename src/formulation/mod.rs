@@ -4,7 +4,7 @@ mod combine_alleles;
 mod combine_refs_union;
 
 use crate::dataset::{Dataset, DatasetLayout};
-use crate::locus::LocusRepresentation;
+use crate::locus::LocusOrdering;
 
 use datafusion::{
     error::Result,
@@ -29,17 +29,15 @@ impl fmt::Display for Formulation {
 }
 
 impl Formulation {
-    pub fn required_layout(self, representation: LocusRepresentation) -> DatasetLayout {
+    pub fn required_layout(self) -> DatasetLayout {
         match self {
-            Self::CombineAllelesUnion => combine_alleles::required_layout(representation),
-            Self::CombineRefsUnion => reference_layout(representation),
+            Self::CombineAllelesUnion => combine_alleles::required_layout(),
+            Self::CombineRefsUnion => reference_layout(),
         }
     }
 
     /// Builds this formulation's plan over `dataset`.
     pub async fn plan(self, ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
-        let required_layout = self.required_layout(dataset.locus_representation());
-        dataset.check_ordering(&required_layout.locus_ordering)?;
         match self {
             Self::CombineAllelesUnion => combine_alleles::plan(ctx, dataset).await,
             Self::CombineRefsUnion => combine_refs_union::plan(ctx, dataset).await,
@@ -47,9 +45,9 @@ impl Formulation {
     }
 }
 
-fn reference_layout(representation: LocusRepresentation) -> DatasetLayout {
+fn reference_layout() -> DatasetLayout {
     DatasetLayout {
-        locus_ordering: representation.ordering(),
+        locus_ordering: LocusOrdering::locus(),
     }
 }
 

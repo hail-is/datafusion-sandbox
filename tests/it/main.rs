@@ -9,5 +9,6 @@ mod dataset;
 mod fixture;
 mod format;
 mod formulation;
+mod locus;
 mod pipeline;
 mod sorted_table;

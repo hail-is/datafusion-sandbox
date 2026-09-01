@@ -2,7 +2,7 @@
 
 use crate::{
     format::InputFormat,
-    locus::LocusRepresentation,
+    locus::{LocusOrdering, LocusRepresentation},
     sorted_table::{AttachedScalar, SortedTable},
 };
 
@@ -23,13 +23,17 @@ use std::{collections::BTreeSet, sync::Arc};
 /// How a dataset's rows and files are arranged on disk.
 #[derive(Clone, Debug)]
 pub struct DatasetLayout {
-    pub locus_ordering: Vec<SortExpr>,
+    pub locus_ordering: LocusOrdering,
 }
 
 impl DatasetLayout {
-    fn check_locus_ordering_columns(&self, schema: &SchemaRef) -> Result<()> {
-        for column in self
-            .locus_ordering
+    fn stored_ordering(
+        &self,
+        representation: LocusRepresentation,
+        schema: &SchemaRef,
+    ) -> Result<Vec<SortExpr>> {
+        let stored_ordering = self.locus_ordering.expand(representation);
+        for column in stored_ordering
             .iter()
             .flat_map(|ordering| ordering.expr.column_refs())
         {
@@ -40,7 +44,7 @@ impl DatasetLayout {
                 )));
             }
         }
-        Ok(())
+        Ok(stored_ordering)
     }
 }
 
@@ -50,24 +54,52 @@ pub struct Dataset {
     table_path: ListingTableUrl,
     input_format: InputFormat,
     layout: DatasetLayout,
+    stored_ordering: Vec<SortExpr>,
     schema: SchemaRef,
     sample_set: Vec<String>,
     locus_representation: LocusRepresentation,
 }
 
 impl Dataset {
+    /// Constructs a dataset from already resolved schema and sample-set data.
+    pub fn new(
+        table_path: ListingTableUrl,
+        input_format: InputFormat,
+        layout: DatasetLayout,
+        schema: SchemaRef,
+        sample_set: Vec<String>,
+    ) -> Result<Self> {
+        let table_path = normalize_table_path(table_path)?;
+        if sample_set.is_empty() {
+            return Err(DataFusionError::Plan(format!(
+                "dataset '{}' contains no samples",
+                <ListingTableUrl as AsRef<str>>::as_ref(&table_path)
+            )));
+        }
+        let locus_representation = LocusRepresentation::detect(&schema)?;
+        let stored_ordering = layout.stored_ordering(locus_representation, &schema)?;
+
+        Ok(Self {
+            table_path,
+            input_format,
+            layout,
+            stored_ordering,
+            schema,
+            sample_set,
+            locus_representation,
+        })
+    }
+
     /// Discovers the sample directories immediately below `table_path` with one
     /// object-store listing request, and resolves the dataset schema.
     pub async fn discover(
         ctx: &SessionContext,
-        mut table_path: ListingTableUrl,
+        table_path: ListingTableUrl,
         input_format: InputFormat,
+        layout: DatasetLayout,
         schema: Option<SchemaRef>,
     ) -> Result<Self> {
-        if !table_path.is_collection() {
-            let path = <ListingTableUrl as AsRef<str>>::as_ref(&table_path);
-            table_path = ListingTableUrl::parse(format!("{}/", path.trim_end_matches('/')))?;
-        }
+        let table_path = normalize_table_path(table_path)?;
         let state = ctx.state();
         let store = ctx.runtime_env().object_store(&table_path)?;
         let partitions = list_partitions(store.as_ref(), &table_path, 0, None).await?;
@@ -84,7 +116,7 @@ impl Dataset {
             .collect::<Vec<_>>();
         sample_set.sort();
         if sample_set.is_empty() {
-            return Err(DataFusionError::Execution(format!(
+            return Err(DataFusionError::Plan(format!(
                 "dataset '{}' contains no samples",
                 <ListingTableUrl as AsRef<str>>::as_ref(&table_path)
             )));
@@ -112,25 +144,7 @@ impl Dataset {
                 format.infer_schema(&state, &store, &[input_file]).await?
             }
         };
-        let locus_representation = LocusRepresentation::detect(&schema)?;
-
-        Ok(Self {
-            table_path,
-            input_format,
-            layout: DatasetLayout {
-                locus_ordering: vec![],
-            },
-            schema,
-            sample_set,
-            locus_representation,
-        })
-    }
-
-    /// Validates and attaches the layout declared by a formulation.
-    pub fn with_layout(mut self, layout: DatasetLayout) -> Result<Self> {
-        layout.check_locus_ordering_columns(&self.schema)?;
-        self.layout = layout;
-        Ok(self)
+        Self::new(table_path, input_format, layout, schema, sample_set)
     }
 
     pub fn sample_set(&self) -> &[String] {
@@ -143,6 +157,12 @@ impl Dataset {
 
     pub fn locus_representation(&self) -> LocusRepresentation {
         self.locus_representation
+    }
+
+    /// Expands the required query ordering after checking it against the layout.
+    pub fn query_ordering(&self, required: &LocusOrdering) -> Result<Vec<SortExpr>> {
+        self.check_ordering(required)?;
+        Ok(required.expand(self.locus_representation))
     }
 
     /// Reads one sample directory as a sorted table and attaches its sample id.
@@ -164,7 +184,7 @@ impl Dataset {
             format,
             files,
             Arc::clone(&self.schema),
-            self.layout.locus_ordering.clone(),
+            self.stored_ordering.clone(),
             Some(AttachedScalar {
                 field: Arc::new(Field::new("s", DataType::Utf8, false)),
                 value: ScalarValue::Utf8(Some(sample.to_string())),
@@ -173,13 +193,13 @@ impl Dataset {
         ctx.read_table(Arc::new(table))
     }
 
-    /// Checks that the dataset's locus ordering starts with every required expression.
-    pub fn check_ordering(&self, required: &[SortExpr]) -> Result<()> {
-        if self.layout.locus_ordering.starts_with(required) {
+    /// Checks that the dataset's locus ordering starts with the required ordering.
+    pub fn check_ordering(&self, required: &LocusOrdering) -> Result<()> {
+        if required.is_prefix_of(&self.layout.locus_ordering) {
             return Ok(());
         }
 
-        Err(DataFusionError::Execution(format!(
+        Err(DataFusionError::Plan(format!(
             "dataset locus ordering {:?} does not satisfy required ordering {:?}",
             self.layout.locus_ordering, required
         )))
@@ -189,7 +209,7 @@ impl Dataset {
     /// that are not present rather than silently intersecting the two sets.
     pub fn restrict_to(mut self, requested_sample_set: &[String]) -> Result<Self> {
         if requested_sample_set.is_empty() {
-            return Err(DataFusionError::Execution(
+            return Err(DataFusionError::Plan(
                 "requested sample set contains no samples".to_string(),
             ));
         }
@@ -204,7 +224,7 @@ impl Dataset {
             .filter(|sample| !available.contains(sample))
             .collect::<BTreeSet<_>>();
         if !missing.is_empty() {
-            return Err(DataFusionError::Execution(format!(
+            return Err(DataFusionError::Plan(format!(
                 "samples not found in dataset: {}",
                 missing.into_iter().collect::<Vec<_>>().join(", ")
             )));
@@ -218,4 +238,12 @@ impl Dataset {
             .retain(|sample| requested_sample_set.contains(sample.as_str()));
         Ok(self)
     }
+}
+
+fn normalize_table_path(mut table_path: ListingTableUrl) -> Result<ListingTableUrl> {
+    if !table_path.is_collection() {
+        let path = <ListingTableUrl as AsRef<str>>::as_ref(&table_path);
+        table_path = ListingTableUrl::parse(format!("{}/", path.trim_end_matches('/')))?;
+    }
+    Ok(table_path)
 }

@@ -9,6 +9,51 @@ use datafusion::{
 };
 use std::fmt;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Component {
+    Locus,
+    Alleles,
+}
+
+/// A nonempty ordering declared in locus terms rather than stored field names.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocusOrdering(Vec<Component>);
+
+impl LocusOrdering {
+    /// Orders rows by locus.
+    pub fn locus() -> Self {
+        Self(vec![Component::Locus])
+    }
+
+    /// Orders rows by locus, then alleles.
+    pub fn locus_then_alleles() -> Self {
+        Self(vec![Component::Locus, Component::Alleles])
+    }
+
+    /// Whether this ordering is a prefix of `other`.
+    pub fn is_prefix_of(&self, other: &Self) -> bool {
+        other.0.starts_with(&self.0)
+    }
+
+    /// Expands this declaration into a stored ordering. The component sequence
+    /// remains private.
+    pub fn expand(&self, representation: LocusRepresentation) -> Vec<SortExpr> {
+        self.0
+            .iter()
+            .flat_map(|component| match component {
+                Component::Locus => match representation {
+                    LocusRepresentation::ContigPosition => vec![
+                        col("contig").sort(true, false),
+                        col("position").sort(true, false),
+                    ],
+                    LocusRepresentation::Packed => vec![col("locus").sort(true, false)],
+                },
+                Component::Alleles => vec![col("alleles").sort(true, false)],
+            })
+            .collect()
+    }
+}
+
 /// How one stored row records its locus.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocusRepresentation {
@@ -24,7 +69,15 @@ impl LocusRepresentation {
         let has_locus = schema.field_with_name("locus").is_ok();
         let has_contig = schema.field_with_name("contig").is_ok();
         match (has_locus, has_contig) {
-            (false, true) => Ok(Self::ContigPosition),
+            (false, true) => {
+                if schema.field_with_name("position").is_err() {
+                    return Err(DataFusionError::Plan(
+                        "contig-position locus representation is missing required 'position' field"
+                            .to_string(),
+                    ));
+                }
+                Ok(Self::ContigPosition)
+            }
             (true, false) => {
                 let locus_type = schema.field_with_name("locus")?.data_type();
                 if locus_type != &DataType::Int64 {
@@ -42,17 +95,6 @@ impl LocusRepresentation {
                 "could not detect locus representation: found neither 'locus' nor 'contig'"
                     .to_string(),
             )),
-        }
-    }
-
-    /// The stored ordering expressions for the locus alone.
-    pub fn ordering(self) -> Vec<SortExpr> {
-        match self {
-            Self::ContigPosition => vec![
-                col("contig").sort(true, false),
-                col("position").sort(true, false),
-            ],
-            Self::Packed => vec![col("locus").sort(true, false)],
         }
     }
 

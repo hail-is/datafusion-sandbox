@@ -287,7 +287,7 @@ fn reports_a_dataset_with_no_samples() {
     assert_eq!(
         err.to_string(),
         format!(
-            "Execution error: dataset 'file://{}/' contains no samples",
+            "Error during planning: dataset 'file://{}/' contains no samples",
             input_path.display()
         )
     );
@@ -310,7 +310,7 @@ fn reports_sample_ids_absent_from_the_dataset() {
 
     assert_eq!(
         err.to_string(),
-        "Execution error: samples not found in dataset: NOT_A_SAMPLE"
+        "Error during planning: samples not found in dataset: NOT_A_SAMPLE"
     );
 }
 

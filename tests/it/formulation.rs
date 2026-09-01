@@ -8,6 +8,7 @@
 use crate::fixture;
 
 use datafusion::{
+    arrow::datatypes::{DataType, Field, Schema},
     common::DataFusionError,
     datasource::listing::ListingTableUrl,
     physical_plan::{
@@ -15,13 +16,13 @@ use datafusion::{
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
         union::UnionExec,
     },
-    prelude::{SessionContext, col},
+    prelude::SessionContext,
 };
 use datafusion_sandbox::{
     dataset::{Dataset, DatasetLayout},
     format::InputFormat,
     formulation::Formulation,
-    locus::LocusRepresentation,
+    locus::{LocusOrdering, LocusRepresentation},
     pipeline,
 };
 
@@ -39,68 +40,26 @@ const REPRESENTATIONS: [LocusRepresentation; 2] = [
 ];
 
 #[test]
-fn rejects_a_dataset_with_both_locus_representations() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_half_packed_sample_table(dir.path());
-    let table_path = ListingTableUrl::parse(&root).unwrap();
-
-    let error = block_on(Dataset::discover(
-        &SessionContext::new(),
-        table_path,
-        InputFormat::VORTEX,
-        None,
-    ))
-    .expect_err("a half-packed dataset must be rejected during discovery");
-
-    assert!(matches!(error, DataFusionError::Plan(_)));
-    let message = error.to_string();
-    assert!(message.contains("both"), "unexpected error: {message}");
-    assert!(message.contains("locus"), "unexpected error: {message}");
-    assert!(message.contains("contig"), "unexpected error: {message}");
-}
-
-#[test]
-fn rejects_a_packed_dataset_with_a_non_int64_locus() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_string_locus_sample_table(dir.path());
-    let table_path = ListingTableUrl::parse(&root).unwrap();
-
-    let error = block_on(Dataset::discover(
-        &SessionContext::new(),
-        table_path,
-        InputFormat::VORTEX,
-        None,
-    ))
-    .expect_err("a packed locus must be stored as Int64");
-
-    assert!(matches!(error, DataFusionError::Plan(_)));
-    let message = error.to_string();
-    assert!(message.contains("locus"), "unexpected error: {message}");
-    assert!(message.contains("Int64"), "unexpected error: {message}");
-    assert!(message.contains("Utf8"), "unexpected error: {message}");
-}
-
-#[test]
 fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), &[SAMPLES[0]]);
-    let table_path = ListingTableUrl::parse(&root).unwrap();
-    let ctx = SessionContext::new();
-    let dataset = block_on(Dataset::discover(
-        &ctx,
-        table_path,
+    let dataset = Dataset::new(
+        ListingTableUrl::parse("memory:///samples").unwrap(),
         InputFormat::VORTEX,
-        None,
-    ))
-    .unwrap()
-    .with_layout(DatasetLayout {
-        locus_ordering: vec![col("contig").sort(true, false)],
-    })
+        DatasetLayout {
+            locus_ordering: LocusOrdering::locus(),
+        },
+        Arc::new(Schema::new(vec![
+            Field::new("contig", DataType::Utf8, false),
+            Field::new("position", DataType::Int32, false),
+            Field::new("alleles", DataType::Utf8, false),
+        ])),
+        vec![SAMPLES[0].to_string()],
+    )
     .unwrap();
 
-    let error = block_on(Formulation::CombineRefsUnion.plan(&SessionContext::new(), &dataset))
-        .expect_err("the formulation requires position ordering");
+    let error = block_on(Formulation::CombineAllelesUnion.plan(&SessionContext::new(), &dataset))
+        .expect_err("the allele formulation requires alleles ordering");
 
+    assert!(matches!(error, DataFusionError::Plan(_)));
     assert!(error.to_string().contains("locus ordering"));
 }
 
@@ -217,9 +176,15 @@ fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
 fn dataset(root: &str, input_format: InputFormat) -> Dataset {
     let table_path = ListingTableUrl::parse(root).unwrap();
     let ctx = SessionContext::new();
-    let dataset = block_on(Dataset::discover(&ctx, table_path, input_format, None)).unwrap();
-    let layout = Formulation::CombineAllelesUnion.required_layout(dataset.locus_representation());
-    dataset.with_layout(layout).unwrap()
+    let layout = Formulation::CombineAllelesUnion.required_layout();
+    block_on(Dataset::discover(
+        &ctx,
+        table_path,
+        input_format,
+        layout,
+        None,
+    ))
+    .unwrap()
 }
 
 fn vortex_fixture(dir: &std::path::Path, representation: LocusRepresentation) -> String {

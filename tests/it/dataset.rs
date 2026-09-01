@@ -3,84 +3,23 @@ use crate::fixture;
 use datafusion::{
     arrow::{
         array::{Int32Array, StringArray},
-        datatypes::{DataType, Field, Schema},
+        datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
     },
     common::DataFusionError,
     datasource::listing::ListingTableUrl,
     error::Result,
-    logical_expr::col,
+    execution::object_store::ObjectStoreUrl,
     prelude::SessionContext,
 };
 use datafusion_sandbox::{
     dataset::{Dataset, DatasetLayout},
     format::{InputFormat, OutputFormat},
+    locus::LocusOrdering,
 };
+use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
 
 use std::{future::Future, sync::Arc};
-
-#[test]
-fn accepts_an_exact_locus_ordering() {
-    let dataset = dataset_with_ordering(vec![
-        col("contig").sort(true, false),
-        col("position").sort(true, false),
-    ]);
-
-    dataset
-        .check_ordering(&[
-            col("contig").sort(true, false),
-            col("position").sort(true, false),
-        ])
-        .unwrap();
-}
-
-#[test]
-fn accepts_a_finer_locus_ordering() {
-    let dataset = dataset_with_ordering(vec![
-        col("contig").sort(true, false),
-        col("position").sort(true, false),
-        col("alleles").sort(true, false),
-    ]);
-
-    dataset
-        .check_ordering(&[
-            col("contig").sort(true, false),
-            col("position").sort(true, false),
-        ])
-        .unwrap();
-}
-
-#[test]
-fn rejects_an_insufficient_locus_ordering() {
-    let dataset = dataset_with_ordering(vec![col("contig").sort(true, false)]);
-
-    let error = dataset
-        .check_ordering(&[
-            col("contig").sort(true, false),
-            col("position").sort(true, false),
-        ])
-        .expect_err("the dataset does not satisfy the required ordering");
-
-    let message = error.to_string();
-    assert!(
-        message.contains("locus ordering"),
-        "unexpected error: {message}"
-    );
-    assert!(message.contains("position"), "unexpected error: {message}");
-}
-
-fn dataset_with_ordering(locus_ordering: Vec<datafusion::logical_expr::SortExpr>) -> Dataset {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), &["sample-a"]);
-    let table_path = ListingTableUrl::parse(&root).unwrap();
-    block_on(discover_with_layout(
-        &SessionContext::new(),
-        table_path,
-        InputFormat::VORTEX,
-        DatasetLayout { locus_ordering },
-    ))
-    .unwrap()
-}
 
 #[test]
 fn reads_one_sample_with_its_sample_id_attached() {
@@ -89,11 +28,12 @@ fn reads_one_sample_with_its_sample_id_attached() {
 
     block_on(async {
         let table_path = ListingTableUrl::parse(&root).unwrap();
-        let dataset = discover_with_layout(
+        let dataset = Dataset::discover(
             &SessionContext::new(),
             table_path,
             InputFormat::VORTEX,
             allele_layout(),
+            None,
         )
         .await
         .unwrap();
@@ -120,27 +60,43 @@ fn reads_one_sample_with_its_sample_id_attached() {
 }
 
 #[test]
-fn rejects_an_inferred_schema_missing_a_locus_ordering_column() {
+fn rejects_an_inferred_schema_missing_a_required_ordering_column() {
     let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), &["sample-a"]);
+    let root = fixture::write_sample_table_without_alleles(dir.path());
 
     let error = block_on(async {
-        let table_path = ListingTableUrl::parse(&root).unwrap();
-        discover_with_layout(
+        Dataset::discover(
             &SessionContext::new(),
-            table_path,
+            ListingTableUrl::parse(&root).unwrap(),
             InputFormat::VORTEX,
-            DatasetLayout {
-                locus_ordering: vec![col("missing").sort(true, false)],
-            },
+            allele_layout(),
+            None,
         )
         .await
-        .expect_err("the inferred schema must contain every locus ordering column")
+        .expect_err("the inferred schema must contain every required ordering column")
     });
 
     assert!(matches!(error, DataFusionError::Plan(_)));
     assert!(
-        error.to_string().contains("missing"),
+        error.to_string().contains("alleles"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_a_resolved_schema_missing_a_required_ordering_column() {
+    let error = Dataset::new(
+        ListingTableUrl::parse("memory:///samples").unwrap(),
+        InputFormat::VORTEX,
+        allele_layout(),
+        contig_position_schema(false),
+        vec!["sample-a".to_string()],
+    )
+    .expect_err("the resolved schema must contain every required ordering column");
+
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    assert!(
+        error.to_string().contains("alleles"),
         "unexpected error: {error}"
     );
 }
@@ -173,14 +129,12 @@ fn infers_the_schema_from_one_input_file() {
                 .unwrap();
         }
 
-        let table_path = ListingTableUrl::parse(root.to_str().unwrap()).unwrap();
-        let dataset = discover_with_layout(
+        let dataset = Dataset::discover(
             &ctx,
-            table_path,
+            ListingTableUrl::parse(root.to_str().unwrap()).unwrap(),
             InputFormat::VORTEX,
-            DatasetLayout {
-                locus_ordering: vec![col("position").sort(true, false)],
-            },
+            locus_layout(),
+            None,
         )
         .await
         .expect("incompatible schemas in later files must not be merged");
@@ -196,67 +150,33 @@ fn uses_a_pinned_schema_without_inference() {
     let sample_dir = root.join("s=sample-a");
     std::fs::create_dir_all(&sample_dir).unwrap();
     std::fs::write(sample_dir.join("invalid.vortex"), b"not a vortex file").unwrap();
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("contig", DataType::Utf8, false),
-        Field::new("position", DataType::Int32, false),
-    ]));
+    let schema = contig_position_schema(false);
 
-    let dataset = block_on(async {
-        let table_path = ListingTableUrl::parse(root.to_str().unwrap()).unwrap();
-        Dataset::discover(
-            &SessionContext::new(),
-            table_path,
-            InputFormat::VORTEX,
-            Some(Arc::clone(&schema)),
-        )
-        .await
-        .and_then(|dataset| {
-            dataset.with_layout(DatasetLayout {
-                locus_ordering: vec![col("position").sort(true, false)],
-            })
-        })
-        .expect("a pinned schema must bypass inference")
-    });
+    let dataset = block_on(Dataset::discover(
+        &SessionContext::new(),
+        ListingTableUrl::parse(root.to_str().unwrap()).unwrap(),
+        InputFormat::VORTEX,
+        locus_layout(),
+        Some(Arc::clone(&schema)),
+    ))
+    .expect("a pinned schema must bypass inference");
 
     assert_eq!(dataset.schema(), &schema);
 }
 
 #[test]
-fn discovers_the_dataset_sample_set() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), &["sample-b", "sample-a"]);
-
-    let dataset = block_on(async {
-        let table_path = ListingTableUrl::parse(&root).unwrap();
-        discover_with_layout(
-            &SessionContext::new(),
-            table_path,
-            InputFormat::VORTEX,
-            empty_layout(),
-        )
-        .await
-        .unwrap()
-    });
+fn discovers_the_dataset_sample_set_in_memory() {
+    let dataset = block_on(discover_in_memory(&["sample-b", "sample-a"])).unwrap();
 
     assert_eq!(dataset.sample_set(), ["sample-a", "sample-b"]);
 }
 
 #[test]
-fn rejects_a_dataset_with_no_samples() {
-    let dir = tempfile::tempdir().unwrap();
+fn rejects_a_dataset_with_no_samples_in_memory() {
+    let error = block_on(discover_in_memory(&[]))
+        .expect_err("an object store with no sample paths is not a dataset");
 
-    let error = block_on(async {
-        let table_path = ListingTableUrl::parse(dir.path().to_str().unwrap()).unwrap();
-        discover_with_layout(
-            &SessionContext::new(),
-            table_path,
-            InputFormat::VORTEX,
-            empty_layout(),
-        )
-        .await
-        .expect_err("an empty directory is not a dataset")
-    });
-
+    assert!(matches!(error, DataFusionError::Plan(_)));
     assert!(
         error.to_string().contains("no samples"),
         "unexpected error: {error}"
@@ -265,100 +185,93 @@ fn rejects_a_dataset_with_no_samples() {
 
 #[test]
 fn narrows_the_dataset_sample_set() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), &["sample-a", "sample-b"]);
-
-    let dataset = block_on(async {
-        let table_path = ListingTableUrl::parse(&root).unwrap();
-        discover_with_layout(
-            &SessionContext::new(),
-            table_path,
-            InputFormat::VORTEX,
-            empty_layout(),
-        )
-        .await
-        .unwrap()
+    let dataset = dataset_from_data(&["sample-a", "sample-b"])
         .restrict_to(&["sample-b".to_string()])
-        .unwrap()
-    });
+        .unwrap();
 
     assert_eq!(dataset.sample_set(), ["sample-b"]);
 }
 
 #[test]
 fn rejects_an_empty_requested_sample_set() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), &["sample-a"]);
-
-    let error = block_on(async {
-        let table_path = ListingTableUrl::parse(&root).unwrap();
-        discover_with_layout(
-            &SessionContext::new(),
-            table_path,
-            InputFormat::VORTEX,
-            empty_layout(),
-        )
-        .await
-        .unwrap()
+    let error = dataset_from_data(&["sample-a"])
         .restrict_to(&[])
-        .expect_err("a dataset must retain at least one sample")
-    });
+        .expect_err("a dataset must retain at least one sample");
 
+    assert!(matches!(error, DataFusionError::Plan(_)));
     assert_eq!(
         error.to_string(),
-        "Execution error: requested sample set contains no samples"
+        "Error during planning: requested sample set contains no samples"
     );
 }
 
 #[test]
 fn rejects_requested_samples_that_are_not_in_the_dataset() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), &["sample-a"]);
-
-    let error = block_on(async {
-        let table_path = ListingTableUrl::parse(&root).unwrap();
-        discover_with_layout(
-            &SessionContext::new(),
-            table_path,
-            InputFormat::VORTEX,
-            empty_layout(),
-        )
-        .await
-        .unwrap()
+    let error = dataset_from_data(&["sample-a"])
         .restrict_to(&["missing-b".to_string(), "missing-a".to_string()])
-        .expect_err("unknown sample ids must fail")
-    });
+        .expect_err("unknown sample ids must fail");
 
+    assert!(matches!(error, DataFusionError::Plan(_)));
     let message = error.to_string();
     assert!(message.contains("missing-a"), "unexpected error: {message}");
     assert!(message.contains("missing-b"), "unexpected error: {message}");
 }
 
+fn dataset_from_data(sample_set: &[&str]) -> Dataset {
+    Dataset::new(
+        ListingTableUrl::parse("memory:///samples").unwrap(),
+        InputFormat::VORTEX,
+        allele_layout(),
+        contig_position_schema(true),
+        sample_set.iter().map(|sample| sample.to_string()).collect(),
+    )
+    .unwrap()
+}
+
+async fn discover_in_memory(sample_set: &[&str]) -> Result<Dataset> {
+    let ctx = SessionContext::new();
+    let store = Arc::new(InMemory::new());
+    for sample in sample_set {
+        store
+            .put(
+                &Path::from(format!("samples/s={sample}/marker")),
+                Vec::<u8>::new().into(),
+            )
+            .await?;
+    }
+    let store_url = ObjectStoreUrl::parse("memory://")?;
+    ctx.register_object_store(store_url.as_ref(), store);
+    Dataset::discover(
+        &ctx,
+        ListingTableUrl::parse("memory:///samples")?,
+        InputFormat::VORTEX,
+        locus_layout(),
+        Some(contig_position_schema(false)),
+    )
+    .await
+}
+
+fn contig_position_schema(include_alleles: bool) -> SchemaRef {
+    let mut fields = vec![
+        Field::new("contig", DataType::Utf8, false),
+        Field::new("position", DataType::Int32, false),
+    ];
+    if include_alleles {
+        fields.push(Field::new("alleles", DataType::Utf8, false));
+    }
+    Arc::new(Schema::new(fields))
+}
+
+fn locus_layout() -> DatasetLayout {
+    DatasetLayout {
+        locus_ordering: LocusOrdering::locus(),
+    }
+}
+
 fn allele_layout() -> DatasetLayout {
     DatasetLayout {
-        locus_ordering: vec![
-            col("contig").sort(true, false),
-            col("position").sort(true, false),
-            col("alleles").sort(true, false),
-        ],
+        locus_ordering: LocusOrdering::locus_then_alleles(),
     }
-}
-
-fn empty_layout() -> DatasetLayout {
-    DatasetLayout {
-        locus_ordering: vec![],
-    }
-}
-
-async fn discover_with_layout(
-    ctx: &SessionContext,
-    table_path: ListingTableUrl,
-    input_format: InputFormat,
-    layout: DatasetLayout,
-) -> Result<Dataset> {
-    Dataset::discover(ctx, table_path, input_format, None)
-        .await?
-        .with_layout(layout)
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
