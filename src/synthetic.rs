@@ -25,11 +25,40 @@ struct IntRangeStream {
     batch_size: i32,
 }
 
+impl IntRangeStream {
+    fn new(schema: SchemaRef, start: i32, end: i32, batch_size: u32) -> Result<Self> {
+        let batch_size = i32::try_from(batch_size).map_err(|_| {
+            DataFusionError::Plan(format!(
+                "range table batch size {batch_size} exceeds the maximum supported value {}",
+                i32::MAX
+            ))
+        })?;
+        if batch_size == 0 {
+            return Err(DataFusionError::Plan(
+                "range table batch size must be at least 1".to_string(),
+            ));
+        }
+        if start <= end && end.checked_add(batch_size).is_none() {
+            return Err(DataFusionError::Plan(format!(
+                "range end {end} leaves insufficient integer headroom for batch size {batch_size}"
+            )));
+        }
+
+        Ok(Self {
+            schema,
+            start,
+            end,
+            batch_size,
+        })
+    }
+}
+
 impl PartitionStream for IntRangeStream {
     fn schema(&self) -> &SchemaRef {
         &self.schema
     }
 
+    #[allow(clippy::arithmetic_side_effects)]
     fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
         let schema = Arc::clone(&self.schema);
         let end = self.end;
@@ -42,10 +71,12 @@ impl PartitionStream for IntRangeStream {
                 if next > end {
                     return None;
                 }
+                // `new` proves `end + batch_size` fits, and `next <= end` here.
                 let last = (next + batch_size - 1).min(end);
                 let array = Int32Array::from_iter_values(next..=last);
                 let batch = RecordBatch::try_new(schema, vec![Arc::new(array)])
                     .map_err(DataFusionError::from);
+                // `last <= end`, and `new` proves at least one integer of headroom.
                 Some((batch, last + 1))
             }
         });
@@ -60,12 +91,12 @@ impl PartitionStream for IntRangeStream {
 pub fn make_range_table_source(start: i32, end: i32, batch_size: u32) -> Result<StreamingTable> {
     let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new("idx", DataType::Int32, false)]));
 
-    let partition: Arc<dyn PartitionStream> = Arc::new(IntRangeStream {
-        schema: Arc::clone(&schema),
+    let partition: Arc<dyn PartitionStream> = Arc::new(IntRangeStream::new(
+        Arc::clone(&schema),
         start,
         end,
-        batch_size: batch_size as i32,
-    });
+        batch_size,
+    )?);
 
     Ok(
         StreamingTable::try_new(schema, vec![partition])?.with_sort_order(vec![SortExpr::new(
@@ -77,10 +108,18 @@ pub fn make_range_table_source(start: i32, end: i32, batch_size: u32) -> Result<
 }
 
 pub fn make_range_table(ctx: &SessionContext, n_rows: u32, batch_size: u32) -> Result<DataFrame> {
-    let range_provider = Arc::new(make_range_table_source(1, n_rows as i32, batch_size)?);
+    let end = i32::try_from(n_rows).map_err(|_| {
+        DataFusionError::Plan(format!(
+            "range table row count {n_rows} exceeds the maximum supported value {}",
+            i32::MAX
+        ))
+    })?;
+    let range_provider = Arc::new(make_range_table_source(1, end, batch_size)?);
     ctx.read_table(range_provider)
 }
 
+// DataFusion overloads division to build an expression; it performs no arithmetic here.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn make_table_group_by_aggregate_sorted(
     ctx: &SessionContext,
     batch_size: u32,

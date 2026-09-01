@@ -166,7 +166,12 @@ impl Dataset {
             plans.push(Arc::new(frame.into_unoptimized_plan()));
         }
         let plan = if plans.len() == 1 {
-            (*plans.pop().expect("a dataset has at least one sample")).clone()
+            let plan = plans.pop().ok_or_else(|| {
+                DataFusionError::Internal(
+                    "a non-empty dataset produced no sample plans".to_string(),
+                )
+            })?;
+            (*plan).clone()
         } else {
             LogicalPlan::Union(Union::try_new(plans)?)
         };

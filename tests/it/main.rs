@@ -3,6 +3,9 @@
 //! modules here and keep their source files under `tests/it/`; a Rust file placed
 //! directly under `tests/` becomes a separate test target.
 
+#![cfg(test)]
+#![allow(clippy::as_conversions)]
+
 mod cli;
 mod combiner_run;
 mod dataset;

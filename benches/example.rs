@@ -1,4 +1,9 @@
-use datafusion::physical_plan::{ExecutionPlan, execute_stream};
+// Benchmark setup failures should abort the benchmark rather than become measured results.
+#![allow(clippy::unwrap_used)]
+
+use datafusion::physical_plan::{
+    ChildrenPropertiesMode, ExecutionPlan, ReplaceChildrenOptions, execute_stream,
+};
 use datafusion::prelude::*;
 use datafusion_sandbox::synthetic::{make_range_table, make_table_group_by_aggregate_sorted};
 use divan::Bencher;
@@ -15,7 +20,12 @@ fn main() {
 fn deep_copy_plan(plan: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
     let new_children: Vec<Arc<dyn ExecutionPlan>> =
         plan.children().into_iter().map(deep_copy_plan).collect();
-    Arc::clone(plan).with_new_children(new_children).unwrap()
+    Arc::clone(plan)
+        .replace_children(
+            new_children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Keep),
+        )
+        .unwrap()
 }
 
 fn session_context() -> SessionContext {

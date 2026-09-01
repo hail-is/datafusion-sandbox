@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use datafusion::error::Result;
+use datafusion::error::{DataFusionError, Result};
 
 use datafusion_sandbox::combiner_run::{Action, CombinerRun};
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
@@ -171,19 +171,23 @@ impl CliAction {
     }
 }
 
-impl From<ActionArgs> for CliAction {
-    fn from(args: ActionArgs) -> Self {
+impl TryFrom<ActionArgs> for CliAction {
+    type Error = DataFusionError;
+
+    fn try_from(args: ActionArgs) -> Result<Self> {
         match args {
             ActionArgs {
                 write: Some(path), ..
-            } => Self::Write(path),
-            ActionArgs { show: true, .. } => Self::Show,
-            ActionArgs { explain: true, .. } => Self::Explain,
+            } => Ok(Self::Write(path)),
+            ActionArgs { show: true, .. } => Ok(Self::Show),
+            ActionArgs { explain: true, .. } => Ok(Self::Explain),
             ActionArgs {
                 explain_analyze: true,
                 ..
-            } => Self::ExplainAnalyze,
-            _ => unreachable!("clap requires exactly one action"),
+            } => Ok(Self::ExplainAnalyze),
+            _ => Err(DataFusionError::Configuration(
+                "exactly one action is required".to_string(),
+            )),
         }
     }
 }
@@ -203,7 +207,7 @@ fn main() -> Result<()> {
         limit,
         sample_set,
     } = args;
-    let cli_action = CliAction::from(action);
+    let cli_action = CliAction::try_from(action)?;
     let input_format = formats.input_format.format();
     let limit = cli_action.row_limit(limit);
     let action = match cli_action {
