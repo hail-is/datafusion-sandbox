@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -119,8 +120,12 @@ def test_pack_loci_rejects_a_non_numeric_contig_without_leaving_output(tmp_path)
     sample_source = source / "s=HG00187"
     sample_source.mkdir(parents=True)
     pq.write_table(
+        pa.table({"contig": ["chr22"], "position": pa.array([1], type=pa.int32())}),
+        sample_source / "HG00187.a.reference.zstd.parquet",
+    )
+    pq.write_table(
         pa.table({"contig": ["chrX"], "position": pa.array([1], type=pa.int32())}),
-        sample_source / "HG00187.reference.zstd.parquet",
+        sample_source / "HG00187.b.reference.zstd.parquet",
     )
     destination = tmp_path / "packed"
 
@@ -130,7 +135,86 @@ def test_pack_loci_rejects_a_non_numeric_contig_without_leaving_output(tmp_path)
     assert not list(destination.rglob("*.parquet"))
 
 
-def test_scaled_vortex_conversion_rewrites_stored_contigs(tmp_path, monkeypatch):
+def test_pack_loci_accumulates_one_contig_across_batches(tmp_path):
+    source = tmp_path / "parquets"
+    sample_source = source / "s=HG00187"
+    sample_source.mkdir(parents=True)
+    source_file = sample_source / "HG00187.reference.zstd.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "contig": ["chr22", "chr22"],
+                "position": pa.array([1, 2], type=pa.int32()),
+            }
+        ),
+        source_file,
+        row_group_size=1,
+    )
+    assert pq.ParquetFile(source_file).metadata.num_row_groups == 2
+    destination = tmp_path / "packed"
+
+    cli.pack_loci(source, destination)
+
+    packed = pq.read_table(
+        destination / "s=HG00187/HG00187.reference.chr22.zstd.parquet"
+    )
+    assert packed.column("locus").to_pylist() == [
+        (22 << 32) | 1,
+        (22 << 32) | 2,
+    ]
+
+
+def test_pack_loci_rejects_multiple_contigs_and_names_them(tmp_path):
+    source = tmp_path / "parquets"
+    sample_source = source / "s=HG00187"
+    sample_source.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "contig": ["chr22", "chr21"],
+                "position": pa.array([1, 2], type=pa.int32()),
+            }
+        ),
+        sample_source / "HG00187.reference.zstd.parquet",
+        row_group_size=1,
+    )
+    destination = tmp_path / "packed"
+
+    with pytest.raises(ValueError, match=r"chr21.*chr22"):
+        cli.pack_loci(source, destination)
+
+    assert not list(destination.rglob("*.parquet"))
+
+
+def test_pack_loci_does_not_rewrite_an_already_normalized_source(tmp_path):
+    source = tmp_path / "parquets"
+    sample_source = source / "s=HG00187"
+    sample_source.mkdir(parents=True)
+    source_file = sample_source / "HG00187.reference.zstd.parquet"
+    schema = pa.schema(
+        [
+            pa.field("contig", pa.string(), nullable=False),
+            pa.field("position", pa.int32(), nullable=False),
+        ]
+    )
+    pq.write_table(
+        pa.Table.from_arrays(
+            [pa.array(["chr22"]), pa.array([1], type=pa.int32())],
+            schema=schema,
+        ),
+        source_file,
+    )
+    destination = tmp_path / "packed"
+    cli.pack_loci(source, destination)
+    unchanged_timestamp = 1_000_000_000
+    os.utime(source_file, ns=(unchanged_timestamp, unchanged_timestamp))
+
+    cli.pack_loci(source, destination)
+
+    assert source_file.stat().st_mtime_ns == unchanged_timestamp
+
+
+def test_scale_parquets_rewrites_stored_contigs_before_conversion(tmp_path, monkeypatch):
     source = tmp_path / "parquets"
     sample_source = source / "s=HG00187"
     sample_source.mkdir(parents=True)
@@ -143,11 +227,13 @@ def test_scaled_vortex_conversion_rewrites_stored_contigs(tmp_path, monkeypatch)
         ),
         sample_source / "HG00187.reference.zstd.parquet",
         compression="zstd",
+        row_group_size=1,
     )
     destination = tmp_path / "vortices"
     monkeypatch.chdir(Path(__file__).parents[1])
 
-    cli.convert_parquets(source, destination, scale_factor=3)
+    cli.scale_parquets(source, scale_factor=3)
+    cli.convert_parquets(source, destination)
 
     sample_destination = destination / "s=HG00187"
     files = sorted(sample_destination.glob("*.vortex"))
@@ -174,7 +260,7 @@ def test_scaled_vortex_conversion_rewrites_stored_contigs(tmp_path, monkeypatch)
     }
 
 
-def test_scaled_conversion_persists_padded_parquets_before_vortex(tmp_path, monkeypatch):
+def test_scale_parquets_persists_padded_files_before_conversion(tmp_path, monkeypatch):
     source = tmp_path / "parquets"
     sample_source = source / "s=HG00187"
     sample_source.mkdir(parents=True)
@@ -189,12 +275,51 @@ def test_scaled_conversion_persists_padded_parquets_before_vortex(tmp_path, monk
         lambda _source, destination, _compact: destinations.append(destination.name),
     )
 
-    cli.convert_parquets(source, tmp_path / "vortices", scale_factor=14)
+    cli.scale_parquets(source, scale_factor=14)
+    cli.convert_parquets(source, tmp_path / "vortices")
 
     scaled = sample_source / "HG00187.reference.chr09.zstd.parquet"
     assert scaled.is_file()
     assert pq.read_table(scaled).column("contig").to_pylist() == ["chr09"]
     assert "HG00187.reference.chr09.vortex" in destinations
+
+
+def test_convert_parquets_accepts_packed_loci(tmp_path, monkeypatch):
+    source = tmp_path / "parquets"
+    sample_source = source / "s=HG00187"
+    sample_source.mkdir(parents=True)
+    source_file = sample_source / "HG00187.reference.chr22.zstd.parquet"
+    pq.write_table(
+        pa.table({"locus": pa.array([(22 << 32) | 1], type=pa.int64())}),
+        source_file,
+    )
+    converted = []
+    monkeypatch.setattr(
+        cli,
+        "parquet_to_vortex",
+        lambda parquet, _destination, _compact: converted.append(parquet),
+    )
+
+    cli.convert_parquets(source, tmp_path / "vortices")
+
+    assert converted == [source_file]
+
+
+def test_scale_parquets_rejects_contig_names_that_cannot_stay_fixed_width(tmp_path):
+    source = tmp_path / "parquets"
+    sample_source = source / "s=HG00187"
+    sample_source.mkdir(parents=True)
+    pq.write_table(
+        pa.table({"contig": ["chr22"], "position": pa.array([1], type=pa.int32())}),
+        sample_source / "HG00187.reference.zstd.parquet",
+    )
+
+    with pytest.raises(ValueError, match="contig naming"):
+        cli.scale_parquets(source, scale_factor=24)
+
+    assert [path.name for path in sample_source.glob("*.parquet")] == [
+        "HG00187.reference.zstd.parquet"
+    ]
 
 
 def test_setup_builds_both_locus_representations_for_both_datasets(monkeypatch):
@@ -215,7 +340,7 @@ def test_setup_builds_both_locus_representations_for_both_datasets(monkeypatch):
     monkeypatch.setattr(
         cli,
         "scale_parquets",
-        lambda path, factor: calls.append(("scale", path, factor)),
+        lambda path, factor=10: calls.append(("scale", path, factor)),
     )
     monkeypatch.setattr(
         cli,
@@ -239,8 +364,8 @@ def test_setup_builds_both_locus_representations_for_both_datasets(monkeypatch):
             Path("parquets_chr22"),
             Path("parquets_alleles_chr22"),
         ),
-        ("scale", Path("parquets_chr22"), 1),
-        ("scale", Path("parquets_alleles_chr22"), 1),
+        ("scale", Path("parquets_chr22"), 10),
+        ("scale", Path("parquets_alleles_chr22"), 10),
         ("pack", Path("parquets_chr22"), Path("parquets_packed_chr22")),
         (
             "pack",

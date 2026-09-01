@@ -5,6 +5,8 @@ Hail data. Commands are defined directly on the Typer app below; if this file
 grows unwieldy we can split them into a `commands/` subpackage later.
 """
 
+from collections.abc import Iterator
+from contextlib import ExitStack
 import logging
 from pathlib import Path, PurePath
 import re
@@ -12,6 +14,7 @@ import subprocess
 import tempfile
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import typer
 
@@ -78,8 +81,8 @@ def setup() -> None:
         Path('parquets_chr22'),
         Path('parquets_alleles_chr22'),
     )
-    scale_parquets(Path('parquets_chr22'), 1)
-    scale_parquets(Path('parquets_alleles_chr22'), 1)
+    scale_parquets(Path('parquets_chr22'))
+    scale_parquets(Path('parquets_alleles_chr22'))
     pack_loci(Path('parquets_chr22'), Path('parquets_packed_chr22'))
     pack_loci(
         Path('parquets_alleles_chr22'),
@@ -217,29 +220,52 @@ def convert_vdss(path: Path, dest: Path, alleles_dest: Path | None = None) -> No
         convert_vds(gvcf, ref_dir, alleles_dir)
 
 
-def rewrite_parquet_contig(source: Path, destination: Path, contig: str) -> None:
+def _iter_row_group_batches(parquet: pq.ParquetFile) -> Iterator[pa.RecordBatch]:
+    for row_group in range(parquet.metadata.num_row_groups):
+        yield from parquet.iter_batches(row_groups=[row_group])
+
+
+def _write_scaled_parquets(source: Path, contigs: list[str]) -> None:
     parquet = pq.ParquetFile(source)
     contig_index = parquet.schema_arrow.get_field_index('contig')
     if contig_index == -1:
         raise ValueError(f"{source} has no contig column")
 
     contig_field = parquet.schema_arrow.field(contig_index)
-    with pq.ParquetWriter(destination, parquet.schema_arrow, compression='zstd') as writer:
-        for batch in parquet.iter_batches():
-            contigs = pa.array([contig] * batch.num_rows, type=contig_field.type)
-            writer.write_batch(batch.set_column(contig_index, contig_field, contigs))
+    with ExitStack() as stack:
+        writers = [
+            (
+                contig,
+                stack.enter_context(
+                    pq.ParquetWriter(
+                        source.with_name(_parquet_name_with_contig(source, contig)),
+                        parquet.schema_arrow,
+                        compression='zstd',
+                    )
+                ),
+            )
+            for contig in contigs
+        ]
+        for batch in _iter_row_group_batches(parquet):
+            for contig, writer in writers:
+                repeated_contig = pa.repeat(
+                    pa.scalar(contig, type=contig_field.type), batch.num_rows
+                )
+                writer.write_batch(
+                    batch.set_column(contig_index, contig_field, repeated_contig)
+                )
 
 
-def _pack_locus(contigs: pa.Array, positions: pa.Array) -> pa.Array:
-    packed = []
-    for contig, position in zip(contigs.to_pylist(), positions.to_pylist(), strict=True):
-        if contig is None or position is None:
-            raise ValueError("contig and position must not contain null values")
-        match = re.fullmatch(r"chr([0-9]+)", contig)
-        if match is None:
-            raise ValueError(f"invalid contig name: {contig}")
-        packed.append((int(match.group(1)) << 32) | position)
-    return pa.array(packed, type=pa.int64())
+def _contig_ordinal(contig: str) -> int:
+    match = re.fullmatch(r"chr([0-9]+)", contig)
+    if match is None:
+        raise ValueError(f"invalid contig name: {contig}")
+    return int(match.group(1))
+
+
+def _pack_locus(contig_ordinal: int, positions: pa.Array) -> pa.Array:
+    ordinal_bits = pa.scalar(contig_ordinal << 32, type=pa.int64())
+    return pc.bit_wise_or(pc.cast(positions, pa.int64()), ordinal_bits)
 
 
 def _required_non_null_schema(schema: pa.Schema) -> pa.Schema:
@@ -261,32 +287,36 @@ def _packed_schema(schema: pa.Schema) -> pa.Schema:
     return pa.schema(fields, metadata=schema.metadata)
 
 
-def _pack_batch(batch: pa.RecordBatch, schema: pa.Schema) -> pa.RecordBatch:
+def _pack_batch(
+    batch: pa.RecordBatch, schema: pa.Schema, contig_ordinal: int
+) -> pa.RecordBatch:
     position_index = batch.schema.get_field_index("position")
     arrays = []
     for index, field in enumerate(batch.schema):
         if field.name == "contig":
-            arrays.append(_pack_locus(batch.column(index), batch.column(position_index)))
+            arrays.append(_pack_locus(contig_ordinal, batch.column(position_index)))
         elif field.name != "position":
             arrays.append(batch.column(index))
     return pa.RecordBatch.from_arrays(arrays, schema=schema)
 
 
-def _pack_parquet(source: Path, destination: Path) -> None:
+def _pack_parquet(source: Path, destination: Path) -> str:
     parquet = pq.ParquetFile(source)
-    source_schema = _required_non_null_schema(parquet.schema_arrow)
+    normalized_schema = _required_non_null_schema(parquet.schema_arrow)
     for name in ("contig", "position"):
-        if source_schema.get_field_index(name) == -1:
+        if normalized_schema.get_field_index(name) == -1:
             raise ValueError(f"{source} has no {name} column")
-    packed_schema = _packed_schema(source_schema)
+    packed_schema = _packed_schema(normalized_schema)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        dir=source.parent,
-        prefix=f".{source.name}.",
-        suffix=".parquet",
-        delete=False,
-    ) as temporary:
-        normalized_path = Path(temporary.name)
+    normalized_path = None
+    if not parquet.schema_arrow.equals(normalized_schema):
+        with tempfile.NamedTemporaryFile(
+            dir=source.parent,
+            prefix=f".{source.name}.",
+            suffix=".parquet",
+            delete=False,
+        ) as temporary:
+            normalized_path = Path(temporary.name)
     with tempfile.NamedTemporaryFile(
         dir=destination.parent,
         prefix=f".{destination.name}.",
@@ -295,34 +325,55 @@ def _pack_parquet(source: Path, destination: Path) -> None:
     ) as temporary:
         packed_path = Path(temporary.name)
     try:
-        with (
-            pq.ParquetWriter(normalized_path, source_schema, compression="zstd") as source_writer,
-            pq.ParquetWriter(packed_path, packed_schema, compression="zstd") as packed_writer,
-        ):
-            for batch in parquet.iter_batches():
-                for field in source_schema:
+        observed_contigs = set()
+        contig_ordinal = None
+        with ExitStack() as stack:
+            source_writer = (
+                stack.enter_context(
+                    pq.ParquetWriter(
+                        normalized_path, normalized_schema, compression="zstd"
+                    )
+                )
+                if normalized_path is not None
+                else None
+            )
+            packed_writer = stack.enter_context(
+                pq.ParquetWriter(packed_path, packed_schema, compression="zstd")
+            )
+            for batch in _iter_row_group_batches(parquet):
+                for field in normalized_schema:
                     if not field.nullable:
                         column = batch.column(batch.schema.get_field_index(field.name))
                         if column.null_count:
                             raise ValueError(f"{source} has null values in {field.name}")
-                normalized = pa.RecordBatch.from_arrays(batch.columns, schema=source_schema)
-                source_writer.write_batch(normalized)
-                packed_writer.write_batch(_pack_batch(normalized, packed_schema))
-        normalized_path.replace(source)
+                contig_index = batch.schema.get_field_index("contig")
+                observed_contigs.update(
+                    pc.unique(batch.column(contig_index)).to_pylist()
+                )
+                if len(observed_contigs) != 1:
+                    raise ValueError(
+                        f"{source} contains contigs: {sorted(observed_contigs)}"
+                    )
+                if contig_ordinal is None:
+                    contig_ordinal = _contig_ordinal(next(iter(observed_contigs)))
+                normalized = pa.RecordBatch.from_arrays(
+                    batch.columns, schema=normalized_schema
+                )
+                if source_writer is not None:
+                    source_writer.write_batch(normalized)
+                packed_writer.write_batch(
+                    _pack_batch(normalized, packed_schema, contig_ordinal)
+                )
+        if len(observed_contigs) != 1:
+            raise ValueError(f"{source} contains contigs: {sorted(observed_contigs)}")
+        if normalized_path is not None:
+            normalized_path.replace(source)
         packed_path.replace(destination)
+        return observed_contigs.pop()
     finally:
-        normalized_path.unlink(missing_ok=True)
+        if normalized_path is not None:
+            normalized_path.unlink(missing_ok=True)
         packed_path.unlink(missing_ok=True)
-
-
-def _stored_contig(source: Path) -> str:
-    contigs = set()
-    parquet = pq.ParquetFile(source)
-    for batch in parquet.iter_batches(columns=["contig"]):
-        contigs.update(batch.column(0).to_pylist())
-    if len(contigs) != 1:
-        raise ValueError(f"{source} contains contigs: {sorted(contigs)}")
-    return contigs.pop()
 
 
 def _parquet_name_with_contig(source: Path, contig: str) -> str:
@@ -333,22 +384,35 @@ def _parquet_name_with_contig(source: Path, contig: str) -> str:
 
 @app.command("pack-loci")
 def pack_loci(path: Path, dest: Path) -> None:
-    """Write a packed copy of a contig-position parquet dataset."""
+    """Normalize a dataset and write a copy with packed loci."""
     path = resolve_path(path)
     dest = resolve_path(dest)
 
     assert path.is_dir()
-    dest.mkdir(exist_ok=True)
-    for parquet in path.rglob("*.parquet"):
-        relative = parquet.relative_to(path)
-        contig = _stored_contig(parquet)
-        packed_name = (
-            parquet.name
-            if f".{contig}." in parquet.name
-            else _parquet_name_with_contig(parquet, contig)
-        )
-        destination = (dest / relative).with_name(packed_name)
-        _pack_parquet(parquet, destination)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    parquets = sorted(path.rglob("*.parquet"))
+    with tempfile.TemporaryDirectory(
+        dir=dest.parent, prefix=f".{dest.name}."
+    ) as temporary:
+        staging = Path(temporary)
+        for parquet in parquets:
+            relative = parquet.relative_to(path)
+            staged = staging / relative
+            contig = _pack_parquet(parquet, staged)
+            packed_name = (
+                parquet.name
+                if f".{contig}." in parquet.name
+                else _parquet_name_with_contig(parquet, contig)
+            )
+            staged.replace(staged.with_name(packed_name))
+
+        if not dest.exists():
+            staging.replace(dest)
+        else:
+            for packed in staging.rglob("*.parquet"):
+                destination = dest / packed.relative_to(staging)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                packed.replace(destination)
 
 
 def parquet_to_vortex(source: Path, destination: Path, compact: bool) -> None:
@@ -365,30 +429,32 @@ def _scale_parquets(path: Path, scale_factor: int) -> None:
         for parquet in path.rglob("*.parquet")
         if re.search(r"\.chr[0-9]{2}(?:\.zstd)?\.parquet$", parquet.name) is None
     ]
+    if scale_factor == 1:
+        return
     for parquet in originals:
-        for offset in range(1, scale_factor):
-            contig = f"chr{22 - offset:02d}"
-            scaled = parquet.with_name(_parquet_name_with_contig(parquet, contig))
-            rewrite_parquet_contig(parquet, scaled, contig)
+        contigs = [f"chr{22 - offset:02d}" for offset in range(1, scale_factor)]
+        _write_scaled_parquets(parquet, contigs)
 
 
 @app.command("scale-parquets")
-def scale_parquets(path: Path, scale_factor: int = 1) -> None:
+def scale_parquets(path: Path, scale_factor: int = 10) -> None:
     """Persist synthetic contigs in an existing parquet dataset."""
+    if scale_factor > 23:
+        raise ValueError(
+            "scale factor cannot exceed 23 because contig naming must stay fixed width"
+        )
     path = resolve_path(path)
     assert path.is_dir()
     _scale_parquets(path, scale_factor)
 
 
 @app.command()
-def convert_parquets(path: Path, dest: Path, compact: bool = False, scale_factor: int = 1) -> None:
+def convert_parquets(path: Path, dest: Path, compact: bool = False) -> None:
     path = resolve_path(path)
     dest = resolve_path(dest)
 
     assert(path.is_dir())
     dest.mkdir(exist_ok=True)
-
-    _scale_parquets(path, scale_factor)
 
     for parquet in path.rglob('*.parquet'):
         tmp = parquet.with_suffix('')
