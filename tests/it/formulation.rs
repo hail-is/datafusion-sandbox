@@ -65,31 +65,27 @@ fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
 
 #[test]
 fn formulations_keep_their_plan_shape_under_a_hostile_session() {
-    for representation in REPRESENTATIONS {
-        let dir = tempfile::tempdir().unwrap();
-        let root = vortex_fixture(dir.path(), representation);
-        let dataset = dataset(&root, InputFormat::VORTEX);
+    let dir = tempfile::tempdir().unwrap();
+    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
+    let dataset = dataset(&root, InputFormat::VORTEX);
 
-        for formulation in FORMULATIONS {
-            let plan = physical_plan(formulation, &dataset);
-            assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
-        }
+    for formulation in FORMULATIONS {
+        let plan = physical_plan(formulation, &dataset);
+        assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
     }
 }
 
 #[test]
 fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
-    for representation in REPRESENTATIONS {
-        let dir = tempfile::tempdir().unwrap();
-        let root = vortex_fixture(dir.path(), representation);
-        let dataset = dataset(&root, InputFormat::VORTEX);
+    let dir = tempfile::tempdir().unwrap();
+    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
+    let dataset = dataset(&root, InputFormat::VORTEX);
 
-        for formulation in FORMULATIONS {
-            let single_target = physical_plan_with_target(formulation, &dataset, 1);
-            let eight_targets = physical_plan_with_target(formulation, &dataset, 8);
-            assert_has_no_sorts(&single_target);
-            assert_has_no_sorts(&eight_targets);
-        }
+    for formulation in FORMULATIONS {
+        let single_target = physical_plan_with_target(formulation, &dataset, 1);
+        let eight_targets = physical_plan_with_target(formulation, &dataset, 8);
+        assert_has_no_sorts(&single_target);
+        assert_has_no_sorts(&eight_targets);
     }
 }
 

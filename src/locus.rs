@@ -35,22 +35,72 @@ impl LocusOrdering {
         other.0.starts_with(&self.0)
     }
 
-    /// Expands this declaration into a stored ordering. The component sequence
-    /// remains private.
-    pub fn expand(&self, representation: LocusRepresentation) -> Vec<SortExpr> {
-        self.0
-            .iter()
-            .flat_map(|component| match component {
-                Component::Locus => match representation {
-                    LocusRepresentation::ContigPosition => vec![
-                        col("contig").sort(true, false),
-                        col("position").sort(true, false),
-                    ],
-                    LocusRepresentation::Packed => vec![col("locus").sort(true, false)],
-                },
-                Component::Alleles => vec![col("alleles").sort(true, false)],
-            })
+    /// Expands this declaration into stored fields under `representation`.
+    pub fn expand(&self, representation: LocusRepresentation) -> StoredOrdering {
+        StoredOrdering {
+            ordering: self.clone(),
+            representation,
+        }
+    }
+}
+
+/// A locus ordering expanded into the fields used by one stored representation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredOrdering {
+    ordering: LocusOrdering,
+    representation: LocusRepresentation,
+}
+
+impl StoredOrdering {
+    /// Sort expressions for every field in this ordering.
+    pub fn sort_expressions(&self) -> Vec<SortExpr> {
+        self.column_names()
+            .into_iter()
+            .map(|name| col(name).sort(true, false))
             .collect()
+    }
+
+    /// Expressions that partition rows by every field in this ordering.
+    pub fn partition_expressions(&self) -> Vec<Expr> {
+        self.column_names().into_iter().map(col).collect()
+    }
+
+    /// Names of every stored field covered by this ordering.
+    pub fn column_names(&self) -> Vec<&'static str> {
+        self.ordering
+            .0
+            .iter()
+            .flat_map(|component| component.column_names(self.representation))
+            .collect()
+    }
+
+    /// The stored prefix that identifies a locus without later components.
+    pub fn locus_prefix(&self) -> Self {
+        let components = self
+            .ordering
+            .0
+            .iter()
+            .take_while(|component| **component == Component::Locus)
+            .cloned()
+            .collect();
+        Self {
+            ordering: LocusOrdering(components),
+            representation: self.representation,
+        }
+    }
+}
+
+impl Component {
+    fn column_names(
+        &self,
+        representation: LocusRepresentation,
+    ) -> impl Iterator<Item = &'static str> {
+        let columns: &'static [&'static str] = match (self, representation) {
+            (Self::Locus, LocusRepresentation::ContigPosition) => &["contig", "position"],
+            (Self::Locus, LocusRepresentation::Packed) => &["locus"],
+            (Self::Alleles, _) => &["alleles"],
+        };
+        columns.iter().copied()
     }
 }
 
@@ -95,22 +145,6 @@ impl LocusRepresentation {
                 "could not detect locus representation: found neither 'locus' nor 'contig'"
                     .to_string(),
             )),
-        }
-    }
-
-    /// Stored locus fields to retain in an output projection.
-    pub fn projection_columns(self) -> &'static [&'static str] {
-        match self {
-            Self::ContigPosition => &["contig", "position"],
-            Self::Packed => &["locus"],
-        }
-    }
-
-    /// Expressions that partition a window by locus.
-    pub fn window_partition(self) -> Vec<Expr> {
-        match self {
-            Self::ContigPosition => vec![col("contig"), col("position")],
-            Self::Packed => vec![col("locus")],
         }
     }
 }

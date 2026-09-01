@@ -4,14 +4,9 @@ mod combine_alleles;
 mod combine_refs_union;
 
 use crate::dataset::{Dataset, DatasetLayout};
-use crate::locus::LocusOrdering;
 
-use datafusion::{
-    error::Result,
-    logical_expr::{LogicalPlan, logical_plan::Union},
-    prelude::*,
-};
-use std::{fmt, sync::Arc};
+use datafusion::{error::Result, prelude::*};
+use std::fmt;
 
 /// A supported way to build one of the combiners.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,10 +25,11 @@ impl fmt::Display for Formulation {
 
 impl Formulation {
     pub fn required_layout(self) -> DatasetLayout {
-        match self {
-            Self::CombineAllelesUnion => combine_alleles::required_layout(),
-            Self::CombineRefsUnion => reference_layout(),
-        }
+        let locus_ordering = match self {
+            Self::CombineAllelesUnion => combine_alleles::required_ordering(),
+            Self::CombineRefsUnion => combine_refs_union::required_ordering(),
+        };
+        DatasetLayout { locus_ordering }
     }
 
     /// Builds this formulation's plan over `dataset`.
@@ -42,19 +38,5 @@ impl Formulation {
             Self::CombineAllelesUnion => combine_alleles::plan(ctx, dataset).await,
             Self::CombineRefsUnion => combine_refs_union::plan(ctx, dataset).await,
         }
-    }
-}
-
-fn reference_layout() -> DatasetLayout {
-    DatasetLayout {
-        locus_ordering: LocusOrdering::locus(),
-    }
-}
-
-fn union_sample_plans(mut plans: Vec<Arc<LogicalPlan>>) -> Result<LogicalPlan> {
-    if plans.len() == 1 {
-        Ok((*plans.pop().expect("a dataset has at least one sample")).clone())
-    } else {
-        Ok(LogicalPlan::Union(Union::try_new(plans)?))
     }
 }

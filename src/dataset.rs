@@ -2,7 +2,7 @@
 
 use crate::{
     format::InputFormat,
-    locus::{LocusOrdering, LocusRepresentation},
+    locus::{LocusOrdering, LocusRepresentation, StoredOrdering},
     sorted_table::{AttachedScalar, SortedTable},
 };
 
@@ -14,7 +14,7 @@ use datafusion::{
         helpers::{describe_partition, list_partitions},
     },
     error::Result,
-    logical_expr::SortExpr,
+    logical_expr::{LogicalPlan, logical_plan::Union},
     prelude::*,
 };
 use futures_util::{StreamExt, TryStreamExt};
@@ -31,16 +31,12 @@ impl DatasetLayout {
         &self,
         representation: LocusRepresentation,
         schema: &SchemaRef,
-    ) -> Result<Vec<SortExpr>> {
+    ) -> Result<StoredOrdering> {
         let stored_ordering = self.locus_ordering.expand(representation);
-        for column in stored_ordering
-            .iter()
-            .flat_map(|ordering| ordering.expr.column_refs())
-        {
-            if schema.field_with_name(&column.name).is_err() {
+        for column in stored_ordering.column_names() {
+            if schema.field_with_name(column).is_err() {
                 return Err(DataFusionError::Plan(format!(
-                    "locus ordering column '{}' is missing from the dataset schema",
-                    column.name
+                    "locus ordering column '{column}' is missing from the dataset schema"
                 )));
             }
         }
@@ -54,7 +50,6 @@ pub struct Dataset {
     table_path: ListingTableUrl,
     input_format: InputFormat,
     layout: DatasetLayout,
-    stored_ordering: Vec<SortExpr>,
     schema: SchemaRef,
     sample_set: Vec<String>,
     locus_representation: LocusRepresentation,
@@ -77,13 +72,12 @@ impl Dataset {
             )));
         }
         let locus_representation = LocusRepresentation::detect(&schema)?;
-        let stored_ordering = layout.stored_ordering(locus_representation, &schema)?;
+        layout.stored_ordering(locus_representation, &schema)?;
 
         Ok(Self {
             table_path,
             input_format,
             layout,
-            stored_ordering,
             schema,
             sample_set,
             locus_representation,
@@ -155,18 +149,32 @@ impl Dataset {
         &self.schema
     }
 
-    pub fn locus_representation(&self) -> LocusRepresentation {
-        self.locus_representation
-    }
-
     /// Expands the required query ordering after checking it against the layout.
-    pub fn query_ordering(&self, required: &LocusOrdering) -> Result<Vec<SortExpr>> {
+    pub fn query_ordering(&self, required: &LocusOrdering) -> Result<StoredOrdering> {
         self.check_ordering(required)?;
         Ok(required.expand(self.locus_representation))
     }
 
+    /// Reads the dataset's whole sample set into one frame.
+    ///
+    /// The formulation chooses the scan shape. If another shape is added, it should
+    /// become an argument here rather than a branch owned by the dataset.
+    pub async fn read(&self, ctx: &SessionContext) -> Result<DataFrame> {
+        let mut plans = Vec::with_capacity(self.sample_set.len());
+        for sample in &self.sample_set {
+            let frame = self.read_sample(ctx, sample).await?;
+            plans.push(Arc::new(frame.into_unoptimized_plan()));
+        }
+        let plan = if plans.len() == 1 {
+            (*plans.pop().expect("a dataset has at least one sample")).clone()
+        } else {
+            LogicalPlan::Union(Union::try_new(plans)?)
+        };
+        Ok(DataFrame::new(ctx.state(), plan))
+    }
+
     /// Reads one sample directory as a sorted table and attaches its sample id.
-    pub async fn read_sample(&self, ctx: &SessionContext, sample: &str) -> Result<DataFrame> {
+    async fn read_sample(&self, ctx: &SessionContext, sample: &str) -> Result<DataFrame> {
         let sample_path =
             ListingTableUrl::parse(format!("{}s={sample}/", self.table_path.as_str()))?;
         let state = ctx.state();
@@ -184,7 +192,9 @@ impl Dataset {
             format,
             files,
             Arc::clone(&self.schema),
-            self.stored_ordering.clone(),
+            self.layout
+                .stored_ordering(self.locus_representation, &self.schema)?
+                .sort_expressions(),
             Some(AttachedScalar {
                 field: Arc::new(Field::new("s", DataType::Utf8, false)),
                 value: ScalarValue::Utf8(Some(sample.to_string())),
@@ -194,7 +204,7 @@ impl Dataset {
     }
 
     /// Checks that the dataset's locus ordering starts with the required ordering.
-    pub fn check_ordering(&self, required: &LocusOrdering) -> Result<()> {
+    fn check_ordering(&self, required: &LocusOrdering) -> Result<()> {
         if required.is_prefix_of(&self.layout.locus_ordering) {
             return Ok(());
         }

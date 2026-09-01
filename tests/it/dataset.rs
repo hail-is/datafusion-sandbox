@@ -10,6 +10,7 @@ use datafusion::{
     datasource::listing::ListingTableUrl,
     error::Result,
     execution::object_store::ObjectStoreUrl,
+    physical_plan::{ExecutionPlan, ExecutionPlanProperties, union::UnionExec},
     prelude::SessionContext,
 };
 use datafusion_sandbox::{
@@ -36,11 +37,10 @@ fn reads_one_sample_with_its_sample_id_attached() {
             None,
         )
         .await
+        .unwrap()
+        .restrict_to(&["sample-b".to_string()])
         .unwrap();
-        let df = dataset
-            .read_sample(&SessionContext::new(), "sample-b")
-            .await
-            .unwrap();
+        let df = dataset.read(&SessionContext::new()).await.unwrap();
 
         assert!(df.schema().has_column_with_unqualified_name("s"));
         assert!(df.schema().has_column_with_unqualified_name("contig"));
@@ -56,6 +56,42 @@ fn reads_one_sample_with_its_sample_id_attached() {
                 .unwrap();
             assert!((0..batch.num_rows()).all(|row| sample_ids.value(row) == "sample-b"));
         }
+    });
+}
+
+#[test]
+fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fixture::write_sample_tables(dir.path(), &["sample-a", "sample-b"]);
+
+    block_on(async {
+        let ctx = SessionContext::new();
+        let dataset = Dataset::discover(
+            &ctx,
+            ListingTableUrl::parse(&root).unwrap(),
+            InputFormat::VORTEX,
+            allele_layout(),
+            None,
+        )
+        .await
+        .unwrap();
+        let plan = dataset
+            .read(&ctx)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let unions = nodes_of::<UnionExec>(&plan);
+
+        assert_eq!(unions.len(), 1);
+        assert_eq!(unions[0].children().len(), 2);
+        assert!(
+            unions[0]
+                .children()
+                .iter()
+                .all(|input| input.output_partitioning().partition_count() == 1)
+        );
     });
 }
 
@@ -272,6 +308,17 @@ fn allele_layout() -> DatasetLayout {
     DatasetLayout {
         locus_ordering: LocusOrdering::locus_then_alleles(),
     }
+}
+
+fn nodes_of<T: ExecutionPlan>(plan: &Arc<dyn ExecutionPlan>) -> Vec<Arc<dyn ExecutionPlan>> {
+    let mut found = Vec::new();
+    if plan.downcast_ref::<T>().is_some() {
+        found.push(Arc::clone(plan));
+    }
+    for child in plan.children() {
+        found.extend(nodes_of::<T>(child));
+    }
+    found
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {

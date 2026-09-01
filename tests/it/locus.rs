@@ -24,7 +24,9 @@ fn rejects_an_insufficient_locus_ordering_prefix() {
 #[test]
 fn expands_a_contig_position_locus_ordering() {
     assert_eq!(
-        LocusOrdering::locus().expand(LocusRepresentation::ContigPosition),
+        LocusOrdering::locus()
+            .expand(LocusRepresentation::ContigPosition)
+            .sort_expressions(),
         vec![
             col("contig").sort(true, false),
             col("position").sort(true, false),
@@ -35,12 +37,46 @@ fn expands_a_contig_position_locus_ordering() {
 #[test]
 fn expands_a_packed_locus_then_alleles_ordering() {
     assert_eq!(
-        LocusOrdering::locus_then_alleles().expand(LocusRepresentation::Packed),
+        LocusOrdering::locus_then_alleles()
+            .expand(LocusRepresentation::Packed)
+            .sort_expressions(),
         vec![
             col("locus").sort(true, false),
             col("alleles").sort(true, false),
         ]
     );
+}
+
+#[test]
+fn contig_position_stored_ordering_exposes_its_columns_and_locus_prefix() {
+    let ordering = LocusOrdering::locus_then_alleles().expand(LocusRepresentation::ContigPosition);
+
+    assert_eq!(ordering.column_names(), ["contig", "position", "alleles"]);
+    let locus_prefix = ordering.locus_prefix();
+    assert_eq!(
+        locus_prefix.sort_expressions(),
+        vec![
+            col("contig").sort(true, false),
+            col("position").sort(true, false),
+        ]
+    );
+    assert_eq!(
+        locus_prefix.partition_expressions(),
+        vec![col("contig"), col("position")]
+    );
+}
+
+#[test]
+fn packed_stored_ordering_exposes_its_columns_and_locus_prefix() {
+    let ordering = LocusOrdering::locus_then_alleles().expand(LocusRepresentation::Packed);
+
+    assert_eq!(ordering.column_names(), ["locus", "alleles"]);
+    let locus_prefix = ordering.locus_prefix();
+    assert_eq!(
+        locus_prefix.sort_expressions(),
+        vec![col("locus").sort(true, false)]
+    );
+    assert_eq!(locus_prefix.partition_expressions(), vec![col("locus")]);
 }
 
 #[test]
