@@ -1,7 +1,8 @@
-use datafusion::prelude::SessionContext;
+use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 use datafusion_sandbox::{format::OutputFormat, synthetic::make_range_table};
+use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 #[test]
 fn parquet_writes_rows_and_returns_their_count() {
@@ -14,18 +15,32 @@ fn vortex_writes_rows_and_returns_their_count() {
 }
 
 fn assert_writes_rows(format: OutputFormat, extension: &str) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(format!("rows.{extension}"));
-    let path = path.to_str().unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let object_path = Path::from(format!("rows.{extension}"));
 
-    let rows_written = block_on(async {
+    let (rows_written, metadata, bytes) = block_on(async {
         let ctx = SessionContext::new();
+        let store_url = ObjectStoreUrl::parse("memory://out").unwrap();
+        ctx.register_object_store(store_url.as_ref(), Arc::clone(&store));
         let df = make_range_table(&ctx, 1000, 128).unwrap();
-        format.write(df, path).await.unwrap()
+        let rows_written = format
+            .write(df, &format!("memory://out/rows.{extension}"))
+            .await
+            .unwrap();
+        let metadata = store.head(&object_path).await.unwrap();
+        let bytes = store
+            .get(&object_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        (rows_written, metadata, bytes)
     });
 
     assert_eq!(rows_written, 1000);
-    assert!(std::path::Path::new(path).exists());
+    assert!(metadata.size > 0);
+    assert_eq!(bytes.len() as u64, metadata.size);
 }
 
 #[test]
