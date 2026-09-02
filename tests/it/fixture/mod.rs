@@ -113,7 +113,7 @@ fn write_sample_tables_with_representation(
     let pipeline_root = root.clone();
     let sample_set = sample_set
         .iter()
-        .map(|sample| sample.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
     pipeline::run(
         move |ctx: SessionContext| async move {

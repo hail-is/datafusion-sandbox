@@ -276,7 +276,7 @@ fn dataset_from_data(sample_set: &[&str]) -> Dataset {
         InputFormat::VORTEX,
         allele_layout(),
         contig_position_schema(true),
-        sample_set.iter().map(|sample| sample.to_string()).collect(),
+        sample_set.iter().map(ToString::to_string).collect(),
     )
     .unwrap()
 }

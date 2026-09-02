@@ -43,6 +43,11 @@ pub struct CombinerRun {
 
 impl CombinerRun {
     /// Executes the run to completion on its own runtimes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input dataset cannot be resolved, the formulation cannot be
+    /// planned or executed, or the requested output cannot be written.
     pub fn execute(self) -> Result<Outcome> {
         let Self {
             formulation,
@@ -107,8 +112,8 @@ impl fmt::Display for Outcome {
         match self {
             Self::RowsWritten(count) => write!(formatter, "{count}"),
             Self::Batches(batches) => {
-                let formatted = pretty_format_batches(batches).map_err(|_| fmt::Error)?;
-                write!(formatter, "{formatted}")
+                let table = pretty_format_batches(batches).map_err(|_| fmt::Error)?;
+                write!(formatter, "{table}")
             }
             Self::Plan(plan) => formatter.write_str(plan),
         }
@@ -174,7 +179,7 @@ mod tests {
             output_format: OutputFormat::VORTEX,
         };
         let options = options_for("data/samples", &action, 1);
-        assert!(options.object_stores.is_empty());
+        assert_eq!(options.object_stores, Vec::<String>::new());
     }
 
     #[test]

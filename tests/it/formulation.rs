@@ -89,7 +89,7 @@ fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
     }
 }
 
-/// DataFusion's parquet reader preserves the declared locus ordering through
+/// `DataFusion`'s parquet reader preserves the declared locus ordering through
 /// the reference combiner's union, so the requested ordering needs a merge but
 /// no re-sort.
 #[test]
@@ -120,7 +120,7 @@ fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting(
     }
 }
 
-/// DataFusion's parquet reader preserves the declared locus ordering through the
+/// `DataFusion`'s parquet reader preserves the declared locus ordering through the
 /// allele combiner's union, and its de-duplication and ranking don't reintroduce
 /// a sort.
 #[test]
@@ -157,7 +157,7 @@ fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
     let root = fixture::write_sample_tables(dir.path(), SAMPLES);
     let requested = SAMPLES[..2]
         .iter()
-        .map(|sample| sample.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
     let dataset = dataset(&root, InputFormat::VORTEX)
         .restrict_to(&requested)

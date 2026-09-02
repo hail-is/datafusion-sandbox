@@ -3,7 +3,7 @@ use crate::locus::LocusOrdering;
 
 use datafusion::{error::Result, functions_window::rank::rank, prelude::*};
 
-pub(crate) fn required_ordering() -> LocusOrdering {
+pub fn required_ordering() -> LocusOrdering {
     LocusOrdering::locus_then_alleles()
 }
 

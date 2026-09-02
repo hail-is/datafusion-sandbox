@@ -1,4 +1,4 @@
-//! Prototypes and benchmarks for comparing DataFusion formulations of Hail-style genomics pipelines.
+//! Prototypes and benchmarks for comparing `DataFusion` formulations of Hail-style genomics pipelines.
 //!
 //! - [`combiner_run`] resolves and executes one combiner run.
 //! - [`cpu_runtime`] builds the runtime used for plan execution.

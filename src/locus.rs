@@ -21,21 +21,25 @@ pub struct LocusOrdering(Vec<Component>);
 
 impl LocusOrdering {
     /// Orders rows by locus.
+    #[must_use]
     pub fn locus() -> Self {
         Self(vec![Component::Locus])
     }
 
     /// Orders rows by locus, then alleles.
+    #[must_use]
     pub fn locus_then_alleles() -> Self {
         Self(vec![Component::Locus, Component::Alleles])
     }
 
     /// Whether this ordering is a prefix of `other`.
+    #[must_use]
     pub fn is_prefix_of(&self, other: &Self) -> bool {
         other.0.starts_with(&self.0)
     }
 
     /// Expands this declaration into stored fields under `representation`.
+    #[must_use]
     pub fn expand(&self, representation: LocusRepresentation) -> StoredOrdering {
         StoredOrdering {
             ordering: self.clone(),
@@ -53,6 +57,7 @@ pub struct StoredOrdering {
 
 impl StoredOrdering {
     /// Sort expressions for every field in this ordering.
+    #[must_use]
     pub fn sort_expressions(&self) -> Vec<SortExpr> {
         self.column_names()
             .into_iter()
@@ -61,11 +66,13 @@ impl StoredOrdering {
     }
 
     /// Expressions that partition rows by every field in this ordering.
+    #[must_use]
     pub fn partition_expressions(&self) -> Vec<Expr> {
         self.column_names().into_iter().map(col).collect()
     }
 
     /// Names of every stored field covered by this ordering.
+    #[must_use]
     pub fn column_names(&self) -> Vec<&'static str> {
         self.ordering
             .0
@@ -75,6 +82,7 @@ impl StoredOrdering {
     }
 
     /// The stored prefix that identifies a locus without later components.
+    #[must_use]
     pub fn locus_prefix(&self) -> Self {
         let components = self
             .ordering
@@ -115,6 +123,11 @@ pub enum LocusRepresentation {
 
 impl LocusRepresentation {
     /// Detects the representation from the mutually exclusive stored fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the schema does not contain exactly one supported locus
+    /// representation or if its required fields have invalid types.
     pub fn detect(schema: &SchemaRef) -> Result<Self> {
         let has_locus = schema.field_with_name("locus").is_ok();
         let has_contig = schema.field_with_name("contig").is_ok();

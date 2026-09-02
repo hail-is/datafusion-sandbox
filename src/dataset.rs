@@ -57,6 +57,11 @@ pub struct Dataset {
 
 impl Dataset {
     /// Constructs a dataset from already resolved schema and sample-set data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table path cannot be normalized, the sample set is empty, the
+    /// locus representation cannot be detected, or the schema lacks an ordering column.
     pub fn new(
         table_path: ListingTableUrl,
         input_format: InputFormat,
@@ -86,6 +91,11 @@ impl Dataset {
 
     /// Discovers the sample directories immediately below `table_path` with one
     /// object-store listing request, and resolves the dataset schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the object store cannot be read, the dataset has no samples or input
+    /// files, schema inference fails, or the resolved dataset is invalid.
     pub async fn discover(
         ctx: &SessionContext,
         table_path: ListingTableUrl,
@@ -115,41 +125,46 @@ impl Dataset {
                 <ListingTableUrl as AsRef<str>>::as_ref(&table_path)
             )));
         }
-        let schema = match schema {
-            Some(schema) => schema,
-            None => {
-                let format = input_format.read_format();
-                let extension = format.get_ext();
-                let mut files = table_path
-                    .list_all_files(&state, store.as_ref(), &extension)
-                    .await?;
-                let input_file = loop {
-                    match files.next().await.transpose()? {
-                        Some(file) if file.size > 0 => break file,
-                        Some(_) => continue,
-                        None => {
-                            return Err(DataFusionError::Plan(format!(
-                                "no input files found in dataset '{}'",
-                                table_path.as_str()
-                            )));
-                        }
+        let schema = if let Some(schema) = schema {
+            schema
+        } else {
+            let format = input_format.read_format();
+            let extension = format.get_ext();
+            let mut files = table_path
+                .list_all_files(&state, store.as_ref(), &extension)
+                .await?;
+            let input_file = loop {
+                match files.next().await.transpose()? {
+                    Some(file) if file.size > 0 => break file,
+                    Some(_) => {}
+                    None => {
+                        return Err(DataFusionError::Plan(format!(
+                            "no input files found in dataset '{}'",
+                            table_path.as_str()
+                        )));
                     }
-                };
-                format.infer_schema(&state, &store, &[input_file]).await?
-            }
+                }
+            };
+            format.infer_schema(&state, &store, &[input_file]).await?
         };
         Self::new(table_path, input_format, layout, schema, sample_set)
     }
 
+    #[must_use]
     pub fn sample_set(&self) -> &[String] {
         &self.sample_set
     }
 
-    pub fn schema(&self) -> &SchemaRef {
+    #[must_use]
+    pub const fn schema(&self) -> &SchemaRef {
         &self.schema
     }
 
     /// Expands the required query ordering after checking it against the layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the dataset's stored ordering does not start with `required`.
     pub fn query_ordering(&self, required: &LocusOrdering) -> Result<StoredOrdering> {
         self.check_ordering(required)?;
         Ok(required.expand(self.locus_representation))
@@ -159,6 +174,10 @@ impl Dataset {
     ///
     /// The formulation chooses the scan shape. If another shape is added, it should
     /// become an argument here rather than a branch owned by the dataset.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a sample cannot be read or the sample plans cannot be combined.
     pub async fn read(&self, ctx: &SessionContext) -> Result<DataFrame> {
         let mut plans = Vec::with_capacity(self.sample_set.len());
         for sample in &self.sample_set {
@@ -222,6 +241,10 @@ impl Dataset {
 
     /// Restricts this dataset to a nonempty requested sample set, rejecting ids
     /// that are not present rather than silently intersecting the two sets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `requested_sample_set` is empty or contains an unknown sample.
     pub fn restrict_to(mut self, requested_sample_set: &[String]) -> Result<Self> {
         if requested_sample_set.is_empty() {
             return Err(DataFusionError::Plan(

@@ -5,7 +5,10 @@ use datafusion::{
     error::Result,
     parquet::{
         basic::Compression,
-        file::reader::{FileReader, SerializedFileReader},
+        file::{
+            metadata::RowGroupMetaData,
+            reader::{FileReader, SerializedFileReader},
+        },
     },
 };
 use datafusion_sandbox::{
@@ -81,7 +84,7 @@ fn writes_uncompressed_parquet() {
             .metadata()
             .row_groups()
             .iter()
-            .flat_map(|row_group| row_group.columns())
+            .flat_map(RowGroupMetaData::columns)
             .all(|column| column.compression() == Compression::UNCOMPRESSED)
     );
 }
@@ -252,12 +255,7 @@ fn restricts_the_dataset_to_the_requested_sample_set() {
             output_path: output_path.to_str().unwrap().to_string(),
             output_format: OutputFormat::VORTEX,
         },
-        Some(
-            SAMPLES[..2]
-                .iter()
-                .map(|sample| sample.to_string())
-                .collect(),
-        ),
+        Some(SAMPLES[..2].iter().map(ToString::to_string).collect()),
         None,
     )
     .unwrap();

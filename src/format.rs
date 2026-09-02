@@ -51,6 +51,10 @@ impl OutputFormat {
     pub const VORTEX: Self = Self(OutputRepr::Vortex { compact: None });
 
     /// Applies `compression`, failing when this format does not accept it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `compression` is invalid for this output format.
     pub fn with_compression(mut self, compression: &str) -> Result<Self> {
         match &mut self.0 {
             OutputRepr::Parquet {
@@ -77,7 +81,8 @@ impl OutputFormat {
         Ok(self)
     }
 
-    pub fn extension(&self) -> &'static str {
+    #[must_use]
+    pub const fn extension(&self) -> &'static str {
         match self.0 {
             OutputRepr::Parquet { .. } => "parquet",
             OutputRepr::Vortex { .. } => "vortex",
@@ -85,6 +90,11 @@ impl OutputFormat {
     }
 
     /// Writes all rows in `df` to `path`, returning the number of rows written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the copy plan cannot be built or executed, or if the execution result
+    /// does not contain the expected row count.
     pub async fn write(&self, df: DataFrame, path: &str) -> Result<u64> {
         let file_type = format_as_file_type(self.output_factory());
         let (session_state, plan) = df.into_parts();

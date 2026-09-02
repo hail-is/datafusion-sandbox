@@ -6,15 +6,15 @@ use std::{future::Future, sync::Arc};
 
 #[test]
 fn parquet_writes_rows_and_returns_their_count() {
-    assert_writes_rows(OutputFormat::PARQUET, "parquet");
+    assert_writes_rows(&OutputFormat::PARQUET, "parquet");
 }
 
 #[test]
 fn vortex_writes_rows_and_returns_their_count() {
-    assert_writes_rows(OutputFormat::VORTEX, "vortex");
+    assert_writes_rows(&OutputFormat::VORTEX, "vortex");
 }
 
-fn assert_writes_rows(format: OutputFormat, extension: &str) {
+fn assert_writes_rows(format: &OutputFormat, extension: &str) {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let object_path = Path::from(format!("rows.{extension}"));
 

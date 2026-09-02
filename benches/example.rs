@@ -35,7 +35,7 @@ fn session_context() -> SessionContext {
 }
 
 const BATCH_SIZES: &[u32] = &[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
-const N_ROWS: u32 = 2 ^ 18;
+const N_ROWS: u32 = 2_u32.pow(18);
 
 fn run_benchmark<F, Fut>(bencher: Bencher, plan_builder: F)
 where
