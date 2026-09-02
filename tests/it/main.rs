@@ -4,7 +4,10 @@
 //! directly under `tests/` becomes a separate test target.
 
 #![cfg(test)]
-#![allow(clippy::as_conversions)]
+#![expect(
+    clippy::as_conversions,
+    reason = "test fixtures cast values whose ranges are controlled by the test"
+)]
 
 mod cli;
 mod combiner_run;

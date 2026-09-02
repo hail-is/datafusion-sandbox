@@ -240,7 +240,7 @@ fn main() -> Result<()> {
         threads,
     }
     .execute()?;
-    println!("{outcome}");
+    println!("{}", outcome.render()?);
     Ok(())
 }
 
@@ -271,6 +271,6 @@ mod tests {
         let err = parse_thread_count("0").unwrap_err();
         assert!(err.contains("at least 1"), "got: {err}");
 
-        assert!(parse_thread_count("banana").is_err());
+        parse_thread_count("banana").expect_err("non-numeric thread counts must be rejected");
     }
 }

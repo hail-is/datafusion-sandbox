@@ -27,9 +27,9 @@ struct IntRangeStream {
 
 impl IntRangeStream {
     fn new(schema: SchemaRef, start: i32, end: i32, batch_size: u32) -> Result<Self> {
-        let batch_size = i32::try_from(batch_size).map_err(|_| {
+        let batch_size = i32::try_from(batch_size).map_err(|error| {
             DataFusionError::Plan(format!(
-                "range table batch size {batch_size} exceeds the maximum supported value {}",
+                "range table batch size {batch_size} exceeds the maximum supported value {}: {error}",
                 i32::MAX
             ))
         })?;
@@ -58,7 +58,10 @@ impl PartitionStream for IntRangeStream {
         &self.schema
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "the constructor proves the batch arithmetic cannot overflow"
+    )]
     fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
         let schema = Arc::clone(&self.schema);
         let end = self.end;
@@ -120,9 +123,9 @@ pub fn make_range_table_source(start: i32, end: i32, batch_size: u32) -> Result<
 /// Returns an error if `n_rows` or `batch_size` is unsupported or `DataFusion` cannot read the
 /// generated table.
 pub fn make_range_table(ctx: &SessionContext, n_rows: u32, batch_size: u32) -> Result<DataFrame> {
-    let end = i32::try_from(n_rows).map_err(|_| {
+    let end = i32::try_from(n_rows).map_err(|error| {
         DataFusionError::Plan(format!(
-            "range table row count {n_rows} exceeds the maximum supported value {}",
+            "range table row count {n_rows} exceeds the maximum supported value {}: {error}",
             i32::MAX
         ))
     })?;
@@ -135,8 +138,10 @@ pub fn make_range_table(ctx: &SessionContext, n_rows: u32, batch_size: u32) -> R
 /// # Errors
 ///
 /// Returns an error if the range table or aggregate plan cannot be built.
-// DataFusion overloads division to build an expression; it performs no arithmetic here.
-#[allow(clippy::arithmetic_side_effects)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "DataFusion overloads division to construct an expression without evaluating arithmetic"
+)]
 pub fn make_table_group_by_aggregate_sorted(
     ctx: &SessionContext,
     batch_size: u32,

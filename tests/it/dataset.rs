@@ -175,7 +175,10 @@ fn infers_the_schema_from_one_input_file() {
         .await
         .expect("incompatible schemas in later files must not be merged");
 
-        assert!(dataset.schema().field_with_name("position").is_ok());
+        dataset
+            .schema()
+            .field_with_name("position")
+            .expect("the discovered schema must contain the position field");
     });
 }
 
