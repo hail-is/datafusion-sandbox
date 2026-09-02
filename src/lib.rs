@@ -12,6 +12,15 @@
 //!
 //! See the [project glossary](../CONTEXT.md) for domain vocabulary.
 
+/// The allocator every binary built from this crate uses, when the `snmalloc` feature is on.
+///
+/// It lives here rather than in `main.rs` so that the benchmarks and the integration tests, each
+/// its own binary linking this library, allocate the same way the CLI does. Building this feature
+/// takes `cmake` and a `CXXFLAGS` that matches the `-Ctarget-cpu` in `RUSTFLAGS`; see the README.
+#[cfg(feature = "snmalloc")]
+#[global_allocator]
+static ALLOCATOR: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
 pub mod combiner_run;
 pub mod cpu_runtime;
 pub mod dataset;
