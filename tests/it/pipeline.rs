@@ -150,9 +150,9 @@ fn default_thread_count_is_available_parallelism() {
     );
 }
 
-/// A one-thread pipeline still executes on a multi-thread runtime, because DataFusion's
+/// A one-thread pipeline still executes on a multi-thread runtime, because `DataFusion`'s
 /// `spawn_buffered` only buffers when it finds `RuntimeFlavor::MultiThread`. See
-/// docs/adr/0001-always-use-multi-thread-tokio-runtimes.md.
+/// `docs/adr/0001-always-use-multi-thread-tokio-runtimes.md`.
 #[test]
 fn one_thread_still_executes_on_a_multi_thread_runtime() {
     let flavor = pipeline::run(

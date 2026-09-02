@@ -67,21 +67,20 @@ impl SortedTable {
     async fn files_with_statistics(&self, state: &dyn Session) -> Result<Vec<PartitionedFile>> {
         let mut files = Vec::with_capacity(self.files.len());
         for mut file in self.files.clone() {
-            let statistics = match file.statistics.take() {
-                Some(statistics) => statistics,
-                None => {
-                    let store = state.runtime_env().object_store(&self.object_store_url)?;
-                    Arc::new(
-                        self.format
-                            .infer_stats(
-                                state,
-                                &store,
-                                Arc::clone(&self.file_schema),
-                                &file.object_meta,
-                            )
-                            .await?,
-                    )
-                }
+            let statistics = if let Some(statistics) = file.statistics.take() {
+                statistics
+            } else {
+                let store = state.runtime_env().object_store(&self.object_store_url)?;
+                Arc::new(
+                    self.format
+                        .infer_stats(
+                            state,
+                            &store,
+                            Arc::clone(&self.file_schema),
+                            &file.object_meta,
+                        )
+                        .await?,
+                )
             };
             file.partition_values = self
                 .attached_scalar

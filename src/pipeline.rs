@@ -12,28 +12,29 @@ use datafusion::{
 };
 use tokio::runtime::Handle;
 
-use std::{future::Future, sync::Arc, thread::available_parallelism};
+use std::{future::Future, num::NonZeroUsize, sync::Arc, thread::available_parallelism};
 
 /// Everything the runner needs besides the pipeline closure itself.
 pub struct PipelineOptions {
     /// Number of worker threads for each runtime. Independent of the session's target-partition
     /// setting.
     pub threads: usize,
-    /// Base URLs of the object stores to register on the session, e.g.
-    /// "gs://my-bucket". Only gs:// URLs are supported.
+    /// Base URLs of the object stores to register on the session, such as
+    /// `gs://my-bucket`. Only `gs://` URLs are supported.
     pub object_stores: Vec<String>,
 }
 
 impl Default for PipelineOptions {
     fn default() -> Self {
         Self {
-            threads: available_parallelism().map(|n| n.get()).unwrap_or(1),
+            threads: available_parallelism().map_or(1, NonZeroUsize::get),
             object_stores: Vec::new(),
         }
     }
 }
 
-/// The shared DataFusion configuration used by every pipeline.
+/// The shared `DataFusion` configuration used by every pipeline.
+#[must_use]
 pub fn session_config() -> SessionConfig {
     let mut config = SessionConfig::new();
     config.options_mut().optimizer.prefer_existing_sort = true;
@@ -46,8 +47,13 @@ pub fn session_config() -> SessionConfig {
 /// CPU runtime the plan executes on, so that IO and CPU-bound work don't
 /// contend for the same threads.
 ///
-/// Every DataFusion plan in this crate runs through here, test fixtures
-/// included. See docs/adr/0006-run-every-plan-through-the-pipeline-runner.md.
+/// Every `DataFusion` plan in this crate runs through here, test fixtures
+/// included. See `docs/adr/0006-run-every-plan-through-the-pipeline-runner.md`.
+///
+/// # Errors
+///
+/// Returns an error if a runtime or object store cannot be created, the pipeline fails, or its
+/// task cannot be joined.
 pub fn run<T, Fut>(
     pipeline: impl FnOnce(SessionContext) -> Fut + Send + 'static,
     options: PipelineOptions,
@@ -56,17 +62,22 @@ where
     T: Send + 'static,
     Fut: Future<Output = Result<T>> + Send + 'static,
 {
+    let PipelineOptions {
+        threads,
+        object_stores,
+    } = options;
+
     // Multi-thread even at one worker: TLS and HTTP framing for every object store request runs
     // here, so throughput has to scale with the thread count. See
     // docs/adr/0001-always-use-multi-thread-tokio-runtimes.md.
     let io_runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(options.threads)
+        .worker_threads(threads)
         .enable_all()
         .build()?;
-    let cpu_runtime = CpuRuntime::try_new(options.threads)?;
+    let cpu_runtime = CpuRuntime::try_new(threads)?;
 
     let ctx = SessionContext::new_with_config(session_config());
-    for base_url in &options.object_stores {
+    for base_url in &object_stores {
         register_object_store(&ctx, base_url, io_runtime.handle())?;
     }
 

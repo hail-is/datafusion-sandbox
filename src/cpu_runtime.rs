@@ -18,7 +18,7 @@ use tokio::sync::Notify;
 ///
 /// # Credits
 /// This code is derived from code originally written for [InfluxDB 3.0],
-/// by way of https://github.com/apache/datafusion/blob/main/datafusion-examples/examples/query_planning/thread_pools.rs
+/// by way of <https://github.com/apache/datafusion/blob/main/datafusion-examples/examples/query_planning/thread_pools.rs>
 ///
 /// [InfluxDB 3.0]: https://github.com/influxdata/influxdb3_core/tree/6fcbb004232738d55655f32f4ad2385523d10696/executor
 pub struct CpuRuntime {
@@ -48,7 +48,11 @@ impl Drop for CpuRuntime {
 }
 
 impl CpuRuntime {
-    /// Create a new Tokio Runtime for CPU bound tasks, with `worker_threads` worker threads.
+    /// Creates a new Tokio runtime for CPU-bound tasks with `worker_threads` worker threads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Tokio cannot build the runtime.
     pub fn try_new(worker_threads: usize) -> Result<Self> {
         // Multi-thread even at one worker: DataFusion's `spawn_buffered` keys off the runtime
         // flavor, not the thread count. See
@@ -87,7 +91,8 @@ impl CpuRuntime {
     /// ```text
     /// A Tokio 1.x context was found, but IO is disabled.
     /// ```
-    pub fn handle(&self) -> &Handle {
+    #[must_use]
+    pub const fn handle(&self) -> &Handle {
         &self.handle
     }
 }

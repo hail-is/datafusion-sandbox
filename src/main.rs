@@ -4,7 +4,7 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion_sandbox::combiner_run::{Action, CombinerRun};
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::formulation::Formulation;
-use std::{path::Path, thread::available_parallelism};
+use std::{num::NonZeroUsize, path::Path, thread::available_parallelism};
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
 
@@ -54,7 +54,7 @@ enum CombineRefsFormulationArg {
 }
 
 impl CombineRefsFormulationArg {
-    fn formulation(self) -> Formulation {
+    const fn formulation(self) -> Formulation {
         match self {
             Self::Union => Formulation::CombineRefsUnion,
         }
@@ -70,8 +70,8 @@ struct CombinerArgs {
     action: ActionArgs,
     /// Compression to use when writing.
     ///
-    /// Parquet accepts uncompressed, snappy, gzip(LEVEL), brotli(LEVEL), lz4, zstd(LEVEL), or lz4_raw.
-    /// Vortex accepts standard or compact.
+    /// Parquet accepts `uncompressed`, `snappy`, `gzip(LEVEL)`, `brotli(LEVEL)`, `lz4`,
+    /// `zstd(LEVEL)`, or `lz4_raw`. Vortex accepts `standard` or `compact`.
     #[arg(
         long,
         value_name = "COMPRESSION",
@@ -111,14 +111,14 @@ enum InputFormatArg {
 }
 
 impl InputFormatArg {
-    fn format(self) -> InputFormat {
+    const fn format(self) -> InputFormat {
         match self {
             Self::Parquet => InputFormat::PARQUET,
             Self::Vortex => InputFormat::VORTEX,
         }
     }
 
-    fn default_output_format(self) -> OutputFormatArg {
+    const fn default_output_format(self) -> OutputFormatArg {
         match self {
             Self::Parquet => OutputFormatArg::Parquet,
             Self::Vortex => OutputFormatArg::Vortex,
@@ -133,7 +133,7 @@ enum OutputFormatArg {
 }
 
 impl OutputFormatArg {
-    fn format(self) -> OutputFormat {
+    const fn format(self) -> OutputFormat {
         match self {
             Self::Parquet => OutputFormat::PARQUET,
             Self::Vortex => OutputFormat::VORTEX,
@@ -228,7 +228,7 @@ fn main() -> Result<()> {
         CliAction::ExplainAnalyze => Action::ExplainAnalyze,
     };
     let sample_set = (!sample_set.is_empty()).then_some(sample_set);
-    let threads = threads.unwrap_or_else(|| available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let threads = threads.unwrap_or_else(|| available_parallelism().map_or(1, NonZeroUsize::get));
     println!("formulation: {formulation}");
     let outcome = CombinerRun {
         formulation,
@@ -253,8 +253,7 @@ fn validate_output_extension(output_path: &str, output_format: &OutputFormat) ->
     };
     if extension != output_format.extension() {
         return Err(datafusion::error::DataFusionError::Configuration(format!(
-            "output path '{output_path}' has extension '.{extension}', which contradicts output format '{}'",
-            output_format
+            "output path '{output_path}' has extension '.{extension}', which contradicts output format '{output_format}'"
         )));
     }
     Ok(())

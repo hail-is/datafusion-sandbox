@@ -88,6 +88,12 @@ impl PartitionStream for IntRangeStream {
     }
 }
 
+/// Builds a streaming table over the inclusive integer range `start..=end`.
+///
+/// # Errors
+///
+/// Returns an error if `batch_size` is zero or too large, the range lacks enough integer
+/// headroom, or `DataFusion` rejects the table configuration.
 pub fn make_range_table_source(start: i32, end: i32, batch_size: u32) -> Result<StreamingTable> {
     let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new("idx", DataType::Int32, false)]));
 
@@ -107,6 +113,12 @@ pub fn make_range_table_source(start: i32, end: i32, batch_size: u32) -> Result<
     )
 }
 
+/// Builds a data frame containing the integers from 1 through `n_rows`.
+///
+/// # Errors
+///
+/// Returns an error if `n_rows` or `batch_size` is unsupported or `DataFusion` cannot read the
+/// generated table.
 pub fn make_range_table(ctx: &SessionContext, n_rows: u32, batch_size: u32) -> Result<DataFrame> {
     let end = i32::try_from(n_rows).map_err(|_| {
         DataFusionError::Plan(format!(
@@ -118,6 +130,11 @@ pub fn make_range_table(ctx: &SessionContext, n_rows: u32, batch_size: u32) -> R
     ctx.read_table(range_provider)
 }
 
+/// Builds a grouped count over a generated, sorted range table.
+///
+/// # Errors
+///
+/// Returns an error if the range table or aggregate plan cannot be built.
 // DataFusion overloads division to build an expression; it performs no arithmetic here.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn make_table_group_by_aggregate_sorted(
@@ -132,6 +149,11 @@ pub fn make_table_group_by_aggregate_sorted(
     )
 }
 
+/// Builds an inner join between two generated range tables.
+///
+/// # Errors
+///
+/// Returns an error if either range table or the join plan cannot be built.
 pub fn make_table_range_join(
     ctx: &SessionContext,
     m: u32,

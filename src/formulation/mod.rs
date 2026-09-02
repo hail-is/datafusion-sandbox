@@ -24,6 +24,7 @@ impl fmt::Display for Formulation {
 }
 
 impl Formulation {
+    #[must_use]
     pub fn required_layout(self) -> DatasetLayout {
         let locus_ordering = match self {
             Self::CombineAllelesUnion => combine_alleles::required_ordering(),
@@ -33,6 +34,11 @@ impl Formulation {
     }
 
     /// Builds this formulation's plan over `dataset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the dataset cannot satisfy the formulation's required ordering or if
+    /// `DataFusion` cannot build the plan.
     pub async fn plan(self, ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
         match self {
             Self::CombineAllelesUnion => combine_alleles::plan(ctx, dataset).await,
