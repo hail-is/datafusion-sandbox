@@ -1,5 +1,8 @@
 // Benchmark setup failures should abort the benchmark rather than become measured results.
-#![allow(clippy::unwrap_used)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "benchmark setup failures should abort rather than become measured results"
+)]
 
 use datafusion::physical_plan::{
     ChildrenPropertiesMode, ExecutionPlan, ReplaceChildrenOptions, execute_stream,

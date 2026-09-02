@@ -1,7 +1,10 @@
 use crate::fixture;
 
 use datafusion::{
-    arrow::{array::StringViewArray, record_batch::RecordBatch},
+    arrow::{
+        array::{ArrayRef, Int32Array, StringViewArray},
+        record_batch::RecordBatch,
+    },
     error::Result,
     parquet::{
         basic::Compression,
@@ -16,9 +19,24 @@ use datafusion_sandbox::{
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
 };
-use std::fs;
+use std::{fs, sync::Arc};
 
 use fixture::SAMPLES;
+
+#[test]
+fn renders_outcomes() {
+    assert_eq!(Outcome::RowsWritten(42).render().unwrap(), "42");
+    assert_eq!(
+        Outcome::Plan("physical plan".to_string()).render().unwrap(),
+        "physical plan"
+    );
+
+    let values: ArrayRef = Arc::new(Int32Array::from(vec![1, 2]));
+    let batch = RecordBatch::try_from_iter(vec![("idx", values)]).unwrap();
+    let rendered = Outcome::Batches(vec![batch]).render().unwrap();
+    assert!(rendered.contains("| 1   |"), "rendered batch:\n{rendered}");
+    assert!(rendered.contains("| 2   |"), "rendered batch:\n{rendered}");
+}
 
 #[test]
 fn both_combiners_report_rows_written() {

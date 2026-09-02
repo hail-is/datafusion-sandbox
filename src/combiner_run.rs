@@ -12,7 +12,6 @@ use datafusion::{
     datasource::listing::ListingTableUrl,
     error::Result,
 };
-use std::fmt;
 
 /// What to do with the combined rows.
 #[derive(Debug)]
@@ -107,15 +106,17 @@ pub enum Outcome {
     Plan(String),
 }
 
-impl fmt::Display for Outcome {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Outcome {
+    /// Renders the outcome for display.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a collected record batch cannot be formatted.
+    pub fn render(&self) -> Result<String> {
         match self {
-            Self::RowsWritten(count) => write!(formatter, "{count}"),
-            Self::Batches(batches) => {
-                let table = pretty_format_batches(batches).map_err(|_| fmt::Error)?;
-                write!(formatter, "{table}")
-            }
-            Self::Plan(plan) => formatter.write_str(plan),
+            Self::RowsWritten(count) => Ok(count.to_string()),
+            Self::Batches(batches) => Ok(pretty_format_batches(batches)?.to_string()),
+            Self::Plan(plan) => Ok(plan.clone()),
         }
     }
 }
