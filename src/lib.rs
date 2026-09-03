@@ -8,7 +8,7 @@
 //! - [`locus`] describes the supported stored locus representations.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
 //! - [`sorted_table`] scans files as one ordered partition.
-//! - [`synthetic`] builds generated in-memory tables for tests and benchmarks.
+//! - [`generated`] builds generated tables for tests and benchmarks.
 //!
 //! See the [project glossary](../CONTEXT.md) for domain vocabulary.
 
@@ -26,7 +26,7 @@ pub mod cpu_runtime;
 pub mod dataset;
 pub mod format;
 pub mod formulation;
+pub mod generated;
 pub mod locus;
 pub mod pipeline;
 pub mod sorted_table;
-pub mod synthetic;

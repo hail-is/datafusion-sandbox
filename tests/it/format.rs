@@ -1,8 +1,12 @@
 use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
-use datafusion_sandbox::{format::OutputFormat, synthetic::make_range_table};
+use datafusion_sandbox::{
+    format::OutputFormat,
+    generated::make_range_table,
+    pipeline::{self, PipelineOptions},
+};
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 #[test]
 fn parquet_writes_rows_and_returns_their_count() {
@@ -14,29 +18,28 @@ fn vortex_writes_rows_and_returns_their_count() {
     assert_writes_rows(&OutputFormat::VORTEX, "vortex");
 }
 
-fn assert_writes_rows(format: &OutputFormat, extension: &str) {
+fn assert_writes_rows(format: &'static OutputFormat, extension: &'static str) {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let object_path = Path::from(format!("rows.{extension}"));
 
-    let (rows_written, metadata, bytes) = block_on(async {
-        let ctx = SessionContext::new();
-        let store_url = ObjectStoreUrl::parse("memory://out").unwrap();
-        ctx.register_object_store(store_url.as_ref(), Arc::clone(&store));
-        let df = make_range_table(&ctx, 1000, 128).unwrap();
-        let rows_written = format
-            .write(df, &format!("memory://out/rows.{extension}"))
-            .await
-            .unwrap();
-        let metadata = store.head(&object_path).await.unwrap();
-        let bytes = store
-            .get(&object_path)
-            .await
-            .unwrap()
-            .bytes()
-            .await
-            .unwrap();
-        (rows_written, metadata, bytes)
-    });
+    let (rows_written, metadata, bytes) = pipeline::run(
+        move |ctx: SessionContext| async move {
+            let store_url = ObjectStoreUrl::parse("memory://out")?;
+            ctx.register_object_store(store_url.as_ref(), Arc::clone(&store));
+            let df = make_range_table(&ctx, 1000, 128)?;
+            let rows_written = format
+                .write(df, &format!("memory://out/rows.{extension}"))
+                .await?;
+            let metadata = store.head(&object_path).await?;
+            let bytes = store.get(&object_path).await?.bytes().await?;
+            Ok((rows_written, metadata, bytes))
+        },
+        PipelineOptions {
+            threads: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     assert_eq!(rows_written, 1000);
     assert!(metadata.size > 0);
@@ -82,14 +85,6 @@ fn parquet_rejects_a_malformed_compression_mode_without_panicking() {
 #[test]
 fn vortex_rejects_a_parquet_compression_mode() {
     assert_rejects_compression(OutputFormat::VORTEX, "zstd(7)", "vortex");
-}
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(future)
 }
 
 fn assert_rejects_compression(format: OutputFormat, compression: &str, format_name: &str) {
