@@ -16,60 +16,81 @@ use datafusion::{
 use datafusion_sandbox::{
     dataset::{Dataset, DatasetLayout},
     format::{InputFormat, OutputFormat},
-    locus::LocusOrdering,
+    locus::{LocusOrdering, LocusRepresentation},
+    pipeline::{self, PipelineOptions},
 };
-use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
+use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
 use std::{future::Future, sync::Arc};
 
 #[test]
 fn reads_one_sample_with_its_sample_id_attached() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), &["sample-a", "sample-b"]);
+    let fixture = Arc::clone(fixture::dataset_fixture(
+        fixture::FixtureFormat::Vortex,
+        LocusRepresentation::ContigPosition,
+    ));
+    let sample_id = fixture::SAMPLES
+        .first()
+        .expect("the shared sample set is nonempty")
+        .to_string();
 
-    block_on(async {
-        let table_path = ListingTableUrl::parse(&root).unwrap();
-        let dataset = Dataset::discover(
-            &SessionContext::new(),
-            table_path,
-            InputFormat::VORTEX,
-            allele_layout(),
-            None,
-        )
-        .await
-        .unwrap()
-        .restrict_to(&["sample-b".to_string()])
-        .unwrap();
-        let df = dataset.read(&SessionContext::new()).await.unwrap();
+    pipeline::run(
+        move |ctx| {
+            fixture.register(&ctx);
+            async move {
+                let dataset = Dataset::discover(
+                    &ctx,
+                    fixture.table_path().clone(),
+                    fixture.input_format(),
+                    allele_layout(),
+                    None,
+                )
+                .await?
+                .restrict_to(std::slice::from_ref(&sample_id))?;
+                let df = dataset.read(&ctx).await?;
 
-        assert!(df.schema().has_column_with_unqualified_name("s"));
-        assert!(df.schema().has_column_with_unqualified_name("contig"));
-        assert!(df.schema().has_column_with_unqualified_name("alleles"));
-        let batches = df.collect().await.unwrap();
-        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 8);
-        for batch in batches {
-            let sample_ids = batch
-                .column_by_name("s")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            assert!((0..batch.num_rows()).all(|row| sample_ids.value(row) == "sample-b"));
-        }
-    });
+                assert!(df.schema().has_column_with_unqualified_name("s"));
+                assert!(df.schema().has_column_with_unqualified_name("contig"));
+                assert!(df.schema().has_column_with_unqualified_name("alleles"));
+                let batches = df.collect().await?;
+                assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 8);
+                for batch in batches {
+                    let sample_ids = batch
+                        .column_by_name("s")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    assert!(
+                        (0..batch.num_rows())
+                            .all(|row| sample_ids.value(row) == sample_id.as_str())
+                    );
+                }
+                Ok(())
+            }
+        },
+        PipelineOptions {
+            threads: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
 }
 
 #[test]
 fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), &["sample-a", "sample-b"]);
+    let fixture = fixture::dataset_fixture(
+        fixture::FixtureFormat::Vortex,
+        LocusRepresentation::ContigPosition,
+    );
 
     block_on(async {
         let ctx = SessionContext::new();
+        fixture.register(&ctx);
         let dataset = Dataset::discover(
             &ctx,
-            ListingTableUrl::parse(&root).unwrap(),
-            InputFormat::VORTEX,
+            fixture.table_path().clone(),
+            fixture.input_format(),
             allele_layout(),
             None,
         )
@@ -85,7 +106,7 @@ fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
         let unions = nodes_of::<UnionExec>(&plan);
 
         assert_eq!(unions.len(), 1);
-        assert_eq!(unions[0].children().len(), 2);
+        assert_eq!(unions[0].children().len(), 4);
         assert!(
             unions[0]
                 .children()
@@ -97,14 +118,15 @@ fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
 
 #[test]
 fn rejects_an_inferred_schema_missing_a_required_ordering_column() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_table_without_alleles(dir.path());
+    let fixture = fixture::vortex_without_alleles_fixture();
 
     let error = block_on(async {
+        let ctx = SessionContext::new();
+        fixture.register(&ctx);
         Dataset::discover(
-            &SessionContext::new(),
-            ListingTableUrl::parse(&root).unwrap(),
-            InputFormat::VORTEX,
+            &ctx,
+            fixture.table_path().clone(),
+            fixture.input_format(),
             allele_layout(),
             None,
         )
@@ -139,65 +161,74 @@ fn rejects_a_resolved_schema_missing_a_required_ordering_column() {
 
 #[test]
 fn infers_the_schema_from_one_input_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("samples");
-    let sample_dir = root.join("s=sample-a");
-    std::fs::create_dir_all(&sample_dir).unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let table_path = ListingTableUrl::parse("memory://schema-inference/samples/").unwrap();
+    let store_url = table_path.object_store();
+    let root = table_path.as_str().trim_end_matches('/').to_string();
 
-    block_on(async {
-        let ctx = SessionContext::new();
-        let int_batch = RecordBatch::try_from_iter(vec![
-            ("contig", Arc::new(StringArray::from(vec!["chr1"])) as _),
-            ("position", Arc::new(Int32Array::from(vec![1])) as _),
-        ])
-        .unwrap();
-        let string_batch = RecordBatch::try_from_iter(vec![
-            ("contig", Arc::new(StringArray::from(vec!["chr1"])) as _),
-            ("position", Arc::new(StringArray::from(vec!["one"])) as _),
-        ])
-        .unwrap();
-        for (name, batch) in [("a.vortex", int_batch), ("b.vortex", string_batch)] {
-            let path = sample_dir.join(name);
-            let df = ctx.read_batch(batch).unwrap();
-            OutputFormat::VORTEX
-                .write(df, path.to_str().unwrap())
-                .await
-                .unwrap();
-        }
+    pipeline::run(
+        move |ctx| {
+            ctx.register_object_store(store_url.as_ref(), store);
+            async move {
+                let int_batch = RecordBatch::try_from_iter(vec![
+                    ("contig", Arc::new(StringArray::from(vec!["chr1"])) as _),
+                    ("position", Arc::new(Int32Array::from(vec![1])) as _),
+                ])?;
+                let string_batch = RecordBatch::try_from_iter(vec![
+                    ("contig", Arc::new(StringArray::from(vec!["chr1"])) as _),
+                    ("position", Arc::new(StringArray::from(vec!["one"])) as _),
+                ])?;
+                for (name, batch) in [("a.vortex", int_batch), ("b.vortex", string_batch)] {
+                    let path = format!("{root}/s=sample-a/{name}");
+                    let df = ctx.read_batch(batch)?;
+                    OutputFormat::VORTEX.write(df, &path).await?;
+                }
 
-        let dataset = Dataset::discover(
-            &ctx,
-            ListingTableUrl::parse(root.to_str().unwrap()).unwrap(),
-            InputFormat::VORTEX,
-            locus_layout(),
-            None,
-        )
-        .await
-        .expect("incompatible schemas in later files must not be merged");
+                let dataset =
+                    Dataset::discover(&ctx, table_path, InputFormat::VORTEX, locus_layout(), None)
+                        .await
+                        .expect("incompatible schemas in later files must not be merged");
 
-        dataset
-            .schema()
-            .field_with_name("position")
-            .expect("the discovered schema must contain the position field");
-    });
+                dataset
+                    .schema()
+                    .field_with_name("position")
+                    .expect("the discovered schema must contain the position field");
+                Ok(())
+            }
+        },
+        PipelineOptions {
+            threads: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
 }
 
 #[test]
 fn uses_a_pinned_schema_without_inference() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("samples");
-    let sample_dir = root.join("s=sample-a");
-    std::fs::create_dir_all(&sample_dir).unwrap();
-    std::fs::write(sample_dir.join("invalid.vortex"), b"not a vortex file").unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let schema = contig_position_schema(false);
 
-    let dataset = block_on(Dataset::discover(
-        &SessionContext::new(),
-        ListingTableUrl::parse(root.to_str().unwrap()).unwrap(),
-        InputFormat::VORTEX,
-        locus_layout(),
-        Some(Arc::clone(&schema)),
-    ))
+    let dataset = block_on(async {
+        store
+            .put(
+                &Path::from("samples/s=sample-a/invalid.vortex"),
+                b"not a vortex file".to_vec().into(),
+            )
+            .await
+            .unwrap();
+        let ctx = SessionContext::new();
+        let store_url = ObjectStoreUrl::parse("memory://").unwrap();
+        ctx.register_object_store(store_url.as_ref(), store);
+        Dataset::discover(
+            &ctx,
+            ListingTableUrl::parse("memory:///samples").unwrap(),
+            InputFormat::VORTEX,
+            locus_layout(),
+            Some(Arc::clone(&schema)),
+        )
+        .await
+    })
     .expect("a pinned schema must bypass inference");
 
     assert_eq!(dataset.schema(), &schema);
@@ -345,6 +376,8 @@ fn nodes_of<T: ExecutionPlan>(plan: &Arc<dyn ExecutionPlan>) -> Vec<Arc<dyn Exec
     found
 }
 
+// This runtime is for tests that never execute a plan. Plan execution belongs in
+// the pipeline runner; see ADR 0006.
 fn block_on<F: Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
