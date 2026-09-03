@@ -9,10 +9,8 @@
 //!
 //! Per-test owned disk inventory:
 //! - Vortex with contig-position loci
-//! - Parquet with contig-position loci
-//!
-//! On-demand disk inventory:
 //! - Vortex with packed loci
+//! - Parquet with contig-position loci
 
 use datafusion::{
     arrow::{
@@ -147,15 +145,31 @@ impl DiskDatasetFixture {
 /// Owns a private dataset fixture directory until the returned handle is dropped.
 /// Set `DATAFUSION_SANDBOX_KEEP_FIXTURES=1` to retain it, including incomplete writes.
 pub fn contig_position_disk_fixture(format: FixtureFormat) -> DiskDatasetFixture {
+    let name = match format {
+        FixtureFormat::Vortex => "vortex-contig-position-",
+        FixtureFormat::Parquet => "parquet-contig-position-",
+    };
+    build_disk_fixture(name, format, LocusRepresentation::ContigPosition)
+}
+
+pub fn packed_disk_fixture() -> DiskDatasetFixture {
+    build_disk_fixture(
+        "vortex-packed-",
+        FixtureFormat::Vortex,
+        LocusRepresentation::Packed,
+    )
+}
+
+fn build_disk_fixture(
+    name: &str,
+    format: FixtureFormat,
+    representation: LocusRepresentation,
+) -> DiskDatasetFixture {
     assert!(
         tokio::runtime::Handle::try_current().is_err(),
         "build the dataset fixture before calling pipeline::run"
     );
 
-    let name = match format {
-        FixtureFormat::Vortex => "vortex-contig-position-",
-        FixtureFormat::Parquet => "parquet-contig-position-",
-    };
     let keep = match std::env::var("DATAFUSION_SANDBOX_KEEP_FIXTURES").as_deref() {
         Ok("1") => true,
         Ok("0") | Err(std::env::VarError::NotPresent) => false,
@@ -173,12 +187,7 @@ pub fn contig_position_disk_fixture(format: FixtureFormat) -> DiskDatasetFixture
             dir.path().display()
         );
     }
-    let table_path = build_disk_sample_tables(
-        dir.path(),
-        SAMPLES,
-        format,
-        LocusRepresentation::ContigPosition,
-    );
+    let table_path = build_disk_sample_tables(dir.path(), SAMPLES, format, representation);
     DiskDatasetFixture {
         format,
         table_path,
@@ -275,30 +284,6 @@ impl FixtureTarget {
             }
         }
     }
-}
-
-/// Writes one Vortex table per sample under `dir`, as several files in
-/// `s=<sample>/`, with `contig` stored in every file.
-/// Returns the root path the combiners read.
-///
-/// Every sample covers the same loci with the same alleles, so a plan that
-/// de-duplicates across the sample set has something to de-duplicate.
-pub fn write_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
-    build_disk_sample_tables(
-        dir,
-        sample_set,
-        FixtureFormat::Vortex,
-        LocusRepresentation::ContigPosition,
-    )
-}
-
-pub fn write_packed_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
-    build_disk_sample_tables(
-        dir,
-        sample_set,
-        FixtureFormat::Vortex,
-        LocusRepresentation::Packed,
-    )
 }
 
 fn build_disk_sample_tables(

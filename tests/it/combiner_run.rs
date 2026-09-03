@@ -39,6 +39,58 @@ fn renders_outcomes() {
 }
 
 #[test]
+fn renders_collected_contig_position_rows() {
+    let dataset = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+
+    let rendered = run(
+        Formulation::CombineAllelesUnion,
+        dataset.table_path(),
+        dataset.input_format(),
+        Action::Collect,
+        None,
+        None,
+    )
+    .unwrap()
+    .render()
+    .unwrap();
+
+    assert!(
+        rendered.contains("| contig | position | alleles |"),
+        "rendered outcome:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("| chr1   | 1        | A,G     | 1"),
+        "rendered outcome:\n{rendered}"
+    );
+}
+
+#[test]
+fn renders_collected_packed_rows() {
+    let dataset = fixture::packed_disk_fixture();
+
+    let rendered = run(
+        Formulation::CombineAllelesUnion,
+        dataset.table_path(),
+        dataset.input_format(),
+        Action::Collect,
+        None,
+        None,
+    )
+    .unwrap()
+    .render()
+    .unwrap();
+
+    assert!(
+        rendered.contains("| locus       | alleles |"),
+        "rendered outcome:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("| 4294967297  | A,G     | 1"),
+        "rendered outcome:\n{rendered}"
+    );
+}
+
+#[test]
 fn both_combiners_report_rows_written() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
