@@ -192,9 +192,8 @@ impl TryFrom<ActionArgs> for CliAction {
     }
 }
 
-fn main() -> Result<()> {
-    let Cli { command, threads } = Cli::parse();
-
+fn resolve(cli: Cli) -> Result<CombinerRun> {
+    let Cli { command, threads } = cli;
     let (formulation, args) = match command {
         Command::CombineRefs(args) => (args.formulation.formulation(), args.combiner),
         Command::CombineAlleles(args) => (Formulation::CombineAllelesUnion, args),
@@ -229,8 +228,7 @@ fn main() -> Result<()> {
     };
     let sample_set = (!sample_set.is_empty()).then_some(sample_set);
     let threads = threads.unwrap_or_else(|| available_parallelism().map_or(1, NonZeroUsize::get));
-    println!("formulation: {formulation}");
-    let outcome = CombinerRun {
+    Ok(CombinerRun {
         formulation,
         input_path: path,
         input_format,
@@ -238,8 +236,14 @@ fn main() -> Result<()> {
         sample_set,
         row_limit: limit,
         threads,
-    }
-    .execute()?;
+    })
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let run = resolve(cli)?;
+    println!("formulation: {}", run.formulation);
+    let outcome = run.execute()?;
     println!("{}", outcome.render()?);
     Ok(())
 }
@@ -262,6 +266,200 @@ fn validate_output_extension(output_path: &str, output_format: &OutputFormat) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exactly_one_action_is_required() {
+        let error = Cli::try_parse_from(["datafusion-sandbox", "combine-refs", "input"])
+            .err()
+            .unwrap();
+        let diagnostic = error.to_string();
+
+        for action in ["--write", "--show", "--explain", "--explain-analyze"] {
+            assert!(diagnostic.contains(action), "diagnostic:\n{diagnostic}");
+        }
+    }
+
+    #[test]
+    fn two_actions_conflict() {
+        let error = Cli::try_parse_from([
+            "datafusion-sandbox",
+            "combine-alleles",
+            "input",
+            "--show",
+            "--explain",
+        ])
+        .err()
+        .unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(
+            diagnostic.contains("cannot be used with"),
+            "diagnostic:\n{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn compression_requires_a_write_action() {
+        let error = Cli::try_parse_from([
+            "datafusion-sandbox",
+            "combine-refs",
+            "input",
+            "--compression",
+            "snappy",
+        ])
+        .err()
+        .unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(
+            diagnostic.contains("--compression"),
+            "diagnostic:\n{diagnostic}"
+        );
+        assert!(diagnostic.contains("--write"), "diagnostic:\n{diagnostic}");
+    }
+
+    #[test]
+    fn compression_conflicts_with_each_non_write_action() {
+        for action in ["--show", "--explain", "--explain-analyze"] {
+            let error = Cli::try_parse_from([
+                "datafusion-sandbox",
+                "combine-refs",
+                "input",
+                "--compression",
+                "snappy",
+                action,
+            ])
+            .err()
+            .unwrap();
+            let diagnostic = error.to_string();
+
+            assert!(
+                diagnostic.contains("cannot be used with"),
+                "{action} diagnostic:\n{diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn allele_combiner_rejects_a_formulation_argument() {
+        let error = Cli::try_parse_from([
+            "datafusion-sandbox",
+            "combine-alleles",
+            "input",
+            "--formulation",
+            "union",
+            "--show",
+        ])
+        .err()
+        .unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(
+            diagnostic.contains("--formulation"),
+            "diagnostic:\n{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("unexpected argument"),
+            "diagnostic:\n{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn reference_combiner_names_accepted_formulations_when_rejecting_a_removed_one() {
+        let error = Cli::try_parse_from([
+            "datafusion-sandbox",
+            "combine-refs",
+            "input",
+            "--formulation",
+            "one-scan",
+            "--show",
+        ])
+        .err()
+        .unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(
+            diagnostic.contains("invalid value 'one-scan'"),
+            "diagnostic:\n{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("possible values: union"),
+            "diagnostic:\n{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn output_extension_must_match_the_resolved_output_format() {
+        let cli = parse_combiner(["--input-format", "parquet", "--write", "output.vortex"]);
+
+        let error = resolve(cli).err().unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(
+            diagnostic.contains("output.vortex"),
+            "diagnostic:\n{diagnostic}"
+        );
+        assert!(diagnostic.contains("parquet"), "diagnostic:\n{diagnostic}");
+    }
+
+    #[test]
+    fn output_format_must_accept_the_compression_value() {
+        let cli = parse_combiner([
+            "--output-format",
+            "vortex",
+            "--compression",
+            "zstd(3)",
+            "--write",
+            "output.vortex",
+        ]);
+
+        let error = resolve(cli).err().unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(diagnostic.contains("zstd(3)"), "diagnostic:\n{diagnostic}");
+        assert!(diagnostic.contains("vortex"), "diagnostic:\n{diagnostic}");
+    }
+
+    #[test]
+    fn show_resolves_to_collecting_twenty_rows() {
+        let run = resolve(parse_combiner(["--show"])).unwrap();
+
+        assert!(matches!(run.action, Action::Collect));
+        assert_eq!(run.row_limit, Some(20));
+    }
+
+    #[test]
+    fn an_explicit_show_limit_overrides_the_default() {
+        let run = resolve(parse_combiner(["--show", "--limit", "7"])).unwrap();
+
+        assert!(matches!(run.action, Action::Collect));
+        assert_eq!(run.row_limit, Some(7));
+    }
+
+    #[test]
+    fn comma_separated_sample_ids_resolve_to_a_sample_set() {
+        let run = resolve(parse_combiner(["--samples", "HG00308,HG00309", "--show"])).unwrap();
+
+        assert_eq!(
+            run.sample_set,
+            Some(vec!["HG00308".to_string(), "HG00309".to_string()])
+        );
+    }
+
+    fn parse_combiner<const N: usize>(args: [&str; N]) -> Cli {
+        Cli::try_parse_from(
+            [
+                "datafusion-sandbox",
+                "--threads",
+                "1",
+                "combine-refs",
+                "input",
+            ]
+            .into_iter()
+            .chain(args),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn rejects_a_thread_count_of_zero() {
