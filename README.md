@@ -15,6 +15,27 @@ This repo is to help us start to experiment with implementing hail style pipelin
    benchmarks bucket and creates VDS, Parquet, and Vortex datasets for reference and allele data.
    It writes both contig-position and packed locus representations.
 
+### Tests
+
+Run the Rust suite with `cargo test` or `cargo nextest run`. Each combiner run test owns a
+private disk dataset fixture under Cargo's integration-test temporary directory,
+`CARGO_TARGET_TMPDIR`. Dropping the handle removes the directory, including during ordinary
+panic unwinding. Forced termination or a cleanup error can still leave files behind.
+
+To retain these dataset fixtures for debugging, set `DATAFUSION_SANDBOX_KEEP_FIXTURES=1`:
+
+```sh
+DATAFUSION_SANDBOX_KEEP_FIXTURES=1 cargo test --test it combiner_run -- --show-output
+DATAFUSION_SANDBOX_KEEP_FIXTURES=1 cargo nextest run --test it -E 'test(combiner_run)' --success-output immediate
+```
+
+Each accessor call still creates a unique directory. Before writing, it prints the test name
+and full directory path, whose prefix identifies the dataset-fixture format and locus
+representation. Retention applies to passing and failing tests, including incomplete writes.
+Retained directories are yours to remove; later runs do not delete or reuse them. Unset the
+variable or set it to `0` to restore cleanup. This option does not retain test outputs or
+directories owned by callers of the lower-level fixture writers.
+
 ### Python tools (`python/`)
 
 `python/` is a [uv](https://docs.astral.sh/uv/)-managed Python project providing `hailtools`, a CLI for

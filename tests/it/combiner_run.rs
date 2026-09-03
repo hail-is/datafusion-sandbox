@@ -19,9 +19,9 @@ use datafusion_sandbox::{
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
 };
-use std::{fs, sync::Arc};
+use std::{path::Path, sync::Arc};
 
-use fixture::SAMPLES;
+use fixture::{FixtureFormat, SAMPLES};
 
 #[test]
 fn renders_outcomes() {
@@ -41,7 +41,7 @@ fn renders_outcomes() {
 #[test]
 fn both_combiners_report_rows_written() {
     let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
 
     for (formulation, output_name, expected) in [
         (Formulation::CombineRefsUnion, "combined_refs.vortex", 32),
@@ -53,8 +53,8 @@ fn both_combiners_report_rows_written() {
     ] {
         let outcome = run(
             formulation,
-            &input,
-            InputFormat::VORTEX,
+            input.table_path(),
+            input.input_format(),
             Action::Write {
                 output_path: dir.path().join(output_name).to_str().unwrap().to_string(),
                 output_format: OutputFormat::VORTEX,
@@ -74,12 +74,12 @@ fn both_combiners_report_rows_written() {
 #[test]
 fn writes_uncompressed_parquet() {
     let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
     let output_path = dir.path().join("combined_refs.parquet");
     let outcome = run(
         Formulation::CombineRefsUnion,
-        &input,
-        InputFormat::VORTEX,
+        input.table_path(),
+        input.input_format(),
         Action::Write {
             output_path: output_path.to_str().unwrap().to_string(),
             output_format: OutputFormat::PARQUET
@@ -110,15 +110,15 @@ fn writes_uncompressed_parquet() {
 #[test]
 fn compact_and_standard_vortex_have_different_file_sizes() {
     let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
     let sizes = ["standard", "compact"].map(|compression| {
         let output_path = dir
             .path()
             .join(format!("combined_refs_{compression}.vortex"));
         let outcome = run(
             Formulation::CombineRefsUnion,
-            &input,
-            InputFormat::VORTEX,
+            input.table_path(),
+            input.input_format(),
             Action::Write {
                 output_path: output_path.to_str().unwrap().to_string(),
                 output_format: OutputFormat::VORTEX.with_compression(compression).unwrap(),
@@ -139,14 +139,13 @@ fn compact_and_standard_vortex_have_different_file_sizes() {
 
 #[test]
 fn reads_parquet_dataset_into_record_batches() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_parquet_sample_tables(dir.path(), SAMPLES);
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Parquet);
 
     let batches = expect_batches(
         run(
             Formulation::CombineAllelesUnion,
-            &input,
-            InputFormat::PARQUET,
+            input.table_path(),
+            input.input_format(),
             Action::Collect,
             None,
             None,
@@ -168,13 +167,13 @@ fn reads_parquet_dataset_into_record_batches() {
 #[test]
 fn explicit_limit_applies_under_every_action() {
     let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
 
     let batches = expect_batches(
         run(
             Formulation::CombineAllelesUnion,
-            &input,
-            InputFormat::VORTEX,
+            input.table_path(),
+            input.input_format(),
             Action::Collect,
             None,
             Some(1),
@@ -185,8 +184,8 @@ fn explicit_limit_applies_under_every_action() {
 
     let outcome = run(
         Formulation::CombineRefsUnion,
-        &input,
-        InputFormat::VORTEX,
+        input.table_path(),
+        input.input_format(),
         Action::Write {
             output_path: dir
                 .path()
@@ -208,8 +207,8 @@ fn explicit_limit_applies_under_every_action() {
     for action in [Action::Explain, Action::ExplainAnalyze] {
         let outcome = run(
             Formulation::CombineAllelesUnion,
-            &input,
-            InputFormat::VORTEX,
+            input.table_path(),
+            input.input_format(),
             action,
             None,
             Some(1),
@@ -224,13 +223,12 @@ fn explicit_limit_applies_under_every_action() {
 
 #[test]
 fn explain_actions_return_plain_and_analyzed_plans() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
 
     let outcome = run(
         Formulation::CombineRefsUnion,
-        &input,
-        InputFormat::VORTEX,
+        input.table_path(),
+        input.input_format(),
         Action::Explain,
         None,
         None,
@@ -244,8 +242,8 @@ fn explain_actions_return_plain_and_analyzed_plans() {
 
     let outcome = run(
         Formulation::CombineAllelesUnion,
-        &input,
-        InputFormat::VORTEX,
+        input.table_path(),
+        input.input_format(),
         Action::ExplainAnalyze,
         None,
         None,
@@ -262,13 +260,13 @@ fn explain_actions_return_plain_and_analyzed_plans() {
 #[test]
 fn restricts_the_dataset_to_the_requested_sample_set() {
     let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), SAMPLES);
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
     let output_path = dir.path().join("restricted.vortex");
 
     let outcome = run(
         Formulation::CombineRefsUnion,
-        &input,
-        InputFormat::VORTEX,
+        input.table_path(),
+        input.input_format(),
         Action::Write {
             output_path: output_path.to_str().unwrap().to_string(),
             output_format: OutputFormat::VORTEX,
@@ -286,14 +284,13 @@ fn restricts_the_dataset_to_the_requested_sample_set() {
 
 #[test]
 fn reports_a_dataset_with_no_samples() {
-    let dir = tempfile::tempdir().unwrap();
-    let input_path = dir.path().join("samples");
-    fs::create_dir(&input_path).unwrap();
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let input_path = Path::new(input.table_path()).join("no-samples");
 
     let err = run(
         Formulation::CombineRefsUnion,
         input_path.to_str().unwrap(),
-        InputFormat::VORTEX,
+        input.input_format(),
         Action::Collect,
         None,
         None,
@@ -311,13 +308,12 @@ fn reports_a_dataset_with_no_samples() {
 
 #[test]
 fn reports_sample_ids_absent_from_the_dataset() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::write_sample_tables(dir.path(), &SAMPLES[..2]);
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
 
     let err = run(
         Formulation::CombineRefsUnion,
-        &input,
-        InputFormat::VORTEX,
+        input.table_path(),
+        input.input_format(),
         Action::Collect,
         Some(vec!["NOT_A_SAMPLE".to_string()]),
         None,
