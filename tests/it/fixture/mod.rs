@@ -6,10 +6,12 @@
 //! - Parquet with contig-position loci
 //! - Parquet with packed loci
 //!
-//! On-demand disk inventory:
+//! Per-test owned disk inventory:
 //! - Vortex with contig-position loci
-//! - Vortex with packed loci
 //! - Parquet with contig-position loci
+//!
+//! On-demand disk inventory:
+//! - Vortex with packed loci
 //! - Vortex with no `alleles` field
 
 use datafusion::{
@@ -120,6 +122,64 @@ pub fn dataset_fixture(
     }
 }
 
+pub struct DiskDatasetFixture {
+    format: FixtureFormat,
+    table_path: String,
+    _dir: tempfile::TempDir,
+}
+
+impl DiskDatasetFixture {
+    pub fn table_path(&self) -> &str {
+        &self.table_path
+    }
+
+    pub fn input_format(&self) -> InputFormat {
+        self.format.datafusion_formats().1
+    }
+}
+
+/// Owns a private dataset fixture directory until the returned handle is dropped.
+/// Set `DATAFUSION_SANDBOX_KEEP_FIXTURES=1` to retain it, including incomplete writes.
+pub fn contig_position_disk_fixture(format: FixtureFormat) -> DiskDatasetFixture {
+    assert!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "build the dataset fixture before calling pipeline::run"
+    );
+
+    let name = match format {
+        FixtureFormat::Vortex => "vortex-contig-position-",
+        FixtureFormat::Parquet => "parquet-contig-position-",
+    };
+    let keep = match std::env::var("DATAFUSION_SANDBOX_KEEP_FIXTURES").as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(std::env::VarError::NotPresent) => false,
+        _ => panic!("DATAFUSION_SANDBOX_KEEP_FIXTURES must be unset, 0, or 1"),
+    };
+    let dir = tempfile::Builder::new()
+        .prefix(name)
+        .disable_cleanup(keep)
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("creating a private dataset fixture directory");
+    if keep {
+        eprintln!(
+            "retaining dataset fixture for {}: {}",
+            std::thread::current().name().unwrap_or("unnamed thread"),
+            dir.path().display()
+        );
+    }
+    let table_path = build_disk_sample_tables(
+        dir.path(),
+        SAMPLES,
+        format,
+        LocusRepresentation::ContigPosition,
+    );
+    DiskDatasetFixture {
+        format,
+        table_path,
+        _dir: dir,
+    }
+}
+
 fn build_in_memory_fixture(
     name: &'static str,
     format: FixtureFormat,
@@ -172,17 +232,6 @@ pub fn write_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
         dir,
         sample_set,
         FixtureFormat::Vortex,
-        LocusRepresentation::ContigPosition,
-    )
-}
-
-/// The parquet counterpart of [`write_sample_tables`], laid out identically so
-/// the two formats' plan shapes are compared over the same data.
-pub fn write_parquet_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
-    build_disk_sample_tables(
-        dir,
-        sample_set,
-        FixtureFormat::Parquet,
         LocusRepresentation::ContigPosition,
     )
 }
