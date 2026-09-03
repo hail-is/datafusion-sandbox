@@ -2,6 +2,7 @@
 //!
 //! Shared in-memory inventory:
 //! - Vortex with contig-position loci
+//! - Single-file Vortex with contig-position loci and no `alleles` field
 //! - Vortex with packed loci
 //! - Parquet with contig-position loci
 //! - Parquet with packed loci
@@ -12,7 +13,6 @@
 //!
 //! On-demand disk inventory:
 //! - Vortex with packed loci
-//! - Vortex with no `alleles` field
 
 use datafusion::{
     arrow::{
@@ -67,6 +67,8 @@ static VORTEX_CONTIG_POSITION: LazyLock<Arc<DatasetFixture>> = LazyLock::new(|| 
         LocusRepresentation::ContigPosition,
     )
 });
+static VORTEX_WITHOUT_ALLELES: LazyLock<Arc<DatasetFixture>> =
+    LazyLock::new(|| build_in_memory_fixture_without_alleles("vortex-no-alleles"));
 static VORTEX_PACKED: LazyLock<Arc<DatasetFixture>> = LazyLock::new(|| {
     build_in_memory_fixture(
         "vortex-packed",
@@ -120,6 +122,10 @@ pub fn dataset_fixture(
         (FixtureFormat::Parquet, LocusRepresentation::ContigPosition) => &PARQUET_CONTIG_POSITION,
         (FixtureFormat::Parquet, LocusRepresentation::Packed) => &PARQUET_PACKED,
     }
+}
+
+pub fn vortex_without_alleles_fixture() -> &'static Arc<DatasetFixture> {
+    &VORTEX_WITHOUT_ALLELES
 }
 
 pub struct DiskDatasetFixture {
@@ -185,6 +191,42 @@ fn build_in_memory_fixture(
     format: FixtureFormat,
     representation: LocusRepresentation,
 ) -> Arc<DatasetFixture> {
+    let (fixture, target) = new_in_memory_fixture(name, format);
+    build_sample_tables(target, SAMPLES, format, representation, name);
+    fixture
+}
+
+fn build_in_memory_fixture_without_alleles(name: &'static str) -> Arc<DatasetFixture> {
+    let (fixture, target) = new_in_memory_fixture(name, FixtureFormat::Vortex);
+    let batch = RecordBatch::try_from_iter(vec![
+        ("contig", Arc::new(StringArray::from(vec!["chr1"])) as _),
+        ("position", Arc::new(Int32Array::from(vec![1])) as _),
+    ])
+    .expect("no-alleles fixture batch matches its schema");
+
+    pipeline::run(
+        move |ctx| {
+            let root = target.register(&ctx);
+            async move {
+                let path = format!("{root}/s=sample-a/a.vortex");
+                let df = ctx.read_batch(batch)?;
+                OutputFormat::VORTEX.write(df, &path).await?;
+                Ok(())
+            }
+        },
+        PipelineOptions {
+            threads: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|error| panic!("writing the {name} dataset fixture: {error}"));
+    fixture
+}
+
+fn new_in_memory_fixture(
+    name: &'static str,
+    format: FixtureFormat,
+) -> (Arc<DatasetFixture>, FixtureTarget) {
     assert!(
         tokio::runtime::Handle::try_current().is_err(),
         "build the dataset fixture before calling pipeline::run"
@@ -198,18 +240,16 @@ fn build_in_memory_fixture(
         store: Arc::clone(&store),
         table_path,
     });
-    let root = fixture
-        .table_path
-        .as_str()
-        .trim_end_matches('/')
-        .to_string();
     let target = FixtureTarget::ObjectStore {
-        root,
+        root: fixture
+            .table_path
+            .as_str()
+            .trim_end_matches('/')
+            .to_string(),
         store_url: fixture.table_path.object_store(),
         store,
     };
-    build_sample_tables(target, SAMPLES, format, representation, name);
-    fixture
+    (fixture, target)
 }
 
 enum FixtureTarget {
@@ -219,6 +259,22 @@ enum FixtureTarget {
         store_url: ObjectStoreUrl,
         store: Arc<dyn ObjectStore>,
     },
+}
+
+impl FixtureTarget {
+    fn register(self, ctx: &SessionContext) -> String {
+        match self {
+            Self::Disk(root) => root,
+            Self::ObjectStore {
+                root,
+                store_url,
+                store,
+            } => {
+                ctx.register_object_store(store_url.as_ref(), store);
+                root
+            }
+        }
+    }
 }
 
 /// Writes one Vortex table per sample under `dir`, as several files in
@@ -243,38 +299,6 @@ pub fn write_packed_sample_tables(dir: &Path, sample_set: &[&str]) -> String {
         FixtureFormat::Vortex,
         LocusRepresentation::Packed,
     )
-}
-
-pub fn write_sample_table_without_alleles(dir: &Path) -> String {
-    let batch = RecordBatch::try_from_iter(vec![
-        ("contig", Arc::new(StringArray::from(vec!["chr1"])) as _),
-        ("position", Arc::new(Int32Array::from(vec![1])) as _),
-    ])
-    .expect("no-alleles fixture batch matches its schema");
-    write_single_sample_table(dir, batch, "no-alleles")
-}
-
-fn write_single_sample_table(dir: &Path, batch: RecordBatch, description: &str) -> String {
-    let root = dir.join("samples");
-    let pipeline_root = root.clone();
-    pipeline::run(
-        move |ctx: SessionContext| async move {
-            let path = pipeline_root.join("s=sample-a/a.vortex");
-            let df = ctx.read_batch(batch)?;
-            OutputFormat::VORTEX
-                .write(df, path.to_str().expect("fixture path is valid UTF-8"))
-                .await?;
-            Ok(())
-        },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
-    )
-    .unwrap_or_else(|error| panic!("writing {description} fixture table: {error}"));
-    root.to_str()
-        .expect("fixture path is valid UTF-8")
-        .to_string()
 }
 
 fn build_disk_sample_tables(
@@ -305,9 +329,6 @@ fn build_sample_tables(
     representation: LocusRepresentation,
     error_context: &str,
 ) -> String {
-    let root = match &target {
-        FixtureTarget::Disk(root) | FixtureTarget::ObjectStore { root, .. } => root.clone(),
-    };
     let output_format = format.datafusion_formats().0;
     let sample_set = sample_set
         .iter()
@@ -315,18 +336,7 @@ fn build_sample_tables(
         .collect::<Vec<_>>();
     pipeline::run(
         move |ctx: SessionContext| async move {
-            let pipeline_root = match target {
-                FixtureTarget::Disk(root) => root,
-                FixtureTarget::ObjectStore {
-                    root,
-                    store_url,
-                    store,
-                } => {
-                    ctx.register_object_store(store_url.as_ref(), store);
-                    root
-                }
-            };
-
+            let pipeline_root = target.register(&ctx);
             let mut writes = Vec::new();
             for sample in sample_set {
                 for &(contig, filename) in CONTIG_FILES {
@@ -342,15 +352,14 @@ fn build_sample_tables(
                 .await
                 .into_iter()
                 .collect::<datafusion::error::Result<Vec<_>>>()?;
-            Ok(())
+            Ok(pipeline_root)
         },
         PipelineOptions {
             threads: 1,
             ..Default::default()
         },
     )
-    .unwrap_or_else(|error| panic!("writing the {error_context} dataset fixture: {error}"));
-    root
+    .unwrap_or_else(|error| panic!("writing the {error_context} dataset fixture: {error}"))
 }
 
 /// One sample's rows, sorted by the locus ordering: one locus per position, with
