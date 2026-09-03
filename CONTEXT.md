@@ -86,10 +86,17 @@ How the rows of datasets of one kind are arranged across files: their locus orde
 from how each file is encoded, which is the format.
 _Avoid_: format (the encoding of one file), listing options, storage config
 
-**Synthetic table**:
-A table of generated rows held in memory, used to exercise a seam without reading genomics data. It
-is not genomics-shaped and is not meant to be.
-_Avoid_: fixture (fixtures may contain representative genomics data), mock table
+**Generated table**:
+A table whose rows a generator produces on demand rather than reading them from storage. It has no
+encoded form and no files, so it cannot exercise listing, schema inference, or file statistics, and
+it declares its own sort order rather than proving one.
+_Avoid_: synthetic table, mock table, fake data
+
+**Dataset fixture**:
+A small dataset written by a test, encoded in a real format, and held in an object store (backed by
+cloud storage, local disk, or memory) as a stand-in for a genomics dataset a run would read. Unlike
+a generated table, it is encoded and stored.
+_Avoid_: test data, sample data, fixture (unqualified)
 
 **Sorted table**:
 A file-backed table that verifies and orders its files from column statistics, then scans them as

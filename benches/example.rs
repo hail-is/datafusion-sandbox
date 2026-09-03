@@ -8,7 +8,7 @@ use datafusion::physical_plan::{
     ChildrenPropertiesMode, ExecutionPlan, ReplaceChildrenOptions, execute_stream,
 };
 use datafusion::prelude::*;
-use datafusion_sandbox::synthetic::{make_range_table, make_table_group_by_aggregate_sorted};
+use datafusion_sandbox::generated::{make_range_table, make_table_group_by_aggregate_sorted};
 use divan::Bencher;
 use divan::counter::ItemsCount;
 use futures_util::stream::StreamExt;

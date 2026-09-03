@@ -8,9 +8,7 @@
 use crate::fixture;
 
 use datafusion::{
-    arrow::datatypes::{DataType, Field, Schema},
     common::DataFusionError,
-    datasource::listing::ListingTableUrl,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
@@ -20,7 +18,6 @@ use datafusion::{
 };
 use datafusion_sandbox::{
     dataset::{Dataset, DatasetLayout},
-    format::InputFormat,
     formulation::Formulation,
     locus::{LocusOrdering, LocusRepresentation},
     pipeline,
@@ -28,7 +25,7 @@ use datafusion_sandbox::{
 
 use std::{future::Future, sync::Arc};
 
-use fixture::SAMPLES;
+use fixture::{FixtureFormat, SAMPLES};
 
 const FORMULATIONS: [Formulation; 2] = [
     Formulation::CombineRefsUnion,
@@ -41,22 +38,17 @@ const REPRESENTATIONS: [LocusRepresentation; 2] = [
 
 #[test]
 fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
-    let dataset = Dataset::new(
-        ListingTableUrl::parse("memory:///samples").unwrap(),
-        InputFormat::VORTEX,
+    let dataset = dataset_with_layout(
+        FixtureFormat::Vortex,
+        LocusRepresentation::ContigPosition,
         DatasetLayout {
             locus_ordering: LocusOrdering::locus(),
         },
-        Arc::new(Schema::new(vec![
-            Field::new("contig", DataType::Utf8, false),
-            Field::new("position", DataType::Int32, false),
-            Field::new("alleles", DataType::Utf8, false),
-        ])),
-        vec![SAMPLES[0].to_string()],
-    )
-    .unwrap();
+    );
+    let ctx = SessionContext::new();
+    dataset.fixture.register(&ctx);
 
-    let error = block_on(Formulation::CombineAllelesUnion.plan(&SessionContext::new(), &dataset))
+    let error = block_on(Formulation::CombineAllelesUnion.plan(&ctx, &dataset.dataset))
         .expect_err("the allele formulation requires alleles ordering");
 
     assert!(matches!(error, DataFusionError::Plan(_)));
@@ -65,9 +57,7 @@ fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
 
 #[test]
 fn formulations_keep_their_plan_shape_under_a_hostile_session() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
-    let dataset = dataset(&root, InputFormat::VORTEX);
+    let dataset = dataset(FixtureFormat::Vortex, LocusRepresentation::ContigPosition);
 
     for formulation in FORMULATIONS {
         let plan = physical_plan(formulation, &dataset);
@@ -77,9 +67,7 @@ fn formulations_keep_their_plan_shape_under_a_hostile_session() {
 
 #[test]
 fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
-    let dataset = dataset(&root, InputFormat::VORTEX);
+    let dataset = dataset(FixtureFormat::Vortex, LocusRepresentation::ContigPosition);
 
     for formulation in FORMULATIONS {
         let single_target = physical_plan_with_target(formulation, &dataset, 1);
@@ -95,11 +83,9 @@ fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
 #[test]
 fn combine_refs_union_parquet_merges_one_partition_per_sample_without_re_sorting() {
     for representation in REPRESENTATIONS {
-        let dir = tempfile::tempdir().unwrap();
-        let root = parquet_fixture(dir.path(), representation);
         let plan = physical_plan(
             Formulation::CombineRefsUnion,
-            &dataset(&root, InputFormat::PARQUET),
+            &dataset(FixtureFormat::Parquet, representation),
         );
         assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
     }
@@ -110,11 +96,9 @@ fn combine_refs_union_parquet_merges_one_partition_per_sample_without_re_sorting
 #[test]
 fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting() {
     for representation in REPRESENTATIONS {
-        let dir = tempfile::tempdir().unwrap();
-        let root = vortex_fixture(dir.path(), representation);
         let plan = physical_plan(
             Formulation::CombineRefsUnion,
-            &dataset(&root, InputFormat::VORTEX),
+            &dataset(FixtureFormat::Vortex, representation),
         );
         assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
     }
@@ -126,11 +110,9 @@ fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting(
 #[test]
 fn combine_alleles_union_parquet_merges_one_partition_per_sample_without_re_sorting() {
     for representation in REPRESENTATIONS {
-        let dir = tempfile::tempdir().unwrap();
-        let root = parquet_fixture(dir.path(), representation);
         let plan = physical_plan(
             Formulation::CombineAllelesUnion,
-            &dataset(&root, InputFormat::PARQUET),
+            &dataset(FixtureFormat::Parquet, representation),
         );
         assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
     }
@@ -141,11 +123,9 @@ fn combine_alleles_union_parquet_merges_one_partition_per_sample_without_re_sort
 #[test]
 fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorting() {
     for representation in REPRESENTATIONS {
-        let dir = tempfile::tempdir().unwrap();
-        let root = vortex_fixture(dir.path(), representation);
         let plan = physical_plan(
             Formulation::CombineAllelesUnion,
-            &dataset(&root, InputFormat::VORTEX),
+            &dataset(FixtureFormat::Vortex, representation),
         );
         assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
     }
@@ -153,15 +133,12 @@ fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorti
 
 #[test]
 fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = fixture::write_sample_tables(dir.path(), SAMPLES);
     let requested = SAMPLES[..2]
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    let dataset = dataset(&root, InputFormat::VORTEX)
-        .restrict_to(&requested)
-        .unwrap();
+    let mut dataset = dataset(FixtureFormat::Vortex, LocusRepresentation::ContigPosition);
+    dataset.dataset = dataset.dataset.restrict_to(&requested).unwrap();
     for formulation in FORMULATIONS {
         let plan = physical_plan(formulation, &dataset);
 
@@ -169,44 +146,48 @@ fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
     }
 }
 
-fn dataset(root: &str, input_format: InputFormat) -> Dataset {
-    let table_path = ListingTableUrl::parse(root).unwrap();
+struct FixtureDataset {
+    fixture: &'static Arc<fixture::DatasetFixture>,
+    dataset: Dataset,
+}
+
+fn dataset(format: FixtureFormat, representation: LocusRepresentation) -> FixtureDataset {
+    dataset_with_layout(
+        format,
+        representation,
+        Formulation::CombineAllelesUnion.required_layout(),
+    )
+}
+
+fn dataset_with_layout(
+    format: FixtureFormat,
+    representation: LocusRepresentation,
+    layout: DatasetLayout,
+) -> FixtureDataset {
+    let fixture = fixture::dataset_fixture(format, representation);
     let ctx = SessionContext::new();
-    let layout = Formulation::CombineAllelesUnion.required_layout();
-    block_on(Dataset::discover(
+    fixture.register(&ctx);
+    let dataset = block_on(Dataset::discover(
         &ctx,
-        table_path,
-        input_format,
+        fixture.table_path().clone(),
+        fixture.input_format(),
         layout,
         None,
     ))
-    .unwrap()
-}
-
-fn vortex_fixture(dir: &std::path::Path, representation: LocusRepresentation) -> String {
-    match representation {
-        LocusRepresentation::ContigPosition => fixture::write_sample_tables(dir, SAMPLES),
-        LocusRepresentation::Packed => fixture::write_packed_sample_tables(dir, SAMPLES),
-    }
-}
-
-fn parquet_fixture(dir: &std::path::Path, representation: LocusRepresentation) -> String {
-    match representation {
-        LocusRepresentation::ContigPosition => fixture::write_parquet_sample_tables(dir, SAMPLES),
-        LocusRepresentation::Packed => fixture::write_packed_parquet_sample_tables(dir, SAMPLES),
-    }
+    .unwrap();
+    FixtureDataset { fixture, dataset }
 }
 
 /// Builds a formulation under settings that would split an unpinned file scan.
 /// The sorted table must keep one partition per sample even when the optimizer
 /// is allowed to split files of any size.
-fn physical_plan(formulation: Formulation, dataset: &Dataset) -> Arc<dyn ExecutionPlan> {
+fn physical_plan(formulation: Formulation, dataset: &FixtureDataset) -> Arc<dyn ExecutionPlan> {
     physical_plan_with_target(formulation, dataset, 8)
 }
 
 fn physical_plan_with_target(
     formulation: Formulation,
-    dataset: &Dataset,
+    dataset: &FixtureDataset,
     target_partitions: usize,
 ) -> Arc<dyn ExecutionPlan> {
     let mut hostile_config = pipeline::session_config().with_target_partitions(target_partitions);
@@ -214,8 +195,9 @@ fn physical_plan_with_target(
     optimizer.repartition_file_min_size = 0;
     block_on(async {
         let ctx = SessionContext::new_with_config(hostile_config);
+        dataset.fixture.register(&ctx);
         formulation
-            .plan(&ctx, dataset)
+            .plan(&ctx, &dataset.dataset)
             .await
             .unwrap()
             .create_physical_plan()
@@ -224,6 +206,8 @@ fn physical_plan_with_target(
     })
 }
 
+// These tests only build plans and never execute them. Plan execution belongs in
+// the pipeline runner; see ADR 0006.
 fn block_on<F: Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
