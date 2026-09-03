@@ -23,3 +23,15 @@ Target style:
 Violation, for contrast: "A dataset detects the representation from its resolved
 schema; detection requires every field the representation names." Both clauses
 describe code behavior, not the concept.
+
+## Only the combiner run and cli tests read a filesystem
+
+`tests/it/combiner_run.rs` and `tests/it/cli.rs` may read and write disk. Every
+other test holds its dataset fixtures in an in-memory object store and creates
+no temporary directories. See
+[ADR 0010](docs/adr/0010-keep-tests-on-in-memory-object-stores.md) for why.
+
+The test: `tempdir`, `TempDir`, `CARGO_TARGET_TMPDIR`, or a filesystem path
+appearing in a test outside those two files is a violation. The fix is to move
+the test or switch it to an in-memory store, not to argue that the speed
+difference per operation is small; the ADR already weighed that.
