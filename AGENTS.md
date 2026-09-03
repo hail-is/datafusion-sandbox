@@ -16,4 +16,4 @@ Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/age
 
 ### Tests
 
-Test a module through its public API under `tests/it/`. Mirror the `src/` directory and module structure there, and register each top-level test module in `tests/it/main.rs`. Reserve inline unit tests for behavior that cannot be exercised through the public API.
+Test the library through its public API under `tests/it/`. Mirror the `src/` directory and module structure there, and register each top-level test module in `tests/it/main.rs`. In the library, reserve inline unit tests for behavior the public API cannot exercise. The binary is tested inline, so inline unit tests in the binary do not violate the mirror rule. Shared dataset fixtures are inventoried in the module doc of `tests/it/fixture/mod.rs`; check it before writing a new one. Only two test modules read a filesystem; see `CODING_STANDARDS.md`.
