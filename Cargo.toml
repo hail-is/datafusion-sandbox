@@ -24,8 +24,19 @@ futures-util = "0.3"
 divan = "0.1.21"
 tempfile = "3.27.0"
 
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
-# debug = true
+codegen-units = 1
+lto = true
+strip = true      # Eliminate debug info to minimize binary size
+
+[profile.release-nonlto]
+inherits = "release"
+codegen-units = 16
+lto = false
+strip = false        # Retain debug info for flamegraphs
 
 [[bench]]
 name = "example"
@@ -70,3 +81,9 @@ unnecessary_safety_comment = "warn"
 # a deliberate #[expect(..., reason = "…")] rather than a silent #[allow]
 allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
+
+# Silence the linker warning on mac: "__eh_frame section too large (max 16MB)
+# to encode dwarf unwind offsets in compact unwind table, performance of
+# exception handling might be affected"
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-no_warn_eh_frame_too_large"]
