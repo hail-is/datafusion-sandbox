@@ -23,9 +23,9 @@ use datafusion_sandbox::{
     pipeline,
 };
 
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
-use fixture::{FixtureFormat, SAMPLES};
+use fixture::{FixtureFormat, SAMPLES, block_on};
 
 const FORMULATIONS: [Formulation; 2] = [
     Formulation::CombineRefsUnion,
@@ -204,16 +204,6 @@ fn physical_plan_with_target(
             .await
             .unwrap()
     })
-}
-
-// These tests only build plans and never execute them. Plan execution belongs in
-// the pipeline runner; see ADR 0006.
-fn block_on<F: Future>(future: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(future)
 }
 
 /// A sort-preserving merge over one input partition per sample, with no

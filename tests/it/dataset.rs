@@ -1,4 +1,4 @@
-use crate::fixture;
+use crate::fixture::{self, block_on};
 
 use datafusion::{
     arrow::{
@@ -21,7 +21,7 @@ use datafusion_sandbox::{
 };
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 #[test]
 fn reads_one_sample_with_its_sample_id_attached() {
@@ -374,14 +374,4 @@ fn nodes_of<T: ExecutionPlan>(plan: &Arc<dyn ExecutionPlan>) -> Vec<Arc<dyn Exec
         found.extend(nodes_of::<T>(child));
     }
     found
-}
-
-// This runtime is for tests that never execute a plan. Plan execution belongs in
-// the pipeline runner; see ADR 0006.
-fn block_on<F: Future>(future: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(future)
 }

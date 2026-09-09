@@ -1,14 +1,16 @@
 //! A file-backed table that scans its files as one statistics-ordered partition.
 
+use crate::file_order::{Bounds, Direction, FileOrderError, recover_file_order};
+
 use async_trait::async_trait;
 use datafusion::{
     arrow::datatypes::{FieldRef, SchemaRef},
     catalog::{Session, TableProvider},
-    common::{DataFusionError, Result, ScalarValue, Statistics},
+    common::{DataFusionError, Result, ScalarValue, Statistics, stats::Precision},
     datasource::{
         file_format::FileFormat,
         listing::PartitionedFile,
-        physical_plan::{FileGroup, FileScanConfig, FileScanConfigBuilder},
+        physical_plan::{FileGroup, FileScanConfigBuilder},
         table_schema::TableSchema,
     },
     execution::object_store::ObjectStoreUrl,
@@ -25,7 +27,8 @@ pub struct AttachedScalar {
     pub value: ScalarValue,
 }
 
-/// A table whose files form one non-overlapping ordered sequence.
+/// A table whose files are assumed to hold one sorted table, scanned in the order their
+/// statistics recover. Files whose statistics refute every sorted order are a plan error.
 #[derive(Debug)]
 pub struct SortedTable {
     object_store_url: ObjectStoreUrl,
@@ -92,52 +95,134 @@ impl SortedTable {
         Ok(files)
     }
 
-    fn ordered_file_group(
-        &self,
-        files: Vec<PartitionedFile>,
-        ordering: &datafusion::physical_expr::LexOrdering,
-    ) -> Result<FileGroup> {
-        // Validate files individually so DataFusion's generic statistics error can name its file.
-        for file in &files {
-            let single_file_group = [FileGroup::new(vec![file.clone()])];
-            if let Err(error) = FileScanConfig::split_groups_by_statistics_with_target_partitions(
-                self.table_schema.table_schema(),
-                &single_file_group,
-                ordering,
-                1,
-            ) {
-                return Err(DataFusionError::Plan(format!(
-                    "sorted table file '{}' has no usable ordering statistics: {error}",
-                    file.object_meta.location
-                )));
-            }
-        }
-
-        let groups = FileScanConfig::split_groups_by_statistics_with_target_partitions(
-            self.table_schema.table_schema(),
-            &[FileGroup::new(files)],
-            ordering,
-            1,
-        )?;
-        match groups.as_slice() {
-            [] => Ok(FileGroup::new(vec![])),
-            [group] => Ok(group.clone()),
-            [_, overlapping_groups @ ..] => {
-                let offending_file = overlapping_groups
+    /// The file-schema index and direction of every ordering column.
+    ///
+    /// The attached scalar is a table column but not a file column, so ordering by it is an
+    /// error here rather than a constant bound.
+    fn ordering_columns(&self) -> Result<Vec<OrderingColumn>> {
+        self.ordering
+            .iter()
+            .map(|sort| {
+                let Expr::Column(column) = &sort.expr else {
+                    return Err(DataFusionError::Plan(format!(
+                        "sorted table ordering expression '{}' is not a column",
+                        sort.expr
+                    )));
+                };
+                let index = self
+                    .file_schema
+                    .fields()
                     .iter()
-                    .flat_map(FileGroup::iter)
-                    .next()
+                    .position(|field| field.name() == &column.name)
                     .ok_or_else(|| {
-                        DataFusionError::Internal(
-                            "statistics splitting produced an empty overlap group".to_string(),
-                        )
+                        DataFusionError::Plan(format!(
+                            "sorted table ordering column '{}' is not in the file schema",
+                            column.name
+                        ))
                     })?;
-                Err(DataFusionError::Plan(format!(
-                    "sorted table file '{}' overlaps another file in its declared ordering",
-                    offending_file.object_meta.location
-                )))
-            }
+                Ok(OrderingColumn {
+                    name: column.name.clone(),
+                    index,
+                    direction: if sort.asc {
+                        Direction::Ascending
+                    } else {
+                        Direction::Descending
+                    },
+                })
+            })
+            .collect()
+    }
+
+    /// Drops files with exactly zero rows and places the rest in the order their statistics
+    /// recover. See `file_order` and ADR 0011 for what that order trusts.
+    fn ordered_file_group(&self, files: Vec<PartitionedFile>) -> Result<FileGroup> {
+        let columns = self.ordering_columns()?;
+        let files: Vec<PartitionedFile> = files
+            .into_iter()
+            .filter(|file| !has_zero_rows(file))
+            .collect();
+        let bounds: Vec<Vec<Bounds>> = files
+            .iter()
+            .map(|file| columns.iter().map(|column| column.bounds(file)).collect())
+            .collect();
+        let directions: Vec<Direction> = columns.iter().map(|column| column.direction).collect();
+        let order = recover_file_order(&bounds, &directions)
+            .map_err(|error| plan_error(error, &files, &columns))?;
+
+        let mut unplaced: Vec<Option<PartitionedFile>> = files.into_iter().map(Some).collect();
+        let ordered = order
+            .iter()
+            .map(|&index| {
+                unplaced
+                    .get_mut(index)
+                    .and_then(Option::take)
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(format!(
+                            "recovered file order names file {index} twice or out of range"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(FileGroup::new(ordered))
+    }
+}
+
+struct OrderingColumn {
+    name: String,
+    index: usize,
+    direction: Direction,
+}
+
+impl OrderingColumn {
+    fn bounds(&self, file: &PartitionedFile) -> Bounds {
+        file.statistics
+            .as_ref()
+            .and_then(|statistics| statistics.column_statistics.get(self.index))
+            .map_or(
+                Bounds {
+                    min: Precision::Absent,
+                    max: Precision::Absent,
+                },
+                |column| Bounds {
+                    min: column.min_value.clone(),
+                    max: column.max_value.clone(),
+                },
+            )
+    }
+}
+
+fn has_zero_rows(file: &PartitionedFile) -> bool {
+    file.statistics
+        .as_ref()
+        .is_some_and(|statistics| statistics.num_rows == Precision::Exact(0))
+}
+
+fn plan_error(
+    error: FileOrderError,
+    files: &[PartitionedFile],
+    columns: &[OrderingColumn],
+) -> DataFusionError {
+    let path = |index: usize| {
+        files.get(index).map_or_else(
+            || format!("#{index}"),
+            |file| file.object_meta.location.to_string(),
+        )
+    };
+    match error {
+        FileOrderError::UnusableStatistics { file, column } => {
+            let column = columns
+                .get(column)
+                .map_or_else(|| format!("#{column}"), |column| column.name.clone());
+            DataFusionError::Plan(format!(
+                "sorted table file '{}' has no exact bounds on ordering column '{column}'",
+                path(file)
+            ))
         }
+        FileOrderError::Refuted { first, second } => DataFusionError::Plan(format!(
+            "sorted table files '{}' and '{}' have statistics that refute every sorted order",
+            path(first),
+            path(second)
+        )),
     }
 }
 
@@ -166,11 +251,13 @@ impl TableProvider for SortedTable {
             std::slice::from_ref(&self.ordering),
             state.execution_props(),
         )?;
-        let ordering = output_ordering.first().ok_or_else(|| {
-            DataFusionError::Plan("sorted table requires an ordering".to_string())
-        })?;
+        if output_ordering.is_empty() {
+            return Err(DataFusionError::Plan(
+                "sorted table requires an ordering".to_string(),
+            ));
+        }
         let files = self.files_with_statistics(state).await?;
-        let file_group = self.ordered_file_group(files, ordering)?;
+        let file_group = self.ordered_file_group(files)?;
         let source = self.format.file_source(self.table_schema.clone());
         let scan_config = FileScanConfigBuilder::new(self.object_store_url.clone(), source)
             .with_file_group(file_group)

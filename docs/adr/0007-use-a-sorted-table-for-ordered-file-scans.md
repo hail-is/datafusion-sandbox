@@ -8,6 +8,8 @@ Issue #44 proposed `ListingOptions::with_output_partitioning`. We adopted its us
 
 We will use a `SortedTable` provider for this scan shape. It takes explicit files, a schema, an ordering, and an optional scalar field. A dataset passes the stored ordering it expanded from its layout, but the provider does not assign domain meaning to it. It infers each file's statistics through its `FileFormat`, then calls `FileScanConfig::split_groups_by_statistics_with_target_partitions` with one target partition. That call both orders the files and proves they do not overlap. More than one returned group is a plan error rather than a silent fallback.
 
+> Superseded by [ADR 0011](0011-recover-file-order-instead-of-proving-it.md). The statistics grouping call is gone; the sorted table recovers the file order from the same statistics without proving it. The rest of this ADR stands.
+
 The scan declares `UnknownPartitioning(1)`. This is the strongest true claim. Any declared partitioning prevents `FileScanConfig::repartitioned` from splitting the group according to session settings, while a hash claim would incorrectly describe how rows were assigned. The provider then delegates plan creation to the format through `FileScanConfigBuilder`; it does not define a custom execution plan.
 
 ## Consequences

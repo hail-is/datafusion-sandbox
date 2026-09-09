@@ -89,7 +89,7 @@ _Avoid_: format (the encoding of one file), listing options, storage config
 **Generated table**:
 A table whose rows a generator produces on demand rather than reading them from storage. It has no
 encoded form and no files, so it cannot exercise listing, schema inference, or file statistics, and
-it declares its own sort order rather than proving one.
+it declares its own sort order rather than recovering one from statistics.
 _Avoid_: synthetic table, mock table, fake data
 
 **Dataset fixture**:
@@ -99,9 +99,17 @@ a generated table, it is encoded and stored.
 _Avoid_: test data, sample data, fixture (unqualified)
 
 **Sorted table**:
-A file-backed table that verifies and orders its files from column statistics, then scans them as
-one ordered partition. It has no knowledge of samples, contigs, or genomics.
+A file-backed table whose files are taken to hold one sorted table, scanned as one ordered
+partition in the file order its ordering statistics recover under that assumption. It has no
+knowledge of samples, contigs, or genomics. See
+[ADR 0011](docs/adr/0011-recover-file-order-instead-of-proving-it.md) for what the assumption
+trusts.
 _Avoid_: listing table, sample table, sorted scan
+
+**Ordering statistics**:
+The per-file minimum and maximum of each stored ordering field. The only evidence a sorted table
+has of where a file's rows fall.
+_Avoid_: file statistics (broader), min/max, pruning statistics
 
 **Locus**:
 A position in the genome: a contig together with a position within it. The unit both combiners
