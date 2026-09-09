@@ -12,6 +12,7 @@
 mod cli;
 mod combiner_run;
 mod dataset;
+mod file_order;
 mod fixture;
 mod format;
 mod formulation;

@@ -29,9 +29,20 @@ use futures::future::join_all;
 use object_store::{ObjectStore, memory::InMemory};
 
 use std::{
+    future::Future,
     path::Path,
     sync::{Arc, LazyLock},
 };
+
+/// Runs a future for a test that only builds plans and never executes one. Plan execution
+/// belongs in the pipeline runner; see ADR 0006.
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("building a current-thread runtime for a planning-only test")
+        .block_on(future)
+}
 
 /// Four samples from the `1kg_chr22` benchmark dataset, the most any test needs.
 pub const SAMPLES: &[&str] = &["HG00308", "HG00592", "HG02230", "NA18534"];
@@ -107,6 +118,12 @@ impl DatasetFixture {
     pub fn register(&self, ctx: &SessionContext) {
         let store_url = self.table_path.object_store();
         ctx.register_object_store(store_url.as_ref(), Arc::clone(&self.store));
+    }
+
+    /// The store holding the fixture's files, for tests that build a table from a listing
+    /// rather than through dataset discovery.
+    pub fn store(&self) -> &Arc<dyn ObjectStore> {
+        &self.store
     }
 }
 
