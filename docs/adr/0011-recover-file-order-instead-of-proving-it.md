@@ -36,6 +36,15 @@ its run, and could land after files whose rows follow it, with nothing at plan t
 file's bounds on a column are compared only when the file is constant on every earlier column, so
 exactness is required only there and is checked at the comparison. Null counts do not matter.
 
+DataFusion still applies the composed-row proof inside `FileScanConfig` whenever it computes
+ordering equivalence properties. Recovering the file order here does not stop that later check from
+dropping the declared ordering on an accepted layout. [ADR
+0012](0012-preserve-declared-ordering-with-a-data-source-wrapper.md) addresses this with a delegating
+data source around the `FileScanConfig` in the format's returned `DataSourceExec`. It declares the
+recovered ordering, retains constraints and `UnknownPartitioning(1)`, and preserves those properties
+through optimizer rewrites. Plan creation stays with the format, with no custom execution plan.
+This changes how the scan reports its ordering, not how we recover it or what we trust.
+
 ## Consequences
 
 Sorted tables accept any layout that is sorted, including cuts inside a locus, and reject only

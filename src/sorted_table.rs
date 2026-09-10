@@ -1,4 +1,22 @@
 //! A file-backed table that scans its files as one statistics-ordered partition.
+//!
+//! This provider composes public listing-table building blocks, not a `ListingTable`.
+//! Its data source wrapper preserves recovered ordering through physical optimization;
+//! plan creation and execution stay with the format. See ADR 0012.
+//!
+//! Deliberately excluded listing-table capabilities:
+//! - File-group repartitioning contradicts the single ordered partition, per ADR 0007.
+//! - Path-derived Hive columns are unnecessary; the caller supplies the attached scalar.
+//! - Listing and schema inference belong to the dataset, per ADR 0005.
+//! - Table writes go through the format's sink instead.
+//! - Footer sort order is not ordering evidence: our writers do not record it, Vortex
+//!   has no equivalent, and ADR 0011 already trusts the writer beyond that evidence.
+//! - Schema drift adapters would hide mismatched files; a dataset declares one schema
+//!   and mismatches should fail rather than be adapted.
+
+mod ordered_source;
+
+use ordered_source::OrderedSource;
 
 use crate::file_order::{Bounds, Direction, FileOrderError, recover_file_order};
 
@@ -10,7 +28,8 @@ use datafusion::{
     datasource::{
         file_format::FileFormat,
         listing::PartitionedFile,
-        physical_plan::{FileGroup, FileScanConfigBuilder},
+        physical_plan::{FileGroup, FileScanConfig, FileScanConfigBuilder},
+        source::DataSourceExec,
         table_schema::TableSchema,
     },
     execution::object_store::ObjectStoreUrl,
@@ -264,9 +283,36 @@ impl TableProvider for SortedTable {
             .with_statistics(Statistics::new_unknown(self.table_schema.table_schema()))
             .with_projection_indices(projection.cloned())?
             .with_limit(limit)
-            .with_output_ordering(output_ordering)
+            .with_output_ordering(output_ordering.clone())
             .with_output_partitioning(Some(Partitioning::UnknownPartitioning(1)))
             .build();
-        self.format.create_physical_plan(state, scan_config).await
+        let plan = self.format.create_physical_plan(state, scan_config).await?;
+        let incompatible = || {
+            DataFusionError::Plan(format!(
+                "sorted table format '{}' must return a DataSourceExec containing a FileScanConfig with the declared ordering and one UnknownPartitioning(1) file group; cannot preserve recovered ordering in plan '{}'",
+                self.format.get_ext(),
+                plan.name(),
+            ))
+        };
+        let exec = plan
+            .downcast_ref::<DataSourceExec>()
+            .ok_or_else(incompatible)?;
+        let config = exec
+            .data_source()
+            .downcast_ref::<FileScanConfig>()
+            .ok_or_else(incompatible)?;
+        if config.file_groups.len() != 1
+            || !matches!(
+                config.output_partitioning,
+                Some(Partitioning::UnknownPartitioning(1))
+            )
+            || output_ordering
+                .iter()
+                .any(|ordering| !config.output_ordering.contains(ordering))
+        {
+            return Err(incompatible());
+        }
+        let source = OrderedSource::new(config.clone())?;
+        Ok(Arc::new(exec.clone().with_data_source(Arc::new(source))))
     }
 }

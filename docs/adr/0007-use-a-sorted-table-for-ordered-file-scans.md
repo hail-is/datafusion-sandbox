@@ -6,15 +6,17 @@ The earlier one-shared-scan formulation also relied on grouping by partition val
 
 Issue #44 proposed `ListingOptions::with_output_partitioning`. We adopted its useful mechanism, but not through `ListingTable`. `list_files_for_declared_output_partitioning` ignores partition values and calls `split_files(n)` in `datafusion-catalog-listing-55.0.0/src/table.rs:910-946`. That method sorts paths and divides them into chunks with equal file counts. It yields one sample per group only when every sample has the same number of files.
 
+The provider remains independent. It composes the public listing-table building blocks, including `FileScanConfigBuilder`, the format's file source, and the format's plan creation. It does not wrap or delegate to `ListingTable`, whose private file grouping cannot enforce this scan shape.
+
 We will use a `SortedTable` provider for this scan shape. It takes explicit files, a schema, an ordering, and an optional scalar field. A dataset passes the stored ordering it expanded from its layout, but the provider does not assign domain meaning to it. It infers each file's statistics through its `FileFormat`, then calls `FileScanConfig::split_groups_by_statistics_with_target_partitions` with one target partition. That call both orders the files and proves they do not overlap. More than one returned group is a plan error rather than a silent fallback.
 
 > Superseded by [ADR 0011](0011-recover-file-order-instead-of-proving-it.md). The statistics grouping call is gone; the sorted table recovers the file order from the same statistics without proving it. The rest of this ADR stands.
 
-The scan declares `UnknownPartitioning(1)`. This is the strongest true claim. Any declared partitioning prevents `FileScanConfig::repartitioned` from splitting the group according to session settings, while a hash claim would incorrectly describe how rows were assigned. The provider then delegates plan creation to the format through `FileScanConfigBuilder`; it does not define a custom execution plan.
+The scan declares `UnknownPartitioning(1)`. This is the strongest true claim. Any declared partitioning prevents `FileScanConfig::repartitioned` from splitting the group according to session settings, while a hash claim would incorrectly describe how rows were assigned. The provider delegates plan creation to the format through `FileScanConfigBuilder`; it does not define a custom execution plan. As [ADR 0012](0012-preserve-declared-ordering-with-a-data-source-wrapper.md) records, it wraps the `FileScanConfig` from the format's returned `DataSourceExec` in a delegating data source and rebuilds the exec. The wrapper exists only to state the recovered ordering and preserve it through optimizer rewrites, retaining constraints and the single unknown partition.
 
 ## Consequences
 
-Sorted tables reject files with missing ordering statistics and file ranges that overlap. Both errors name a file and occur while planning. File names do not determine scan order.
+Under ADR 0011, sorted tables reject missing or inexact bounds where comparison requires them, and statistics that refute every sorted order. Overlapping composed bounds alone are not a refutation. Errors name a file and occur while planning. File names do not determine scan order.
 
 The partition count belongs to the table rather than `target_partitions` or `preserve_file_partitions`. A hostile session cannot change this scan into several partitions.
 

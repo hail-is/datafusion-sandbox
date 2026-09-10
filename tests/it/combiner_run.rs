@@ -2,8 +2,9 @@ use crate::fixture;
 
 use datafusion::{
     arrow::{
-        array::{ArrayRef, Int32Array, StringViewArray},
+        array::{ArrayRef, Int32Array},
         record_batch::RecordBatch,
+        util::display::array_value_to_string,
     },
     error::Result,
     parquet::{
@@ -18,6 +19,7 @@ use datafusion_sandbox::{
     combiner_run::{Action, CombinerRun, Outcome},
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
+    locus::LocusRepresentation,
 };
 use std::{path::Path, sync::Arc};
 
@@ -66,7 +68,7 @@ fn renders_collected_contig_position_rows() {
 
 #[test]
 fn renders_collected_packed_rows() {
-    let dataset = fixture::packed_disk_fixture();
+    let dataset = fixture::packed_disk_fixture(FixtureFormat::Vortex);
 
     let rendered = run(
         Formulation::CombineAllelesUnion,
@@ -81,11 +83,11 @@ fn renders_collected_packed_rows() {
     .unwrap();
 
     assert!(
-        rendered.contains("| locus       | alleles |"),
+        rendered.contains("| locus      | alleles |"),
         "rendered outcome:\n{rendered}"
     );
     assert!(
-        rendered.contains("| 4294967297  | A,G     | 1"),
+        rendered.contains("| 4294967297 | A,G     | 1"),
         "rendered outcome:\n{rendered}"
     );
 }
@@ -190,30 +192,140 @@ fn compact_and_standard_vortex_have_different_file_sizes() {
 }
 
 #[test]
-fn reads_parquet_dataset_into_record_batches() {
-    let input = fixture::contig_position_disk_fixture(FixtureFormat::Parquet);
+fn collects_ordered_alleles_with_ranks_across_file_cuts() {
+    for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
+        for representation in [
+            LocusRepresentation::ContigPosition,
+            LocusRepresentation::Packed,
+        ] {
+            let input = match representation {
+                LocusRepresentation::ContigPosition => {
+                    fixture::contig_position_disk_fixture(format)
+                }
+                LocusRepresentation::Packed => fixture::packed_disk_fixture(format),
+            };
+            let batches = expect_batches(
+                run(
+                    Formulation::CombineAllelesUnion,
+                    input.table_path(),
+                    input.input_format(),
+                    Action::Collect,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            );
+            let rows = batches
+                .iter()
+                .flat_map(|batch| {
+                    (0..batch.num_rows()).map(|row| {
+                        batch
+                            .columns()
+                            .iter()
+                            .map(|column| array_value_to_string(column, row).unwrap())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let expected = match representation {
+                LocusRepresentation::ContigPosition => vec![
+                    vec!["chr1", "1", "A,G", "1"],
+                    vec!["chr1", "2", "A,C", "1"],
+                    vec!["chr1", "2", "A,G", "2"],
+                    vec!["chr1", "3", "A,C", "1"],
+                    vec!["chr1", "4", "A,G", "1"],
+                    vec!["chr2", "1", "A,C", "1"],
+                    vec!["chr2", "2", "A,G", "1"],
+                    vec!["chr2", "3", "A,C", "1"],
+                ],
+                LocusRepresentation::Packed => vec![
+                    vec!["4294967297", "A,G", "1"],
+                    vec!["4294967298", "A,C", "1"],
+                    vec!["4294967298", "A,G", "2"],
+                    vec!["4294967299", "A,C", "1"],
+                    vec!["4294967300", "A,G", "1"],
+                    vec!["8589934593", "A,C", "1"],
+                    vec!["8589934594", "A,G", "1"],
+                    vec!["8589934595", "A,C", "1"],
+                ],
+            };
+            assert_eq!(rows, expected);
+        }
+    }
+}
 
-    let batches = expect_batches(
-        run(
-            Formulation::CombineAllelesUnion,
-            input.table_path(),
-            input.input_format(),
-            Action::Collect,
-            None,
-            None,
-        )
-        .unwrap(),
-    );
-
-    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 8);
-    let first = batches.first().unwrap();
-    let alleles = first
-        .column_by_name("alleles")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringViewArray>()
-        .unwrap();
-    assert_eq!(alleles.value(0), "A,G");
+#[test]
+fn collects_references_in_locus_order_across_file_cuts() {
+    for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
+        for representation in [
+            LocusRepresentation::ContigPosition,
+            LocusRepresentation::Packed,
+        ] {
+            let input = match representation {
+                LocusRepresentation::ContigPosition => {
+                    fixture::contig_position_disk_fixture(format)
+                }
+                LocusRepresentation::Packed => fixture::packed_disk_fixture(format),
+            };
+            let batches = expect_batches(
+                run(
+                    Formulation::CombineRefsUnion,
+                    input.table_path(),
+                    input.input_format(),
+                    Action::Collect,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            );
+            let columns = match representation {
+                LocusRepresentation::ContigPosition => vec!["contig", "position"],
+                LocusRepresentation::Packed => vec!["locus"],
+            };
+            let loci = batches
+                .iter()
+                .flat_map(|batch| {
+                    let columns = &columns;
+                    (0..batch.num_rows()).map(move |row| {
+                        columns
+                            .iter()
+                            .map(|name| {
+                                array_value_to_string(batch.column_by_name(name).unwrap(), row)
+                                    .unwrap()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            // The reference combiner orders only by locus, not alleles or sample id.
+            let expected = match representation {
+                LocusRepresentation::ContigPosition => vec![
+                    vec!["chr1", "1"],
+                    vec!["chr1", "2"],
+                    vec!["chr1", "2"],
+                    vec!["chr1", "3"],
+                    vec!["chr1", "4"],
+                    vec!["chr2", "1"],
+                    vec!["chr2", "2"],
+                    vec!["chr2", "3"],
+                ],
+                LocusRepresentation::Packed => vec![
+                    vec!["4294967297"],
+                    vec!["4294967298"],
+                    vec!["4294967298"],
+                    vec!["4294967299"],
+                    vec!["4294967300"],
+                    vec!["8589934593"],
+                    vec!["8589934594"],
+                    vec!["8589934595"],
+                ],
+            }
+            .into_iter()
+            .flat_map(|locus| std::iter::repeat_n(locus, SAMPLES.len()))
+            .collect::<Vec<_>>();
+            assert_eq!(loci, expected);
+        }
+    }
 }
 
 #[test]
