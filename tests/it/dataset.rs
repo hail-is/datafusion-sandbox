@@ -5,6 +5,7 @@ use datafusion::{
         array::{Int32Array, StringArray},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
+        util::display::array_value_to_string,
     },
     common::DataFusionError,
     datasource::listing::ListingTableUrl,
@@ -24,20 +25,109 @@ use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 use std::sync::Arc;
 
 #[test]
-fn reads_one_sample_with_its_sample_id_attached() {
-    let fixture = Arc::clone(fixture::dataset_fixture(
+fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
+    for format in [
+        fixture::FixtureFormat::Parquet,
         fixture::FixtureFormat::Vortex,
-        LocusRepresentation::ContigPosition,
-    ));
-    let sample_id = fixture::SAMPLES
-        .first()
-        .expect("the shared sample set is nonempty")
-        .to_string();
+    ] {
+        for representation in [
+            LocusRepresentation::ContigPosition,
+            LocusRepresentation::Packed,
+        ] {
+            let fixture = Arc::clone(fixture::dataset_fixture(format, representation));
+            let sample_id = fixture::SAMPLES[0].to_string();
 
-    pipeline::run(
-        move |ctx| {
-            fixture.register(&ctx);
-            async move {
+            pipeline::run(
+                move |ctx| {
+                    fixture.register(&ctx);
+                    async move {
+                        let dataset = Dataset::discover(
+                            &ctx,
+                            fixture.table_path().clone(),
+                            fixture.input_format(),
+                            allele_layout(),
+                            None,
+                        )
+                        .await?
+                        .restrict_to(std::slice::from_ref(&sample_id))?;
+                        let df = dataset.read(&ctx).await?;
+                        let columns = match representation {
+                            LocusRepresentation::ContigPosition => {
+                                vec!["contig", "position", "alleles", "s"]
+                            }
+                            LocusRepresentation::Packed => vec!["locus", "alleles", "s"],
+                        };
+                        // Do not sort here: the dataset read must preserve file and row order.
+                        let batches = df.select_columns(&columns)?.collect().await?;
+                        let rows = batches
+                            .iter()
+                            .flat_map(|batch| {
+                                (0..batch.num_rows()).map(|row| {
+                                    batch
+                                        .columns()
+                                        .iter()
+                                        .map(|column| array_value_to_string(column, row).unwrap())
+                                        .collect::<Vec<_>>()
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        let expected = match representation {
+                            LocusRepresentation::ContigPosition => vec![
+                                vec!["chr1", "1", "A,G"],
+                                vec!["chr1", "2", "A,C"],
+                                vec!["chr1", "2", "A,G"],
+                                vec!["chr1", "3", "A,C"],
+                                vec!["chr1", "4", "A,G"],
+                                vec!["chr2", "1", "A,C"],
+                                vec!["chr2", "2", "A,G"],
+                                vec!["chr2", "3", "A,C"],
+                            ],
+                            LocusRepresentation::Packed => vec![
+                                vec!["4294967297", "A,G"],
+                                vec!["4294967298", "A,C"],
+                                vec!["4294967298", "A,G"],
+                                vec!["4294967299", "A,C"],
+                                vec!["4294967300", "A,G"],
+                                vec!["8589934593", "A,C"],
+                                vec!["8589934594", "A,G"],
+                                vec!["8589934595", "A,C"],
+                            ],
+                        }
+                        .into_iter()
+                        .map(|mut row| {
+                            row.push(&sample_id);
+                            row
+                        })
+                        .collect::<Vec<_>>();
+                        assert_eq!(rows, expected);
+                        Ok(())
+                    }
+                },
+                PipelineOptions {
+                    threads: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
+fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
+    for format in [
+        fixture::FixtureFormat::Parquet,
+        fixture::FixtureFormat::Vortex,
+    ] {
+        for representation in [
+            LocusRepresentation::ContigPosition,
+            LocusRepresentation::Packed,
+        ] {
+            let fixture = fixture::dataset_fixture(format, representation);
+
+            block_on(async {
+                let ctx = SessionContext::new();
+                fixture.register(&ctx);
                 let dataset = Dataset::discover(
                     &ctx,
                     fixture.table_path().clone(),
@@ -45,75 +135,28 @@ fn reads_one_sample_with_its_sample_id_attached() {
                     allele_layout(),
                     None,
                 )
-                .await?
-                .restrict_to(std::slice::from_ref(&sample_id))?;
-                let df = dataset.read(&ctx).await?;
+                .await
+                .unwrap();
+                let plan = dataset
+                    .read(&ctx)
+                    .await
+                    .unwrap()
+                    .create_physical_plan()
+                    .await
+                    .unwrap();
+                let unions = nodes_of::<UnionExec>(&plan);
 
-                assert!(df.schema().has_column_with_unqualified_name("s"));
-                assert!(df.schema().has_column_with_unqualified_name("contig"));
-                assert!(df.schema().has_column_with_unqualified_name("alleles"));
-                let batches = df.collect().await?;
-                assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 8);
-                for batch in batches {
-                    let sample_ids = batch
-                        .column_by_name("s")
-                        .unwrap()
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .unwrap();
-                    assert!(
-                        (0..batch.num_rows())
-                            .all(|row| sample_ids.value(row) == sample_id.as_str())
-                    );
-                }
-                Ok(())
-            }
-        },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-}
-
-#[test]
-fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
-    let fixture = fixture::dataset_fixture(
-        fixture::FixtureFormat::Vortex,
-        LocusRepresentation::ContigPosition,
-    );
-
-    block_on(async {
-        let ctx = SessionContext::new();
-        fixture.register(&ctx);
-        let dataset = Dataset::discover(
-            &ctx,
-            fixture.table_path().clone(),
-            fixture.input_format(),
-            allele_layout(),
-            None,
-        )
-        .await
-        .unwrap();
-        let plan = dataset
-            .read(&ctx)
-            .await
-            .unwrap()
-            .create_physical_plan()
-            .await
-            .unwrap();
-        let unions = nodes_of::<UnionExec>(&plan);
-
-        assert_eq!(unions.len(), 1);
-        assert_eq!(unions[0].children().len(), 4);
-        assert!(
-            unions[0]
-                .children()
-                .iter()
-                .all(|input| input.output_partitioning().partition_count() == 1)
-        );
-    });
+                assert_eq!(unions.len(), 1);
+                assert_eq!(unions[0].children().len(), fixture::SAMPLES.len());
+                assert!(
+                    unions[0]
+                        .children()
+                        .iter()
+                        .all(|input| input.output_partitioning().partition_count() == 1)
+                );
+            });
+        }
+    }
 }
 
 #[test]

@@ -11,6 +11,21 @@
 //! - Vortex with contig-position loci
 //! - Vortex with packed loci
 //! - Parquet with contig-position loci
+//! - Parquet with packed loci
+//!
+//! Except for the single-file no-alleles dataset, each sample has eight rows in
+//! four files, listed here in locus-then-alleles order. Names sort in reverse.
+//!
+//! | File stem | Rows as contig, position, alleles |
+//! | --- | --- |
+//! | d | chr1, 1, A,G; chr1, 2, A,C |
+//! | c | chr1, 2, A,G; chr1, 3, A,C |
+//! | b | chr1, 4, A,G; chr2, 1, A,C |
+//! | a | chr2, 2, A,G; chr2, 3, A,C |
+//!
+//! The d/c cut splits the alleles at chr1:2. The c/b and b/a cuts fall between
+//! positions within a contig. File b spans contigs; d, c, and a have constant
+//! contigs. Packed loci use the contig ordinal in the high 32 bits.
 
 use datafusion::{
     arrow::{
@@ -47,12 +62,15 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// Four samples from the `1kg_chr22` benchmark dataset, the most any test needs.
 pub const SAMPLES: &[&str] = &["HG00308", "HG00592", "HG02230", "NA18534"];
 
-/// Contigs and filenames in locus order. The filenames sort in the opposite
-/// order, so a reader must use statistics rather than path order.
-const CONTIG_FILES: &[(&str, &str)] = &[("chr1", "d"), ("chr2", "c"), ("chr3", "b"), ("chr4", "a")];
+type SampleRow = (&'static str, i32, &'static str);
 
-/// Loci per contig. Four contigs keep the existing eight rows per sample.
-const ROWS_PER_CONTIG: i32 = 2;
+/// Files and their rows in locus-then-alleles order, shared by memory and disk.
+const SAMPLE_FILES: &[(&str, [SampleRow; 2])] = &[
+    ("d", [("chr1", 1, "A,G"), ("chr1", 2, "A,C")]),
+    ("c", [("chr1", 2, "A,G"), ("chr1", 3, "A,C")]),
+    ("b", [("chr1", 4, "A,G"), ("chr2", 1, "A,C")]),
+    ("a", [("chr2", 2, "A,G"), ("chr2", 3, "A,C")]),
+];
 
 #[derive(Clone, Copy)]
 pub enum FixtureFormat {
@@ -169,12 +187,12 @@ pub fn contig_position_disk_fixture(format: FixtureFormat) -> DiskDatasetFixture
     build_disk_fixture(name, format, LocusRepresentation::ContigPosition)
 }
 
-pub fn packed_disk_fixture() -> DiskDatasetFixture {
-    build_disk_fixture(
-        "vortex-packed-",
-        FixtureFormat::Vortex,
-        LocusRepresentation::Packed,
-    )
+pub fn packed_disk_fixture(format: FixtureFormat) -> DiskDatasetFixture {
+    let name = match format {
+        FixtureFormat::Vortex => "vortex-packed-",
+        FixtureFormat::Parquet => "parquet-packed-",
+    };
+    build_disk_fixture(name, format, LocusRepresentation::Packed)
 }
 
 fn build_disk_fixture(
@@ -341,12 +359,12 @@ fn build_sample_tables(
             let pipeline_root = target.register(&ctx);
             let mut writes = Vec::new();
             for sample in sample_set {
-                for &(contig, filename) in CONTIG_FILES {
+                for (filename, rows) in SAMPLE_FILES {
                     let path = format!(
                         "{pipeline_root}/s={sample}/{filename}.{}",
                         output_format.extension()
                     );
-                    let df = ctx.read_batch(sample_batch(contig, representation))?;
+                    let df = ctx.read_batch(sample_batch(rows, representation))?;
                     writes.push(async move { output_format.write(df, &path).await });
                 }
             }
@@ -364,19 +382,13 @@ fn build_sample_tables(
     .unwrap_or_else(|error| panic!("writing the {error_context} dataset fixture: {error}"))
 }
 
-/// One sample's rows, sorted by the locus ordering: one locus per position, with
-/// alleles alternating between two values.
-fn sample_batch(contig: &str, representation: LocusRepresentation) -> RecordBatch {
-    let alleles = StringArray::from_iter_values(
-        (1..=ROWS_PER_CONTIG).map(|p| if p % 2 == 0 { "A,C" } else { "A,G" }),
-    );
+fn sample_batch(rows: &[(&str, i32, &str)], representation: LocusRepresentation) -> RecordBatch {
+    let alleles = StringArray::from_iter_values(rows.iter().map(|&(_, _, alleles)| alleles));
     let (fields, columns): (Vec<Field>, Vec<ArrayRef>) = match representation {
         LocusRepresentation::ContigPosition => {
-            let contigs = StringArray::from_iter_values(std::iter::repeat_n(
-                contig,
-                ROWS_PER_CONTIG as usize,
-            ));
-            let positions = Int32Array::from_iter_values(1..=ROWS_PER_CONTIG);
+            let contigs = StringArray::from_iter_values(rows.iter().map(|&(contig, _, _)| contig));
+            let positions =
+                Int32Array::from_iter_values(rows.iter().map(|&(_, position, _)| position));
             (
                 vec![
                     Field::new("contig", DataType::Utf8, false),
@@ -387,10 +399,10 @@ fn sample_batch(contig: &str, representation: LocusRepresentation) -> RecordBatc
             )
         }
         LocusRepresentation::Packed => {
-            let ordinal = contig.strip_prefix("chr").unwrap().parse::<i64>().unwrap();
-            let loci = Int64Array::from_iter_values(
-                (1..=ROWS_PER_CONTIG).map(|position| (ordinal << 32) | i64::from(position)),
-            );
+            let loci = Int64Array::from_iter_values(rows.iter().map(|&(contig, position, _)| {
+                let ordinal = contig.strip_prefix("chr").unwrap().parse::<i64>().unwrap();
+                (ordinal << 32) | i64::from(position)
+            }));
             (
                 vec![
                     Field::new("locus", DataType::Int64, false),
