@@ -9,6 +9,7 @@ use datafusion::{
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     },
+    catalog::TableProvider,
     common::{ColumnStatistics, DataFusionError, ScalarValue, Statistics, stats::Precision},
     datasource::{
         file_format::{FileFormat, parquet::ParquetFormat},
@@ -16,6 +17,7 @@ use datafusion::{
         source::DataSourceExec,
     },
     execution::object_store::ObjectStoreUrl,
+    logical_expr::{Expr, TableProviderFilterPushDown, expr_fn::unnest},
     physical_expr::{
         LexOrdering, PhysicalSortExpr, expressions::Column, projection::ProjectionExprs,
     },
@@ -125,6 +127,292 @@ fn table(files: Vec<PartitionedFile>) -> SortedTable {
         ordering(),
         None,
     )
+}
+
+fn scalar_table(files: Vec<PartitionedFile>, value: ScalarValue) -> SortedTable {
+    SortedTable::new(
+        ObjectStoreUrl::parse("memory://scalar-filters").unwrap(),
+        Arc::new(ParquetFormat::default()),
+        files,
+        schema(),
+        ordering(),
+        Some(AttachedScalar {
+            field: Arc::new(Field::new("source", DataType::Utf8, true)),
+            value,
+        }),
+    )
+}
+
+#[tokio::test]
+#[expect(
+    deprecated,
+    reason = "wildcards are explicitly excluded from exact filters"
+)]
+async fn attached_scalar_filter_classification_matches_the_expression_contract() {
+    use datafusion::logical_expr::expr_fn::{exists, in_subquery, scalar_subquery};
+    let table = Arc::new(scalar_table(vec![], ScalarValue::from("sample-1")));
+    let ctx = SessionContext::new();
+    ctx.register_table("t", table.clone()).unwrap();
+    let df_schema = table.schema().try_into().unwrap();
+    let subquery = Arc::new(
+        ctx.sql("SELECT CAST(position AS VARCHAR) FROM t")
+            .await
+            .unwrap()
+            .into_unoptimized_plan(),
+    );
+    let parse = |sql| ctx.parse_sql_expr(sql, &df_schema).unwrap();
+    let exact = vec![
+        col("source").eq(lit("sample-1")),
+        parse("source IN ('sample-1', 'sample-2') AND source IS NOT NULL"),
+        parse("lower(source) = 'sample-1'"),
+        parse("source = CAST(current_date() AS VARCHAR)"),
+        parse("source = NULL"),
+        lit(true),
+    ];
+    let inexact = vec![
+        col("position").gt(lit(1)),
+        col("source")
+            .eq(lit("sample-1"))
+            .and(col("position").gt(lit(1))),
+        col("source")
+            .eq(lit("sample-1"))
+            .or(col("position").gt(lit(1))),
+        parse("source = CAST(random() AS VARCHAR)"),
+        parse("max(source) = 'sample-1'"),
+        parse("first_value(source) OVER () = 'sample-1'"),
+        Expr::Wildcard {
+            qualifier: None,
+            options: Box::default(),
+        },
+        unnest(col("source")),
+        parse("source = $1"),
+        col("source").eq(scalar_subquery(Arc::clone(&subquery))),
+        in_subquery(col("source"), Arc::clone(&subquery)),
+        exists(subquery),
+        Expr::OuterReferenceColumn(
+            Arc::new(Field::new("position", DataType::Int32, false)),
+            datafusion::common::Column::new_unqualified("position"),
+        ),
+        Expr::ScalarVariable(
+            Arc::new(Field::new("external", DataType::Utf8, true)),
+            vec!["external".to_string()],
+        ),
+    ];
+    for (filters, expected) in [
+        (&exact, TableProviderFilterPushDown::Exact),
+        (&inexact, TableProviderFilterPushDown::Inexact),
+    ] {
+        let refs: Vec<_> = filters.iter().collect();
+        let classifications = table.supports_filters_pushdown(&refs).unwrap();
+        assert_eq!(
+            classifications,
+            vec![expected; filters.len()],
+            "{filters:?}"
+        );
+    }
+    let without_scalar = self::table(vec![]);
+    assert_eq!(
+        without_scalar
+            .supports_filters_pushdown(&[&lit(true), &col("position").gt(lit(1))])
+            .unwrap(),
+        vec![TableProviderFilterPushDown::Inexact; 2],
+    );
+}
+
+#[test]
+fn false_and_null_scalar_filters_return_projected_empty_plans_without_opening_files() {
+    pipeline::run(
+        |ctx| async move {
+            let store_url = ObjectStoreUrl::parse("memory://scalar-filters")?;
+            ctx.register_object_store(
+                store_url.as_ref(),
+                Arc::new(object_store::memory::InMemory::new()),
+            );
+            // No file exists: either footer inference or execution-time opens would fail.
+            let table = scalar_table(
+                vec![PartitionedFile::new("missing.parquet", 100)],
+                ScalarValue::from("sample-1"),
+            );
+            for filter in [
+                col("source").eq(lit("sample-2")),
+                col("source").eq(lit(ScalarValue::Utf8(None))),
+                lit(ScalarValue::Null),
+                lit(ScalarValue::Boolean(None)),
+            ] {
+                for projection in [None, Some(vec![0]), Some(vec![1, 0]), Some(vec![])] {
+                    let plan = table
+                        .scan(
+                            &ctx.state(),
+                            projection.as_ref(),
+                            std::slice::from_ref(&filter),
+                            None,
+                        )
+                        .await?;
+                    assert!(plan.is::<datafusion::physical_plan::empty::EmptyExec>());
+                    let expected = projection.as_ref().map_or_else(
+                        || table.schema(),
+                        |indices| Arc::new(table.schema().project(indices).unwrap()),
+                    );
+                    assert_eq!(plan.schema(), expected);
+                    let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx()).await?;
+                    assert_eq!(batches, []);
+                }
+            }
+            // The same scan without exclusion must attempt to read the missing footer.
+            let error = table.scan(&ctx.state(), None, &[], None).await.unwrap_err();
+            assert!(error.to_string().contains("missing.parquet"), "{error}");
+            Ok(())
+        },
+        PipelineOptions {
+            threads: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn true_scalar_filters_leave_the_scan_unchanged_with_its_limit() {
+    let ctx = SessionContext::new();
+    let store_url = ObjectStoreUrl::parse("memory://scalar-filters").unwrap();
+    ctx.register_object_store(
+        store_url.as_ref(),
+        Arc::new(object_store::memory::InMemory::new()),
+    );
+    let table = Arc::new(scalar_table(
+        vec![
+            file("later.parquet", Some(11), Some(20)),
+            file("earlier.parquet", Some(1), Some(10)),
+        ],
+        ScalarValue::from("sample-1"),
+    ));
+    let df_schema = table.schema().try_into().unwrap();
+    let filters = [
+        col("source").eq(lit("sample-1")),
+        ctx.parse_sql_expr(
+            "lower(source) = 'sample-1' AND current_date() = current_date()",
+            &df_schema,
+        )
+        .unwrap(),
+    ];
+    let projection = vec![0];
+    let baseline = table
+        .scan(&ctx.state(), Some(&projection), &[], Some(9))
+        .await
+        .unwrap();
+    let plan = table
+        .scan(&ctx.state(), Some(&projection), &filters, Some(9))
+        .await
+        .unwrap();
+    assert_eq!(plan.fetch(), Some(9));
+    assert_eq!(plan.schema(), baseline.schema());
+    assert_eq!(plan.output_ordering(), baseline.output_ordering());
+    assert_eq!(
+        displayable(plan.as_ref()).indent(true).to_string(),
+        displayable(baseline.as_ref()).indent(true).to_string()
+    );
+
+    let inexact = table
+        .scan(&ctx.state(), None, &[col("position").gt(lit(5))], Some(9))
+        .await
+        .unwrap();
+    assert_eq!(inexact.fetch(), Some(9));
+    let plan = ctx
+        .read_table(table)
+        .unwrap()
+        .filter(filters[0].clone())
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    assert!(
+        plan.is::<DataSourceExec>(),
+        "{}",
+        displayable(plan.as_ref()).indent(true)
+    );
+}
+
+#[test]
+fn inexact_filters_keep_the_logical_residual_and_do_not_truncate_before_filtering() {
+    use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+    use datafusion::logical_expr::LogicalPlan;
+
+    for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
+        for decode_time_filtering in [false, true] {
+            let fixture = Arc::clone(fixture::dataset_fixture(
+                format,
+                LocusRepresentation::ContigPosition,
+            ));
+            pipeline::run(
+                move |ctx| {
+                    fixture.register(&ctx);
+                    async move {
+                        ctx.state_ref()
+                            .write()
+                            .config_mut()
+                            .options_mut()
+                            .execution
+                            .parquet
+                            .pushdown_filters = decode_time_filtering;
+                        let table = first_sample_table(&ctx, &fixture, format).await;
+                        let df = ctx
+                            .read_table(Arc::new(table))?
+                            .filter(col("position").gt_eq(lit(3)))?
+                            .limit(0, Some(2))?;
+                        let logical = df.clone().into_optimized_plan()?;
+                        let mut residuals = 0;
+                        let mut scans = 0;
+                        logical.apply(|node| {
+                            match node {
+                                LogicalPlan::Filter(_) => residuals += 1,
+                                LogicalPlan::TableScan(scan) => {
+                                    scans += 1;
+                                    assert_eq!(scan.filters.len(), 1);
+                                    assert_eq!(
+                                        scan.fetch, None,
+                                        "limit must stay above the inexact filter"
+                                    );
+                                }
+                                _ => {}
+                            }
+                            Ok(TreeNodeRecursion::Continue)
+                        })?;
+                        assert_eq!((residuals, scans), (1, 1));
+                        let plan = df.create_physical_plan().await?;
+                        let text = displayable(plan.as_ref()).indent(true).to_string();
+                        assert!(
+                            text.contains("predicate=") || text.contains("predicate:"),
+                            "format-level pushdown must retain the predicate: {text}"
+                        );
+                        if matches!(format, FixtureFormat::Parquet) && !decode_time_filtering {
+                            assert!(text.contains("FilterExec"), "{text}");
+                        } else {
+                            assert!(!text.contains("FilterExec"), "{text}");
+                        }
+                        let batches =
+                            datafusion::physical_plan::collect(plan, ctx.task_ctx()).await?;
+                        let loci: Vec<_> = batches.iter().flat_map(locus_column_values).collect();
+                        // Without ORDER BY, the residual filter's repartition may change
+                        // which matching rows satisfy the limit.
+                        assert_eq!(loci.len(), 2, "{loci:?}");
+                        assert!(
+                            loci.iter().all(|(contig, position)| matches!(
+                                (contig.as_str(), position),
+                                ("chr1", 3 | 4) | ("chr2", 3)
+                            )),
+                            "{loci:?}"
+                        );
+                        Ok(())
+                    }
+                },
+                PipelineOptions {
+                    threads: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+    }
 }
 
 #[tokio::test]

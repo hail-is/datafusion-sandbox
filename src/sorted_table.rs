@@ -4,6 +4,11 @@
 //! Its data source wrapper preserves recovered ordering through physical optimization;
 //! plan creation and execution stay with the format. See ADR 0012.
 //!
+//! Eligible attached-scalar filters are exact and evaluated before collecting file metadata.
+//! False or SQL-null filters produce an empty plan over the projected schema. Other filters
+//! are inexact and retain a logical residual for `DataFusion`'s physical filter pushdown;
+//! statistics-based file pruning is not implemented here.
+//!
 //! Deliberately excluded listing-table capabilities:
 //! - File-group repartitioning contradicts the single ordered partition, per ADR 0007.
 //! - Path-derived Hive columns are unnecessary; the caller supplies the attached scalar.
@@ -22,9 +27,16 @@ use crate::file_order::{Bounds, Direction, FileOrderError, recover_file_order};
 
 use async_trait::async_trait;
 use datafusion::{
-    arrow::datatypes::{FieldRef, SchemaRef},
+    arrow::{
+        datatypes::{FieldRef, Schema, SchemaRef},
+        record_batch::RecordBatch,
+    },
     catalog::{Session, TableProvider},
-    common::{DataFusionError, Result, ScalarValue, Statistics, stats::Precision},
+    common::{
+        DFSchema, DataFusionError, Result, ScalarValue, Statistics,
+        stats::Precision,
+        tree_node::{TreeNode, TreeNodeRecursion},
+    },
     datasource::{
         file_format::FileFormat,
         listing::PartitionedFile,
@@ -33,9 +45,13 @@ use datafusion::{
         table_schema::TableSchema,
     },
     execution::object_store::ObjectStoreUrl,
-    logical_expr::{Expr, SortExpr, TableType},
+    logical_expr::{
+        Expr, SortExpr, TableProviderFilterPushDown, TableType, Volatility,
+        simplify::SimplifyContext,
+    },
+    optimizer::simplify_expressions::ExprSimplifier,
     physical_expr::create_lex_ordering,
-    physical_plan::{ExecutionPlan, Partitioning},
+    physical_plan::{ExecutionPlan, Partitioning, empty::EmptyExec},
 };
 use std::sync::Arc;
 
@@ -186,6 +202,100 @@ impl SortedTable {
     }
 }
 
+fn is_exact_filter(attached: Option<&AttachedScalar>, filter: &Expr) -> Result<bool> {
+    let Some(attached) = attached else {
+        return Ok(false);
+    };
+    let mut exact = true;
+    filter.apply(|expr| {
+        exact = match expr {
+            Expr::Column(column) => column.name == *attached.field.name(),
+            // Unlike listing-table pruning, evaluation here has the session context
+            // needed by stable functions. Only volatile functions are excluded.
+            Expr::ScalarFunction(function) => {
+                function.func.signature().volatility != Volatility::Volatile
+            }
+            Expr::HigherOrderFunction(function) => {
+                function.func.signature().volatility != Volatility::Volatile
+            }
+            #[expect(
+                deprecated,
+                reason = "wildcards must not be evaluated as scalar filters"
+            )]
+            Expr::AggregateFunction(_)
+            | Expr::WindowFunction(_)
+            | Expr::Wildcard { .. }
+            | Expr::Unnest(_)
+            | Expr::Placeholder(_)
+            // These depend on a query or external values, not just the attached
+            // scalar. Expression traversal does not visit subquery plans.
+            | Expr::Exists(_)
+            | Expr::InSubquery(_)
+            | Expr::ScalarSubquery(_)
+            | Expr::SetComparison(_)
+            | Expr::OuterReferenceColumn(_, _)
+            | Expr::ScalarVariable(_, _) => false,
+            _ => true,
+        };
+        Ok(if exact {
+            TreeNodeRecursion::Continue
+        } else {
+            TreeNodeRecursion::Stop
+        })
+    })?;
+    Ok(exact)
+}
+
+fn scalar_filters_match(
+    attached: Option<&AttachedScalar>,
+    state: &dyn Session,
+    filters: &[Expr],
+) -> Result<bool> {
+    let Some(attached) = attached else {
+        return Ok(true);
+    };
+    if filters.is_empty() {
+        return Ok(true);
+    }
+    let schema = Arc::new(Schema::new(vec![Arc::clone(&attached.field)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![attached.value.to_array_of_size(1)?],
+    )?;
+    let df_schema = Arc::new(DFSchema::try_from(schema)?);
+    let simplifier = ExprSimplifier::new(
+        SimplifyContext::builder()
+            .with_schema(Arc::clone(&df_schema))
+            .with_config_options(Arc::new(state.config_options().clone()))
+            .with_query_execution_start_time(state.execution_props().query_execution_start_time)
+            .build(),
+    );
+    for filter in filters {
+        if !is_exact_filter(Some(attached), filter)? {
+            // Keep inexact filters for the logical residual and format-level physical
+            // pushdown. They must not be evaluated against the scalar-only batch.
+            continue;
+        }
+        // Functions such as current_date require simplification with the query's
+        // start time before they can be evaluated by a physical expression.
+        let coerced = simplifier.coerce(filter.clone(), &df_schema)?;
+        let predicate = simplifier.simplify(coerced)?;
+        let expression = state.create_physical_expr(predicate, &df_schema)?;
+        let value = expression.evaluate(&batch)?.into_array(1)?;
+        match ScalarValue::try_from_array(&value, 0)? {
+            ScalarValue::Boolean(Some(true)) => {}
+            ScalarValue::Boolean(Some(false) | None) | ScalarValue::Null => return Ok(false),
+            value => {
+                return Err(DataFusionError::Plan(format!(
+                    "sorted table filter '{filter}' must return Boolean, got {}",
+                    value.data_type(),
+                )));
+            }
+        }
+    }
+    Ok(true)
+}
+
 struct OrderingColumn {
     name: String,
     index: usize,
@@ -255,16 +365,36 @@ impl TableProvider for SortedTable {
         TableType::Base
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> Result<Vec<TableProviderFilterPushDown>> {
+        filters
+            .iter()
+            .map(|filter| {
+                Ok(if is_exact_filter(self.attached_scalar.as_ref(), filter)? {
+                    TableProviderFilterPushDown::Exact
+                } else {
+                    TableProviderFilterPushDown::Inexact
+                })
+            })
+            .collect()
+    }
+
     async fn scan(
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        // The default `supports_filters_pushdown` marks every filter unsupported, so this
-        // slice is empty and DataFusion evaluates filters above the scan. We could later
-        // advertise support here for statistics-based file pruning or format-level pushdown.
+        if !scalar_filters_match(self.attached_scalar.as_ref(), state, filters)? {
+            let schema = projection.map_or_else(
+                || Ok(self.schema()),
+                |indices| self.schema().project(indices).map(Arc::new),
+            )?;
+            return Ok(Arc::new(EmptyExec::new(schema)));
+        }
         let output_ordering = create_lex_ordering(
             self.table_schema.table_schema(),
             std::slice::from_ref(&self.ordering),

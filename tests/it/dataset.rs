@@ -8,11 +8,11 @@ use datafusion::{
         util::display::array_value_to_string,
     },
     common::DataFusionError,
-    datasource::listing::ListingTableUrl,
+    datasource::{listing::ListingTableUrl, source::DataSourceExec},
     error::Result,
     execution::object_store::ObjectStoreUrl,
-    physical_plan::{ExecutionPlan, ExecutionPlanProperties, union::UnionExec},
-    prelude::SessionContext,
+    physical_plan::{ExecutionPlan, ExecutionPlanProperties, displayable, union::UnionExec},
+    prelude::{SessionContext, col, lit},
 };
 use datafusion_sandbox::{
     dataset::{Dataset, DatasetLayout},
@@ -155,6 +155,80 @@ fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
                         .all(|input| input.output_partitioning().partition_count() == 1)
                 );
             });
+        }
+    }
+}
+
+#[test]
+fn filtering_the_attached_sample_column_composes_with_the_dataset_sample_set() {
+    for format in [
+        fixture::FixtureFormat::Parquet,
+        fixture::FixtureFormat::Vortex,
+    ] {
+        for representation in [
+            LocusRepresentation::ContigPosition,
+            LocusRepresentation::Packed,
+        ] {
+            let fixture = Arc::clone(fixture::dataset_fixture(format, representation));
+
+            pipeline::run(
+                move |ctx| {
+                    fixture.register(&ctx);
+                    async move {
+                        let dataset = Dataset::discover(
+                            &ctx,
+                            fixture.table_path().clone(),
+                            fixture.input_format(),
+                            allele_layout(),
+                            None,
+                        )
+                        .await?
+                        .restrict_to(&[
+                            fixture::SAMPLES[0].to_string(),
+                            fixture::SAMPLES[1].to_string(),
+                        ])?;
+                        let mut plans = Vec::new();
+                        for (sample, expected_rows, expected_scans) in [
+                            (fixture::SAMPLES[0], 8, 1),
+                            // This sample exists on storage but is outside the dataset's sample set.
+                            (fixture::SAMPLES[2], 0, 0),
+                        ] {
+                            let df = dataset
+                                .read(&ctx)
+                                .await?
+                                .filter(col("s").eq(lit(sample)))?
+                                .select_columns(&["s"])?;
+                            let plan = df.clone().create_physical_plan().await?;
+                            let batches = df.collect().await?;
+                            let samples = batches
+                                .iter()
+                                .flat_map(|batch| {
+                                    (0..batch.num_rows()).map(|row| {
+                                        array_value_to_string(batch.column(0), row).unwrap()
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            assert_eq!(samples, vec![sample; expected_rows]);
+                            plans.push((sample, expected_scans, plan));
+                        }
+
+                        for (sample, expected_scans, plan) in plans {
+                            assert_eq!(
+                                nodes_of::<DataSourceExec>(&plan).len(),
+                                expected_scans,
+                                "filtering s = {sample} must remove irrelevant per-sample file scans:\n{}",
+                                displayable(plan.as_ref()).indent(true),
+                            );
+                        }
+                        Ok(())
+                    }
+                },
+                PipelineOptions {
+                    threads: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         }
     }
 }
