@@ -1,6 +1,6 @@
 mod format_contract;
 
-use crate::fixture::{self, DatasetFixture, FixtureFormat, block_on};
+use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
 
 use datafusion::{
     arrow::{
@@ -12,11 +12,8 @@ use datafusion::{
     catalog::TableProvider,
     common::{ColumnStatistics, DataFusionError, ScalarValue, Statistics, stats::Precision},
     datasource::{
-        file_format::{FileFormat, parquet::ParquetFormat},
-        listing::PartitionedFile,
-        source::DataSourceExec,
+        file_format::parquet::ParquetFormat, listing::PartitionedFile, source::DataSourceExec,
     },
-    execution::object_store::ObjectStoreUrl,
     logical_expr::{Expr, TableProviderFilterPushDown, expr_fn::unnest},
     physical_expr::{
         LexOrdering, PhysicalSortExpr, expressions::Column, projection::ProjectionExprs,
@@ -27,14 +24,11 @@ use datafusion::{
     prelude::{SessionConfig, SessionContext, col, lit},
 };
 use datafusion_sandbox::{
-    locus::LocusRepresentation,
+    locus::{LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
     sorted_table::{AttachedScalar, SortedTable},
 };
-use futures::TryStreamExt;
-use object_store::path::Path;
 use std::sync::Arc;
-use vortex::VortexSessionDefault;
 
 fn column_statistics(min: Option<i32>, max: Option<i32>) -> ColumnStatistics {
     ColumnStatistics {
@@ -61,9 +55,9 @@ fn file_with_rows(path: &str, num_rows: usize, columns: Vec<ColumnStatistics>) -
     }))
 }
 
-fn multi_column_table(files: Vec<PartitionedFile>) -> SortedTable {
+fn multi_column_table(store: &MemoryStore, files: Vec<PartitionedFile>) -> SortedTable {
     SortedTable::new(
-        ObjectStoreUrl::local_filesystem(),
+        store.url().clone(),
         Arc::new(ParquetFormat::default()),
         files,
         Arc::new(Schema::new(vec![
@@ -78,8 +72,11 @@ fn multi_column_table(files: Vec<PartitionedFile>) -> SortedTable {
     )
 }
 
-async fn file_group_paths(table: SortedTable) -> Vec<String> {
-    file_group_paths_in(&SessionContext::new(), table).await
+/// Plans `table` on a fresh session that knows `store`, the store the table was built over.
+async fn file_group_paths(store: &MemoryStore, table: SortedTable) -> Vec<String> {
+    let ctx = SessionContext::new();
+    store.register(&ctx);
+    file_group_paths_in(&ctx, table).await
 }
 
 async fn file_group_paths_in(ctx: &SessionContext, table: SortedTable) -> Vec<String> {
@@ -118,9 +115,9 @@ fn ordering() -> Vec<datafusion::logical_expr::SortExpr> {
     vec![col("position").sort(true, false)]
 }
 
-fn table(files: Vec<PartitionedFile>) -> SortedTable {
+fn table(store: &MemoryStore, files: Vec<PartitionedFile>) -> SortedTable {
     SortedTable::new(
-        ObjectStoreUrl::local_filesystem(),
+        store.url().clone(),
         Arc::new(ParquetFormat::default()),
         files,
         schema(),
@@ -129,9 +126,13 @@ fn table(files: Vec<PartitionedFile>) -> SortedTable {
     )
 }
 
-fn scalar_table(files: Vec<PartitionedFile>, value: ScalarValue) -> SortedTable {
+fn scalar_table(
+    store: &MemoryStore,
+    files: Vec<PartitionedFile>,
+    value: ScalarValue,
+) -> SortedTable {
     SortedTable::new(
-        ObjectStoreUrl::parse("memory://scalar-filters").unwrap(),
+        store.url().clone(),
         Arc::new(ParquetFormat::default()),
         files,
         schema(),
@@ -150,7 +151,8 @@ fn scalar_table(files: Vec<PartitionedFile>, value: ScalarValue) -> SortedTable 
 )]
 async fn attached_scalar_filter_classification_matches_the_expression_contract() {
     use datafusion::logical_expr::expr_fn::{exists, in_subquery, scalar_subquery};
-    let table = Arc::new(scalar_table(vec![], ScalarValue::from("sample-1")));
+    let store = MemoryStore::new("scalar-filters");
+    let table = Arc::new(scalar_table(&store, vec![], ScalarValue::from("sample-1")));
     let ctx = SessionContext::new();
     ctx.register_table("t", table.clone()).unwrap();
     let df_schema = table.schema().try_into().unwrap();
@@ -210,7 +212,7 @@ async fn attached_scalar_filter_classification_matches_the_expression_contract()
             "{filters:?}"
         );
     }
-    let without_scalar = self::table(vec![]);
+    let without_scalar = self::table(&store, vec![]);
     assert_eq!(
         without_scalar
             .supports_filters_pushdown(&[&lit(true), &col("position").gt(lit(1))])
@@ -223,13 +225,11 @@ async fn attached_scalar_filter_classification_matches_the_expression_contract()
 fn false_and_null_scalar_filters_return_projected_empty_plans_without_opening_files() {
     pipeline::run(
         |ctx| async move {
-            let store_url = ObjectStoreUrl::parse("memory://scalar-filters")?;
-            ctx.register_object_store(
-                store_url.as_ref(),
-                Arc::new(object_store::memory::InMemory::new()),
-            );
+            let store = MemoryStore::new("scalar-filters");
+            store.register(&ctx);
             // No file exists: either footer inference or execution-time opens would fail.
             let table = scalar_table(
+                &store,
                 vec![PartitionedFile::new("missing.parquet", 100)],
                 ScalarValue::from("sample-1"),
             );
@@ -274,12 +274,10 @@ fn false_and_null_scalar_filters_return_projected_empty_plans_without_opening_fi
 #[tokio::test]
 async fn true_scalar_filters_leave_the_scan_unchanged_with_its_limit() {
     let ctx = SessionContext::new();
-    let store_url = ObjectStoreUrl::parse("memory://scalar-filters").unwrap();
-    ctx.register_object_store(
-        store_url.as_ref(),
-        Arc::new(object_store::memory::InMemory::new()),
-    );
+    let store = MemoryStore::new("scalar-filters");
+    store.register(&ctx);
     let table = Arc::new(scalar_table(
+        &store,
         vec![
             file("later.parquet", Some(11), Some(20)),
             file("earlier.parquet", Some(1), Some(10)),
@@ -354,7 +352,7 @@ fn inexact_filters_keep_the_logical_residual_and_do_not_truncate_before_filterin
                             .execution
                             .parquet
                             .pushdown_filters = decode_time_filtering;
-                        let table = first_sample_table(&ctx, &fixture, format).await;
+                        let table = sample_table(&ctx, &fixture, fixture::SAMPLES[0]).await;
                         let df = ctx
                             .read_table(Arc::new(table))?
                             .filter(col("position").gt_eq(lit(3)))?
@@ -420,8 +418,10 @@ async fn scan_orders_files_and_stays_one_partition_under_a_hostile_session() {
     let mut config = SessionConfig::new().with_target_partitions(8);
     config.options_mut().optimizer.repartition_file_min_size = 0;
     let ctx = SessionContext::new_with_config(config);
+    let store = MemoryStore::new("hostile-session");
+    store.register(&ctx);
     let table = SortedTable::new(
-        ObjectStoreUrl::local_filesystem(),
+        store.url().clone(),
         Arc::new(ParquetFormat::default()),
         vec![
             file("aaa.parquet", Some(11), Some(20)),
@@ -465,22 +465,29 @@ async fn scan_orders_files_and_stays_one_partition_under_a_hostile_session() {
 
 #[tokio::test]
 async fn multi_column_ranges_are_compared_lexicographically() {
-    let paths = file_group_paths(multi_column_table(vec![
-        file_with_statistics(
-            "next.parquet",
+    let store = MemoryStore::new("multi-column");
+    let paths = file_group_paths(
+        &store,
+        multi_column_table(
+            &store,
             vec![
-                column_statistics(Some(1), Some(1)),
-                column_statistics(Some(4), Some(6)),
+                file_with_statistics(
+                    "next.parquet",
+                    vec![
+                        column_statistics(Some(1), Some(1)),
+                        column_statistics(Some(4), Some(6)),
+                    ],
+                ),
+                file_with_statistics(
+                    "first.parquet",
+                    vec![
+                        column_statistics(Some(1), Some(1)),
+                        column_statistics(Some(1), Some(3)),
+                    ],
+                ),
             ],
         ),
-        file_with_statistics(
-            "first.parquet",
-            vec![
-                column_statistics(Some(1), Some(1)),
-                column_statistics(Some(1), Some(3)),
-            ],
-        ),
-    ]))
+    )
     .await;
 
     assert_eq!(paths, ["first.parquet", "next.parquet"]);
@@ -490,22 +497,29 @@ async fn multi_column_ranges_are_compared_lexicographically() {
 /// leading column and the later file extends past it, so their composed bounds overlap.
 #[tokio::test]
 async fn a_split_inside_a_leading_value_is_ordered_by_the_trailing_column() {
-    let paths = file_group_paths(multi_column_table(vec![
-        file_with_statistics(
-            "tail.parquet",
+    let store = MemoryStore::new("split-inside-a-leading-value");
+    let paths = file_group_paths(
+        &store,
+        multi_column_table(
+            &store,
             vec![
-                column_statistics(Some(1), Some(2)),
-                column_statistics(Some(1), Some(5)),
+                file_with_statistics(
+                    "tail.parquet",
+                    vec![
+                        column_statistics(Some(1), Some(2)),
+                        column_statistics(Some(1), Some(5)),
+                    ],
+                ),
+                file_with_statistics(
+                    "head.parquet",
+                    vec![
+                        column_statistics(Some(1), Some(1)),
+                        column_statistics(Some(1), Some(3)),
+                    ],
+                ),
             ],
         ),
-        file_with_statistics(
-            "head.parquet",
-            vec![
-                column_statistics(Some(1), Some(1)),
-                column_statistics(Some(1), Some(3)),
-            ],
-        ),
-    ]))
+    )
     .await;
 
     assert_eq!(paths, ["head.parquet", "tail.parquet"]);
@@ -514,7 +528,9 @@ async fn a_split_inside_a_leading_value_is_ordered_by_the_trailing_column() {
 #[tokio::test]
 async fn a_cut_inside_a_locus_retains_ordering_without_a_sort() {
     let ctx = SessionContext::new_with_config(pipeline::session_config());
-    let table = cut_inside_a_locus_table();
+    let store = MemoryStore::new("cut-inside-a-locus");
+    store.register(&ctx);
+    let table = cut_inside_a_locus_table(&store);
     let df = ctx.read_table(Arc::new(table)).unwrap();
     let scan = df.clone().create_physical_plan().await.unwrap();
     assert!(scan.output_ordering().is_some(), "{scan:?}");
@@ -530,30 +546,35 @@ async fn a_cut_inside_a_locus_retains_ordering_without_a_sort() {
     assert!(plan.is::<DataSourceExec>(), "{plan:?}");
 }
 
-fn cut_inside_a_locus_table() -> SortedTable {
-    multi_column_table(vec![
-        file_with_statistics(
-            "tail.parquet",
-            vec![
-                column_statistics(Some(1), Some(2)),
-                column_statistics(Some(1), Some(5)),
-            ],
-        ),
-        file_with_statistics(
-            "head.parquet",
-            vec![
-                column_statistics(Some(1), Some(1)),
-                column_statistics(Some(1), Some(3)),
-            ],
-        ),
-    ])
+fn cut_inside_a_locus_table(store: &MemoryStore) -> SortedTable {
+    multi_column_table(
+        store,
+        vec![
+            file_with_statistics(
+                "tail.parquet",
+                vec![
+                    column_statistics(Some(1), Some(2)),
+                    column_statistics(Some(1), Some(5)),
+                ],
+            ),
+            file_with_statistics(
+                "head.parquet",
+                vec![
+                    column_statistics(Some(1), Some(1)),
+                    column_statistics(Some(1), Some(3)),
+                ],
+            ),
+        ],
+    )
 }
 
 #[tokio::test]
 async fn sort_pushdown_is_exact_for_the_declared_order_and_its_prefix() {
     let ctx = SessionContext::new_with_config(pipeline::session_config());
+    let store = MemoryStore::new("sort-pushdown");
+    store.register(&ctx);
     let plan = ctx
-        .read_table(Arc::new(cut_inside_a_locus_table()))
+        .read_table(Arc::new(cut_inside_a_locus_table(&store)))
         .unwrap()
         .create_physical_plan()
         .await
@@ -583,11 +604,16 @@ async fn sort_pushdown_is_exact_for_the_declared_order_and_its_prefix() {
 #[tokio::test]
 async fn touching_bounds_accept_two_files_sharing_a_locus_under_locus_only_ordering() {
     let ctx = SessionContext::new_with_config(pipeline::session_config());
+    let store = MemoryStore::new("touching-bounds");
+    store.register(&ctx);
     let plan = ctx
-        .read_table(Arc::new(table(vec![
-            file("later.parquet", Some(2), Some(3)),
-            file("earlier.parquet", Some(1), Some(2)),
-        ])))
+        .read_table(Arc::new(table(
+            &store,
+            vec![
+                file("later.parquet", Some(2), Some(3)),
+                file("earlier.parquet", Some(1), Some(2)),
+            ],
+        )))
         .unwrap()
         .create_physical_plan()
         .await
@@ -602,8 +628,10 @@ async fn touching_bounds_accept_two_files_sharing_a_locus_under_locus_only_order
 #[tokio::test]
 async fn fetch_and_projection_swaps_preserve_only_the_projected_ordering() {
     let ctx = SessionContext::new_with_config(pipeline::session_config());
+    let store = MemoryStore::new("fetch-and-projection");
+    store.register(&ctx);
     let plan = ctx
-        .read_table(Arc::new(cut_inside_a_locus_table()))
+        .read_table(Arc::new(cut_inside_a_locus_table(&store)))
         .unwrap()
         .create_physical_plan()
         .await
@@ -665,8 +693,10 @@ async fn fetch_and_projection_swaps_preserve_only_the_projected_ordering() {
 #[tokio::test]
 async fn projection_uses_filter_equivalences_to_preserve_the_remaining_ordering() {
     let ctx = SessionContext::new_with_config(pipeline::session_config());
+    let store = MemoryStore::new("filter-equivalences");
+    store.register(&ctx);
     let plan = ctx
-        .read_table(Arc::new(cut_inside_a_locus_table()))
+        .read_table(Arc::new(cut_inside_a_locus_table(&store)))
         .unwrap()
         .create_physical_plan()
         .await
@@ -713,7 +743,7 @@ fn physical_filter_pushdown_after_projection_keeps_one_ordered_partition_in_both
                 move |ctx| {
                     fixture.register(&ctx);
                     async move {
-                        let table = first_sample_table(&ctx, &fixture, format).await;
+                        let table = sample_table(&ctx, &fixture, fixture::SAMPLES[0]).await;
                         let plan = ctx
                             .read_table(Arc::new(table))?
                             .create_physical_plan()
@@ -776,10 +806,17 @@ fn physical_filter_pushdown_after_projection_keeps_one_ordered_partition_in_both
 
 #[tokio::test]
 async fn zero_row_files_are_dropped_from_the_file_group() {
-    let paths = file_group_paths(table(vec![
-        file_with_rows("empty.parquet", 0, vec![column_statistics(None, None)]),
-        file("rows.parquet", Some(1), Some(10)),
-    ]))
+    let store = MemoryStore::new("zero-row-files");
+    let paths = file_group_paths(
+        &store,
+        table(
+            &store,
+            vec![
+                file_with_rows("empty.parquet", 0, vec![column_statistics(None, None)]),
+                file("rows.parquet", Some(1), Some(10)),
+            ],
+        ),
+    )
     .await;
 
     assert_eq!(paths, ["rows.parquet"]);
@@ -787,11 +824,17 @@ async fn zero_row_files_are_dropped_from_the_file_group() {
 
 #[tokio::test]
 async fn overlapping_files_are_rejected_naming_both_paths() {
-    let error = SessionContext::new()
-        .read_table(Arc::new(table(vec![
-            file("first.parquet", Some(1), Some(10)),
-            file("overlap.parquet", Some(5), Some(15)),
-        ])))
+    let store = MemoryStore::new("overlapping-files");
+    let ctx = SessionContext::new();
+    store.register(&ctx);
+    let error = ctx
+        .read_table(Arc::new(table(
+            &store,
+            vec![
+                file("first.parquet", Some(1), Some(10)),
+                file("overlap.parquet", Some(5), Some(15)),
+            ],
+        )))
         .unwrap()
         .create_physical_plan()
         .await
@@ -804,8 +847,14 @@ async fn overlapping_files_are_rejected_naming_both_paths() {
 
 #[tokio::test]
 async fn missing_statistics_are_rejected_naming_the_path_and_column() {
-    let error = SessionContext::new()
-        .read_table(Arc::new(table(vec![file("missing.parquet", None, None)])))
+    let store = MemoryStore::new("missing-statistics");
+    let ctx = SessionContext::new();
+    store.register(&ctx);
+    let error = ctx
+        .read_table(Arc::new(table(
+            &store,
+            vec![file("missing.parquet", None, None)],
+        )))
         .unwrap()
         .create_physical_plan()
         .await
@@ -826,7 +875,7 @@ fn inferred_statistics_order_the_files_against_path_order() {
     let paths = block_on(async {
         let ctx = SessionContext::new();
         fixture.register(&ctx);
-        let table = first_sample_table(&ctx, fixture, FixtureFormat::Parquet).await;
+        let table = sample_table(&ctx, fixture, fixture::SAMPLES[0]).await;
         file_group_paths_in(&ctx, table).await
     });
 
@@ -849,7 +898,7 @@ fn collected_rows_arrive_in_locus_order() {
         move |ctx| {
             fixture.register(&ctx);
             async move {
-                let table = first_sample_table(&ctx, &fixture, FixtureFormat::Parquet).await;
+                let table = sample_table(&ctx, &fixture, fixture::SAMPLES[0]).await;
                 ctx.read_table(Arc::new(table))?.collect().await
             }
         },
@@ -883,46 +932,23 @@ fn locus_column_values(batch: &RecordBatch) -> Vec<(String, i32)> {
         .collect()
 }
 
-/// Lists the first sample's files from the fixture store with no statistics, so the table has
-/// to infer them from the file footers.
-async fn first_sample_table(
-    ctx: &SessionContext,
-    fixture: &DatasetFixture,
-    format: FixtureFormat,
-) -> SortedTable {
-    let sample = fixture::SAMPLES[0];
-    let prefix = Path::from(format!("{}/s={sample}", fixture.table_path().prefix()));
-    let files: Vec<PartitionedFile> = fixture
-        .store()
-        .list(Some(&prefix))
-        .map_ok(PartitionedFile::new_from_meta)
-        .try_collect()
-        .await
-        .unwrap();
-    assert_eq!(files.len(), 4);
-    let format: Arc<dyn FileFormat> = match format {
-        FixtureFormat::Parquet => Arc::new(ParquetFormat::default()),
-        FixtureFormat::Vortex => Arc::new(vortex_datafusion::VortexFormat::new(
-            vortex::session::VortexSession::default(),
-        )),
-    };
-    let metas: Vec<_> = files.iter().map(|file| file.object_meta.clone()).collect();
+/// Lists one sample's files from the fixture store with no statistics, so the table has to
+/// infer them from the file footers. Schema inference mirrors dataset discovery: the fixture
+/// cannot offer its written schema because Parquet reads `Utf8` back as `Utf8View`.
+async fn sample_table(ctx: &SessionContext, fixture: &DatasetFixture, sample: &str) -> SortedTable {
+    let metas = fixture.sample_files(sample).await;
+    let format = fixture.input_format().read_format();
     let schema = format
         .infer_schema(&ctx.state(), fixture.store(), &metas)
         .await
         .unwrap();
-    let ordering = if schema.index_of("locus").is_ok() {
-        vec![
-            col("locus").sort(true, false),
-            col("alleles").sort(true, false),
-        ]
-    } else {
-        vec![
-            col("contig").sort(true, false),
-            col("position").sort(true, false),
-            col("alleles").sort(true, false),
-        ]
-    };
+    let ordering = LocusOrdering::locus_then_alleles()
+        .expand(fixture.representation())
+        .sort_expressions();
+    let files = metas
+        .into_iter()
+        .map(PartitionedFile::new_from_meta)
+        .collect();
     SortedTable::new(
         fixture.table_path().object_store(),
         format,
@@ -935,8 +961,9 @@ async fn first_sample_table(
 
 #[tokio::test]
 async fn an_ordering_column_absent_from_the_file_schema_is_rejected() {
+    let store = MemoryStore::new("absent-ordering-column");
     let table = SortedTable::new(
-        ObjectStoreUrl::local_filesystem(),
+        store.url().clone(),
         Arc::new(ParquetFormat::default()),
         vec![file("only.parquet", Some(1), Some(10))],
         schema(),
@@ -947,7 +974,9 @@ async fn an_ordering_column_absent_from_the_file_schema_is_rejected() {
         }),
     );
 
-    let error = SessionContext::new()
+    let ctx = SessionContext::new();
+    store.register(&ctx);
+    let error = ctx
         .read_table(Arc::new(table))
         .unwrap()
         .create_physical_plan()

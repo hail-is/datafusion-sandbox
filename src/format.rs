@@ -29,7 +29,9 @@ impl InputFormat {
     pub const PARQUET: Self = Self(InputRepr::Parquet);
     pub const VORTEX: Self = Self(InputRepr::Vortex);
 
-    pub(crate) fn read_format(&self) -> Arc<dyn FileFormat> {
+    /// The `DataFusion` reader for files in this format.
+    #[must_use]
+    pub fn read_format(&self) -> Arc<dyn FileFormat> {
         match self.0 {
             InputRepr::Parquet => Arc::new(ParquetFormat::default()),
             InputRepr::Vortex => Arc::new(VortexFormat::new(VortexSession::default())),

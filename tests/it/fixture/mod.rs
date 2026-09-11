@@ -26,6 +26,15 @@
 //! The d/c cut splits the alleles at chr1:2. The c/b and b/a cuts fall between
 //! positions within a contig. File b spans contigs; d, c, and a have constant
 //! contigs. Packed loci use the contig ordinal in the high 32 bits.
+//!
+//! Store handles:
+//! - `MemoryStore`, an empty in-memory object store a test registers on its own
+//!   session. Every shared dataset fixture holds one. The sorted-table planning
+//!   tests build metadata-only tables over one with nothing in it.
+
+mod memory_store;
+
+pub use memory_store::MemoryStore;
 
 use datafusion::{
     arrow::{
@@ -34,14 +43,13 @@ use datafusion::{
         record_batch::RecordBatch,
     },
     datasource::listing::ListingTableUrl,
-    execution::object_store::ObjectStoreUrl,
     prelude::*,
 };
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::locus::LocusRepresentation;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
-use futures::future::join_all;
-use object_store::{ObjectStore, memory::InMemory};
+use futures::{TryStreamExt, future::join_all};
+use object_store::{ObjectMeta, ObjectStore};
 
 use std::{
     future::Future,
@@ -120,7 +128,8 @@ static PARQUET_PACKED: LazyLock<Arc<DatasetFixture>> = LazyLock::new(|| {
 
 pub struct DatasetFixture {
     format: FixtureFormat,
-    store: Arc<dyn ObjectStore>,
+    representation: LocusRepresentation,
+    store: MemoryStore,
     table_path: ListingTableUrl,
 }
 
@@ -133,15 +142,43 @@ impl DatasetFixture {
         self.format.datafusion_formats().1
     }
 
-    pub fn register(&self, ctx: &SessionContext) {
-        let store_url = self.table_path.object_store();
-        ctx.register_object_store(store_url.as_ref(), Arc::clone(&self.store));
+    /// The locus representation the fixture's rows were written in.
+    pub fn representation(&self) -> LocusRepresentation {
+        self.representation
     }
 
-    /// The store holding the fixture's files, for tests that build a table from a listing
-    /// rather than through dataset discovery.
+    /// Registers the fixture's store on the session.
+    pub fn register(&self, ctx: &SessionContext) {
+        self.store.register(ctx);
+    }
+
+    /// The store holding the fixture's files.
     pub fn store(&self) -> &Arc<dyn ObjectStore> {
-        &self.store
+        self.store.store()
+    }
+
+    /// One sample's files in path order, for tests that build a table from the
+    /// listing rather than through dataset discovery.
+    ///
+    /// Path order is the reverse of locus order in every fixture here, so a caller
+    /// that observes locus order has watched the table reorder the files.
+    ///
+    /// Panics if the sample has no files. Every fixture sample has at least one, so
+    /// an unknown sample id is a test bug.
+    pub async fn sample_files(&self, sample: &str) -> Vec<ObjectMeta> {
+        let prefix =
+            object_store::path::Path::from(format!("{}/s={sample}", self.table_path.prefix()));
+        let mut files: Vec<ObjectMeta> = self
+            .store()
+            .list(Some(&prefix))
+            .try_collect()
+            .await
+            .unwrap_or_else(|error| {
+                panic!("listing the files of fixture sample {sample}: {error}")
+            });
+        files.sort_by(|left, right| left.location.cmp(&right.location));
+        assert!(!files.is_empty(), "fixture sample {sample} has no files");
+        files
     }
 }
 
@@ -235,13 +272,17 @@ fn build_in_memory_fixture(
     format: FixtureFormat,
     representation: LocusRepresentation,
 ) -> Arc<DatasetFixture> {
-    let (fixture, target) = new_in_memory_fixture(name, format);
+    let (fixture, target) = new_in_memory_fixture(name, format, representation);
     build_sample_tables(target, SAMPLES, format, representation, name);
     fixture
 }
 
 fn build_in_memory_fixture_without_alleles(name: &'static str) -> Arc<DatasetFixture> {
-    let (fixture, target) = new_in_memory_fixture(name, FixtureFormat::Vortex);
+    let (fixture, target) = new_in_memory_fixture(
+        name,
+        FixtureFormat::Vortex,
+        LocusRepresentation::ContigPosition,
+    );
     let batch = RecordBatch::try_from_iter(vec![
         ("contig", Arc::new(StringArray::from(vec!["chr1"])) as _),
         ("position", Arc::new(Int32Array::from(vec![1])) as _),
@@ -270,51 +311,39 @@ fn build_in_memory_fixture_without_alleles(name: &'static str) -> Arc<DatasetFix
 fn new_in_memory_fixture(
     name: &'static str,
     format: FixtureFormat,
+    representation: LocusRepresentation,
 ) -> (Arc<DatasetFixture>, FixtureTarget) {
     assert!(
         tokio::runtime::Handle::try_current().is_err(),
         "build the dataset fixture before calling pipeline::run"
     );
 
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let table_path = ListingTableUrl::parse(format!("memory://{name}/fixtures/{name}/samples/"))
-        .unwrap_or_else(|error| panic!("parsing the {name} dataset fixture path: {error}"));
+    let store = MemoryStore::new(name);
+    // An `ObjectStoreUrl` always ends in the root slash.
+    let table_path =
+        ListingTableUrl::parse(format!("{}fixtures/{name}/samples/", store.url().as_str()))
+            .unwrap_or_else(|error| panic!("parsing the {name} dataset fixture path: {error}"));
+    let root = table_path.as_str().trim_end_matches('/').to_string();
     let fixture = Arc::new(DatasetFixture {
         format,
-        store: Arc::clone(&store),
+        representation,
+        store: store.clone(),
         table_path,
     });
-    let target = FixtureTarget::ObjectStore {
-        root: fixture
-            .table_path
-            .as_str()
-            .trim_end_matches('/')
-            .to_string(),
-        store_url: fixture.table_path.object_store(),
-        store,
-    };
-    (fixture, target)
+    (fixture, FixtureTarget::Memory { root, store })
 }
 
 enum FixtureTarget {
     Disk(String),
-    ObjectStore {
-        root: String,
-        store_url: ObjectStoreUrl,
-        store: Arc<dyn ObjectStore>,
-    },
+    Memory { root: String, store: MemoryStore },
 }
 
 impl FixtureTarget {
     fn register(self, ctx: &SessionContext) -> String {
         match self {
             Self::Disk(root) => root,
-            Self::ObjectStore {
-                root,
-                store_url,
-                store,
-            } => {
-                ctx.register_object_store(store_url.as_ref(), store);
+            Self::Memory { root, store } => {
+                store.register(ctx);
                 root
             }
         }
