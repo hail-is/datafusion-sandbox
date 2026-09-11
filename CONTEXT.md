@@ -98,6 +98,12 @@ cloud storage, local disk, or memory) as a stand-in for a genomics dataset a run
 a generated table, it is encoded and stored.
 _Avoid_: test data, sample data, fixture (unqualified)
 
+**Metadata-only table**:
+A sorted table whose files exist only as declared metadata, a path, a size, and ordering
+statistics, with no stored bytes behind them, so it can be planned but never scanned. Unlike a
+generated table it has files, and unlike a dataset fixture nothing is encoded.
+_Avoid_: fake files, stub table, mock store, supplied-statistics table
+
 **Sorted table**:
 A file-backed table whose files are taken to hold one sorted table, scanned as one ordered
 partition in the file order its ordering statistics recover under that assumption. It has no

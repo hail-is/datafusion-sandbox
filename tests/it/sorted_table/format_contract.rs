@@ -1,4 +1,5 @@
 use super::{column_statistics, file_with_statistics};
+use crate::fixture::MemoryStore;
 
 use async_trait::async_trait;
 use datafusion::{
@@ -14,7 +15,6 @@ use datafusion::{
         source::DataSourceExec,
         table_schema::TableSchema,
     },
-    execution::object_store::ObjectStoreUrl,
     logical_expr::Operator,
     physical_expr::{
         LexOrdering,
@@ -25,7 +25,7 @@ use datafusion::{
     prelude::{SessionContext, col},
 };
 use datafusion_sandbox::sorted_table::SortedTable;
-use object_store::{ObjectMeta, ObjectStore, memory::InMemory};
+use object_store::{ObjectMeta, ObjectStore};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug)]
@@ -156,10 +156,10 @@ impl FileFormat for TestFormat {
 
 async fn scan(format: Arc<TestFormat>) -> Result<Arc<dyn ExecutionPlan>> {
     let ctx = SessionContext::new();
-    let store_url = ObjectStoreUrl::parse("memory://format-contract")?;
-    ctx.register_object_store(store_url.as_ref(), Arc::new(InMemory::new()));
+    let store = MemoryStore::new("format-contract");
+    store.register(&ctx);
     let table = SortedTable::new(
-        store_url,
+        store.url().clone(),
         format,
         vec![
             file_with_statistics(
