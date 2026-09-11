@@ -106,6 +106,12 @@ knowledge of samples, contigs, or genomics. See
 trusts.
 _Avoid_: listing table, sample table, sorted scan
 
+**Filter pushdown**:
+Applying a filter inside the scan that reads its rows rather than in an operator above it. A pushed
+filter is exact when the scan applies all of it and inexact when an operator above must apply it
+again.
+_Avoid_: predicate pushdown, pushdown unqualified
+
 **Ordering statistics**:
 The per-file minimum and maximum of each stored ordering field. The only evidence a sorted table
 has of where a file's rows fall.
