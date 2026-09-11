@@ -13,6 +13,15 @@
 //!
 //! See the [project glossary](../CONTEXT.md) for domain vocabulary.
 
+// `debug_assertions` here is a proxy for dev builds. Optimized builds don't trigger the linker warning.
+#![cfg_attr(
+    all(test, target_os = "macos", debug_assertions),
+    allow(
+        linker_messages,
+        reason = "Apple ld falls back to DWARF when the CLI exceeds compact unwind's 16 MiB offset range; rust-lang/rust#159105 tracks this diagnostic"
+    )
+)]
+
 /// The allocator every binary built from this crate uses, when the `snmalloc` feature is on.
 ///
 /// It lives here rather than in `main.rs` so that the benchmarks and the integration tests, each
