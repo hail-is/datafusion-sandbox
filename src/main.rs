@@ -1,3 +1,12 @@
+// `debug_assertions` here is a proxy for dev builds. Optimized builds don't trigger the linker warning.
+#![cfg_attr(
+    all(target_os = "macos", debug_assertions),
+    allow(
+        linker_messages,
+        reason = "Apple ld falls back to DWARF when the CLI exceeds compact unwind's 16 MiB offset range; rust-lang/rust#159105 tracks this diagnostic"
+    )
+)]
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use datafusion::error::{DataFusionError, Result};
 
