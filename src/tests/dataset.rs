@@ -1,5 +1,16 @@
-use datafusion_sandbox::fixture::{self, block_on};
+#![expect(
+    clippy::as_conversions,
+    reason = "the test controls the concrete array types erased behind ArrayRef"
+)]
 
+use crate::fixture::{self, block_on};
+
+use crate::{
+    dataset::{Dataset, DatasetLayout},
+    format::{InputFormat, OutputFormat},
+    locus::{LocusOrdering, LocusRepresentation},
+    pipeline::{self, PipelineOptions},
+};
 use datafusion::{
     arrow::{
         array::{Int32Array, StringArray},
@@ -13,12 +24,6 @@ use datafusion::{
     execution::object_store::ObjectStoreUrl,
     physical_plan::{ExecutionPlan, ExecutionPlanProperties, displayable, union::UnionExec},
     prelude::{SessionContext, col, lit},
-};
-use datafusion_sandbox::{
-    dataset::{Dataset, DatasetLayout},
-    format::{InputFormat, OutputFormat},
-    locus::{LocusOrdering, LocusRepresentation},
-    pipeline::{self, PipelineOptions},
 };
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 

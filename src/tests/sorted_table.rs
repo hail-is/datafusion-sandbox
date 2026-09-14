@@ -1,7 +1,12 @@
 mod format_contract;
 
-use datafusion_sandbox::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
+use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
 
+use crate::{
+    locus::{LocusOrdering, LocusRepresentation},
+    pipeline::{self, PipelineOptions},
+    sorted_table::{AttachedScalar, SortedTable},
+};
 use datafusion::{
     arrow::{
         array::{Array, Int32Array, StringArray},
@@ -22,11 +27,6 @@ use datafusion::{
         ExecutionPlan, ExecutionPlanProperties, Partitioning, SortOrderPushdownResult, displayable,
     },
     prelude::{SessionConfig, SessionContext, col, lit},
-};
-use datafusion_sandbox::{
-    locus::{LocusOrdering, LocusRepresentation},
-    pipeline::{self, PipelineOptions},
-    sorted_table::{AttachedScalar, SortedTable},
 };
 use std::sync::Arc;
 

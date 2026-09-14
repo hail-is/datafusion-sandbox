@@ -18,15 +18,15 @@ This repo is to help us start to experiment with implementing hail style pipelin
 ### Tests
 
 Run the Rust suite with `cargo test` or `cargo nextest run`. Each combiner run test owns a
-private disk dataset fixture under Cargo's integration-test temporary directory,
-`CARGO_TARGET_TMPDIR`. Dropping the handle removes the directory, including during ordinary
-panic unwinding. Forced termination or a cleanup error can still leave files behind.
+private disk dataset fixture under the system temporary directory selected by `tempfile`.
+Dropping the handle removes the directory, including during ordinary panic unwinding. Forced
+termination or a cleanup error can still leave files behind.
 
 To retain these dataset fixtures for debugging, set `DATAFUSION_SANDBOX_KEEP_FIXTURES=1`:
 
 ```sh
-DATAFUSION_SANDBOX_KEEP_FIXTURES=1 cargo test --test it combiner_run -- --show-output
-DATAFUSION_SANDBOX_KEEP_FIXTURES=1 cargo nextest run --test it -E 'test(combiner_run)' --success-output immediate
+DATAFUSION_SANDBOX_KEEP_FIXTURES=1 cargo test --lib tests::combiner_run -- --show-output
+DATAFUSION_SANDBOX_KEEP_FIXTURES=1 cargo nextest run --lib -E 'test(tests::combiner_run)' --success-output immediate
 ```
 
 Each accessor call still creates a unique directory. Before writing, it prints the test name
@@ -142,9 +142,8 @@ free it, so a runtime switch would have to record an owner per block and branch 
 and free. That overhead is roughly the size of the difference worth measuring.
 
 The `#[global_allocator]` sits in `src/lib.rs` rather than `src/main.rs`, where DataFusion's docs
-put it. The benchmarks and the integration tests are each their own binary linking this library, so
-a static in `main.rs` would cover `cargo run` and leave `cargo bench` measuring the system
-allocator.
+put it. The benchmark, library test, and CLI crate-test binaries all link this library, so a static
+in `main.rs` would cover `cargo run` and leave those binaries on the system allocator.
 
 #### Give the allocator the same CPU flags as the rust code
 

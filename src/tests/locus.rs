@@ -1,9 +1,9 @@
+use crate::locus::{LocusOrdering, LocusRepresentation};
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema, SchemaRef},
     common::DataFusionError,
     prelude::col,
 };
-use datafusion_sandbox::locus::{LocusOrdering, LocusRepresentation};
 use std::sync::Arc;
 
 #[test]

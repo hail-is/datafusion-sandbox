@@ -48,6 +48,7 @@ nursery = { level = "warn", priority = -1 }
 
 large_futures = "warn"
 dbg_macro = "warn"
+mod_module_files = "warn"
 
 # Don't Panic - prevent panics from unwraps and unsafe slicing or indexing
 unwrap_used = "warn"

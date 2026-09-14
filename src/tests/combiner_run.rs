@@ -1,5 +1,11 @@
-use datafusion_sandbox::fixture;
+use crate::fixture;
 
+use crate::{
+    combiner_run::{Action, CombinerRun, Outcome},
+    format::{InputFormat, OutputFormat},
+    formulation::Formulation,
+    locus::LocusRepresentation,
+};
 use datafusion::{
     arrow::{
         array::{ArrayRef, Int32Array},
@@ -14,12 +20,6 @@ use datafusion::{
             reader::{FileReader, SerializedFileReader},
         },
     },
-};
-use datafusion_sandbox::{
-    combiner_run::{Action, CombinerRun, Outcome},
-    format::{InputFormat, OutputFormat},
-    formulation::Formulation,
-    locus::LocusRepresentation,
 };
 use std::{path::Path, sync::Arc};
 
