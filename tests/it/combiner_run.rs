@@ -1,4 +1,4 @@
-use crate::fixture;
+use datafusion_sandbox::fixture;
 
 use datafusion::{
     arrow::{

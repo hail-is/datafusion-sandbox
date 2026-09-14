@@ -6,7 +6,7 @@
 #![cfg(test)]
 #![expect(
     clippy::as_conversions,
-    reason = "test fixtures cast values whose ranges are controlled by the test"
+    reason = "tests cast values whose ranges are controlled by the test"
 )]
 // `debug_assertions` here is a proxy for dev builds. Optimized builds don't trigger the linker warning.
 #![cfg_attr(
@@ -21,7 +21,6 @@ mod cli;
 mod combiner_run;
 mod dataset;
 mod file_order;
-mod fixture;
 mod format;
 mod formulation;
 mod locus;

@@ -35,6 +35,7 @@ pub mod combiner_run;
 pub mod cpu_runtime;
 pub mod dataset;
 pub mod file_order;
+pub mod fixture;
 pub mod format;
 pub mod formulation;
 pub mod generated;

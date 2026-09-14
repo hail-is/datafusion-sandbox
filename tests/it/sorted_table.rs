@@ -1,6 +1,6 @@
 mod format_contract;
 
-use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
+use datafusion_sandbox::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
 
 use datafusion::{
     arrow::{

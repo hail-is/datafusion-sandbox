@@ -1,4 +1,4 @@
-use crate::fixture::{self, block_on};
+use datafusion_sandbox::fixture::{self, block_on};
 
 use datafusion::{
     arrow::{

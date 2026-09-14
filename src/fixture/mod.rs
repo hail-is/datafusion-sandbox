@@ -32,10 +32,24 @@
 //!   session. Every shared dataset fixture holds one. The sorted-table planning
 //!   tests build metadata-only tables over one with nothing in it.
 
+#![expect(
+    clippy::as_conversions,
+    reason = "test fixtures cast values whose ranges are controlled by the test"
+)]
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "invalid fixture definitions and setup failures are test harness bugs"
+)]
+
 mod memory_store;
 
 pub use memory_store::MemoryStore;
 
+use crate::format::{InputFormat, OutputFormat};
+use crate::locus::LocusRepresentation;
+use crate::pipeline::{self, PipelineOptions};
 use datafusion::{
     arrow::{
         array::{ArrayRef, Int32Array, Int64Array, StringArray},
@@ -45,9 +59,6 @@ use datafusion::{
     datasource::listing::ListingTableUrl,
     prelude::*,
 };
-use datafusion_sandbox::format::{InputFormat, OutputFormat};
-use datafusion_sandbox::locus::LocusRepresentation;
-use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use futures::{TryStreamExt, future::join_all};
 use object_store::{ObjectMeta, ObjectStore};
 
@@ -59,6 +70,10 @@ use std::{
 
 /// Runs a future for a test that only builds plans and never executes one. Plan execution
 /// belongs in the pipeline runner; see ADR 0006.
+///
+/// # Panics
+///
+/// Panics if Tokio cannot build the test runtime.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -87,7 +102,7 @@ pub enum FixtureFormat {
 }
 
 impl FixtureFormat {
-    fn datafusion_formats(self) -> (&'static OutputFormat, InputFormat) {
+    const fn datafusion_formats(self) -> (&'static OutputFormat, InputFormat) {
         match self {
             Self::Parquet => (&OutputFormat::PARQUET, InputFormat::PARQUET),
             Self::Vortex => (&OutputFormat::VORTEX, InputFormat::VORTEX),
@@ -134,16 +149,19 @@ pub struct DatasetFixture {
 }
 
 impl DatasetFixture {
-    pub fn table_path(&self) -> &ListingTableUrl {
+    #[must_use]
+    pub const fn table_path(&self) -> &ListingTableUrl {
         &self.table_path
     }
 
-    pub fn input_format(&self) -> InputFormat {
+    #[must_use]
+    pub const fn input_format(&self) -> InputFormat {
         self.format.datafusion_formats().1
     }
 
     /// The locus representation the fixture's rows were written in.
-    pub fn representation(&self) -> LocusRepresentation {
+    #[must_use]
+    pub const fn representation(&self) -> LocusRepresentation {
         self.representation
     }
 
@@ -153,6 +171,7 @@ impl DatasetFixture {
     }
 
     /// The store holding the fixture's files.
+    #[must_use]
     pub fn store(&self) -> &Arc<dyn ObjectStore> {
         self.store.store()
     }
@@ -163,8 +182,10 @@ impl DatasetFixture {
     /// Path order is the reverse of locus order in every fixture here, so a caller
     /// that observes locus order has watched the table reorder the files.
     ///
-    /// Panics if the sample has no files. Every fixture sample has at least one, so
-    /// an unknown sample id is a test bug.
+    /// # Panics
+    ///
+    /// Panics if listing fails or the sample has no files. Every fixture sample has at least one,
+    /// so an unknown sample id is a test bug.
     pub async fn sample_files(&self, sample: &str) -> Vec<ObjectMeta> {
         let prefix =
             object_store::path::Path::from(format!("{}/s={sample}", self.table_path.prefix()));
@@ -182,6 +203,7 @@ impl DatasetFixture {
     }
 }
 
+#[must_use]
 pub fn dataset_fixture(
     format: FixtureFormat,
     representation: LocusRepresentation,
@@ -194,6 +216,7 @@ pub fn dataset_fixture(
     }
 }
 
+#[must_use]
 pub fn vortex_without_alleles_fixture() -> &'static Arc<DatasetFixture> {
     &VORTEX_WITHOUT_ALLELES
 }
@@ -205,17 +228,20 @@ pub struct DiskDatasetFixture {
 }
 
 impl DiskDatasetFixture {
+    #[must_use]
     pub fn table_path(&self) -> &str {
         &self.table_path
     }
 
-    pub fn input_format(&self) -> InputFormat {
+    #[must_use]
+    pub const fn input_format(&self) -> InputFormat {
         self.format.datafusion_formats().1
     }
 }
 
 /// Owns a private dataset fixture directory until the returned handle is dropped.
 /// Set `DATAFUSION_SANDBOX_KEEP_FIXTURES=1` to retain it, including incomplete writes.
+#[must_use]
 pub fn contig_position_disk_fixture(format: FixtureFormat) -> DiskDatasetFixture {
     let name = match format {
         FixtureFormat::Vortex => "vortex-contig-position-",
@@ -224,6 +250,7 @@ pub fn contig_position_disk_fixture(format: FixtureFormat) -> DiskDatasetFixture
     build_disk_fixture(name, format, LocusRepresentation::ContigPosition)
 }
 
+#[must_use]
 pub fn packed_disk_fixture(format: FixtureFormat) -> DiskDatasetFixture {
     let name = match format {
         FixtureFormat::Vortex => "vortex-packed-",
@@ -250,7 +277,7 @@ fn build_disk_fixture(
     let dir = tempfile::Builder::new()
         .prefix(name)
         .disable_cleanup(keep)
-        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .tempdir()
         .expect("creating a private dataset fixture directory");
     if keep {
         eprintln!(
