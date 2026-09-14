@@ -95,7 +95,7 @@ const SAMPLE_FILES: &[(&str, [SampleRow; 2])] = &[
     ("a", [("chr2", 2, "A,G"), ("chr2", 3, "A,C")]),
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum FixtureFormat {
     Parquet,
     Vortex,

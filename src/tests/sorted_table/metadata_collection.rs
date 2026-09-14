@@ -60,7 +60,7 @@ enum Gate {
 ///
 /// Delegates everything else to `inner`. `infer_stats` and `infer_ordering` panic: the
 /// table must ask for both products with one call.
-struct MeteredFormat {
+pub(super) struct MeteredFormat {
     inner: Arc<dyn FileFormat>,
     scripted: Option<HashMap<String, FileMeta>>,
     gate: Gate,
@@ -79,7 +79,7 @@ impl std::fmt::Debug for MeteredFormat {
 }
 
 impl MeteredFormat {
-    fn delegating(inner: Arc<dyn FileFormat>) -> Self {
+    pub(super) fn delegating(inner: Arc<dyn FileFormat>) -> Self {
         Self {
             inner,
             scripted: None,
@@ -105,7 +105,7 @@ impl MeteredFormat {
         }
     }
 
-    fn started(&self) -> Vec<String> {
+    pub(super) fn started(&self) -> Vec<String> {
         self.started.lock().unwrap().clone()
     }
 

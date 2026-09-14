@@ -112,6 +112,11 @@ knowledge of samples, contigs, or genomics. See
 trusts.
 _Avoid_: listing table, sample table, sorted scan
 
+**File pruning**:
+Leaving out of a scan every file whose ordering statistics show that no row in it can satisfy a
+filter. It removes files from a sorted table's order without disturbing it.
+_Avoid_: partition pruning, file skipping, statistics pruning
+
 **Filter pushdown**:
 Applying a filter inside the scan that reads its rows rather than in an operator above it. A pushed
 filter is exact when the scan applies all of it and inexact when an operator above must apply it

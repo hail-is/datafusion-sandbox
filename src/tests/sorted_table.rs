@@ -1,3 +1,4 @@
+mod filtered_scans;
 mod format_contract;
 mod metadata_collection;
 
