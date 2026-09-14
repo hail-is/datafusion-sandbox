@@ -12,6 +12,8 @@ snmalloc = ["dep:snmalloc-rs"]
 async-trait = "0.1"
 clap = { version = "4.6.1", features = ["derive"] }
 datafusion = "55.0.0"
+# The `datafusion` facade does not re-export the file statistics aggregation helper.
+datafusion-datasource = "55.0.0"
 object_store = { version = "0.13.2", features = ["gcp"]}
 snmalloc-rs = { version = "0.7.5", optional = true }
 vortex-datafusion = { git = "https://github.com/patrick-schultz/vortex", branch = "file-stats-type-fix" }
