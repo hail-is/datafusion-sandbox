@@ -6,8 +6,19 @@
 //!
 //! Eligible attached-scalar filters are exact and evaluated before collecting file metadata.
 //! False or SQL-null filters produce an empty plan over the projected schema. Other filters
-//! are inexact and retain a logical residual for `DataFusion`'s physical filter pushdown;
-//! statistics-based file pruning is not implemented here.
+//! are inexact: once every file has statistics, they prune the files those statistics exclude,
+//! and they keep a logical residual for `DataFusion`'s physical filter pushdown to the format.
+//! Pruning runs before zero-row dropping and order recovery, so a filter can remove a file whose
+//! ordering bounds order recovery could not use. See `file_pruning` for why pruning and order
+//! recovery make different demands of the same bounds.
+//!
+//! Pruning follows metadata collection rather than preceding it. The one per-file constant the
+//! table knows before any read is the attached scalar, and exact filters already answer it. A
+//! stored column that is constant within a file reveals its value only through that file's
+//! statistics, and the table infers nothing from file names or paths. So on a cold cache a
+//! contig filter still reads every footer once; the saving is the excluded files' data reads.
+//! Attached and cached statistics need no footer read, and an excluded file is absent from the
+//! file group, so execution never opens it.
 //!
 //! Per-file statistics come from the caller, the runtime's file statistics cache, or footer
 //! inference, in that order of precedence; see `statistics_source`. The scan's table statistics
@@ -24,9 +35,11 @@
 //! - Schema drift adapters would hide mismatched files; a dataset declares one schema
 //!   and mismatches should fail rather than be adapted.
 
+mod file_pruning;
 mod ordered_source;
 mod statistics_source;
 
+use file_pruning::FilePruning;
 use ordered_source::OrderedSource;
 use statistics_source::StatisticsSource;
 
@@ -251,15 +264,47 @@ fn is_exact_filter(attached: Option<&AttachedScalar>, filter: &Expr) -> Result<b
     Ok(exact)
 }
 
+/// Splits `filters` into the exact ones, which reference only the attached scalar, and the
+/// inexact rest.
+fn classify_filters(
+    attached: Option<&AttachedScalar>,
+    filters: &[Expr],
+) -> Result<(Vec<Expr>, Vec<Expr>)> {
+    let mut exact = Vec::new();
+    let mut inexact = Vec::new();
+    for filter in filters {
+        if is_exact_filter(attached, filter)? {
+            exact.push(filter.clone());
+        } else {
+            inexact.push(filter.clone());
+        }
+    }
+    Ok((exact, inexact))
+}
+
+/// A simplifier over `df_schema` that knows the session's options and the query's start time,
+/// so functions such as `current_date` fold before a physical expression evaluates them.
+fn expr_simplifier(state: &dyn Session, df_schema: &Arc<DFSchema>) -> ExprSimplifier {
+    ExprSimplifier::new(
+        SimplifyContext::builder()
+            .with_schema(Arc::clone(df_schema))
+            .with_config_options(Arc::new(state.config_options().clone()))
+            .with_query_execution_start_time(state.execution_props().query_execution_start_time)
+            .build(),
+    )
+}
+
+/// Evaluates the exact filters against the attached scalar. Inexact filters must not reach
+/// here: they cannot be evaluated against the scalar-only batch.
 fn scalar_filters_match(
     attached: Option<&AttachedScalar>,
     state: &dyn Session,
-    filters: &[Expr],
+    exact_filters: &[Expr],
 ) -> Result<bool> {
     let Some(attached) = attached else {
         return Ok(true);
     };
-    if filters.is_empty() {
+    if exact_filters.is_empty() {
         return Ok(true);
     }
     let schema = Arc::new(Schema::new(vec![Arc::clone(&attached.field)]));
@@ -268,21 +313,8 @@ fn scalar_filters_match(
         vec![attached.value.to_array_of_size(1)?],
     )?;
     let df_schema = Arc::new(DFSchema::try_from(schema)?);
-    let simplifier = ExprSimplifier::new(
-        SimplifyContext::builder()
-            .with_schema(Arc::clone(&df_schema))
-            .with_config_options(Arc::new(state.config_options().clone()))
-            .with_query_execution_start_time(state.execution_props().query_execution_start_time)
-            .build(),
-    );
-    for filter in filters {
-        if !is_exact_filter(Some(attached), filter)? {
-            // Keep inexact filters for the logical residual and format-level physical
-            // pushdown. They must not be evaluated against the scalar-only batch.
-            continue;
-        }
-        // Functions such as current_date require simplification with the query's
-        // start time before they can be evaluated by a physical expression.
+    let simplifier = expr_simplifier(state, &df_schema);
+    for filter in exact_filters {
         let coerced = simplifier.coerce(filter.clone(), &df_schema)?;
         let predicate = simplifier.simplify(coerced)?;
         let expression = state.create_physical_expr(predicate, &df_schema)?;
@@ -393,7 +425,9 @@ impl TableProvider for SortedTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        if !scalar_filters_match(self.attached_scalar.as_ref(), state, filters)? {
+        let attached = self.attached_scalar.as_ref();
+        let (exact_filters, inexact_filters) = classify_filters(attached, filters)?;
+        if !scalar_filters_match(attached, state, &exact_filters)? {
             let schema = projection.map_or_else(
                 || Ok(self.schema()),
                 |indices| self.schema().project(indices).map(Arc::new),
@@ -411,6 +445,10 @@ impl TableProvider for SortedTable {
             ));
         }
         let files = self.files_with_statistics(state).await?;
+        let files = match FilePruning::new(state, &self.table_schema, attached, inexact_filters)? {
+            Some(pruning) => pruning.retain(files)?,
+            None => files,
+        };
         let file_group = self.ordered_file_group(files)?;
         // The scan holds exactly the files in this group, so their aggregate is its table
         // statistics. Every file already has statistics, because order recovery needs them,
