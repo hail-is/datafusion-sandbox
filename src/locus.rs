@@ -1,13 +1,14 @@
-//! Stored shapes for a genomic locus and the expressions they require.
+//! Stored shapes for a genomic locus and the expressions they require, and the split points and
+//! half-open locus intervals a caller names in locus terms.
 
 use datafusion::{
     arrow::datatypes::{DataType, SchemaRef},
     common::DataFusionError,
     error::Result,
     logical_expr::{Expr, SortExpr},
-    prelude::col,
+    prelude::{col, lit},
 };
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Component {
@@ -168,5 +169,296 @@ impl fmt::Display for LocusRepresentation {
             Self::ContigPosition => formatter.write_str("contig-position"),
             Self::Packed => formatter.write_str("packed"),
         }
+    }
+}
+
+/// A locus named by its contig ordinal and position, as a caller writes it: `contig:position`.
+///
+/// Orders by contig, then position, which is the layout's locus ordering under both
+/// representations. The packed representation stores it as `ordinal << 32 | position`; the
+/// contig-position representation names the contig `chr{ordinal}`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Locus {
+    contig_ordinal: u32,
+    position: i32,
+}
+
+impl Locus {
+    /// The prefix a contig's name puts before its ordinal.
+    const CONTIG_NAME_PREFIX: &'static str = "chr";
+
+    /// The locus at `position` on the contig with ordinal `contig_ordinal`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `position` is negative or `contig_ordinal` exceeds `i32::MAX`,
+    /// either of which would put the packed form outside the non-negative `Int64` range.
+    pub fn new(contig_ordinal: u32, position: i32) -> Result<Self> {
+        if i32::try_from(contig_ordinal).is_err() {
+            return Err(DataFusionError::Configuration(format!(
+                "invalid locus {contig_ordinal}:{position}: contig ordinal must be at most {}",
+                i32::MAX
+            )));
+        }
+        if position < 0 {
+            return Err(DataFusionError::Configuration(format!(
+                "invalid locus {contig_ordinal}:{position}: position must be non-negative"
+            )));
+        }
+        Ok(Self {
+            contig_ordinal,
+            position,
+        })
+    }
+
+    /// The locus at `position` on the contig named `contig_name`, as the contig-position
+    /// representation stores it: `chr` followed by the contig ordinal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `contig_name` is not `chr` followed by a contig ordinal, or if the
+    /// coordinates are rejected by [`Locus::new`].
+    pub fn from_contig_name(contig_name: &str, position: i32) -> Result<Self> {
+        let contig_ordinal = contig_name
+            .strip_prefix(Self::CONTIG_NAME_PREFIX)
+            .and_then(|ordinal| ordinal.parse::<u32>().ok())
+            .ok_or_else(|| {
+                DataFusionError::Configuration(format!(
+                    "invalid contig name '{contig_name}': expected {}{{ordinal}}",
+                    Self::CONTIG_NAME_PREFIX
+                ))
+            })?;
+        Self::new(contig_ordinal, position)
+    }
+
+    /// The contig ordinal.
+    #[must_use]
+    pub const fn contig_ordinal(self) -> u32 {
+        self.contig_ordinal
+    }
+
+    /// The position within the contig.
+    #[must_use]
+    pub const fn position(self) -> i32 {
+        self.position
+    }
+
+    /// The contig's name under the contig-position representation.
+    #[must_use]
+    pub fn contig_name(self) -> String {
+        format!("{}{}", Self::CONTIG_NAME_PREFIX, self.contig_ordinal)
+    }
+
+    /// This locus as the packed representation stores it: the contig ordinal in the high 32
+    /// bits and the position in the low 32.
+    #[must_use]
+    pub fn packed(self) -> i64 {
+        (i64::from(self.contig_ordinal) << 32) | i64::from(self.position)
+    }
+
+    /// The locus a packed `locus` value stores.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `value` is negative or its low 32 bits do not hold an `i32`
+    /// position. [`Locus::packed`] never produces such a value; a stored `locus` column might.
+    pub fn from_packed(value: i64) -> Result<Self> {
+        let malformed = || {
+            DataFusionError::Configuration(format!(
+                "packed locus {value} is not a non-negative contig ordinal above an i32 position"
+            ))
+        };
+        if value < 0 {
+            return Err(malformed());
+        }
+        let contig_ordinal = u32::try_from(value >> 32).ok().ok_or_else(malformed)?;
+        let position = i32::try_from(value & 0xffff_ffff)
+            .ok()
+            .ok_or_else(malformed)?;
+        Self::new(contig_ordinal, position)
+    }
+}
+
+impl FromStr for Locus {
+    type Err = DataFusionError;
+
+    /// Parses `contig:position` with both parts non-negative decimal integers, and nothing else:
+    /// no `chr` prefix, no whitespace.
+    fn from_str(text: &str) -> Result<Self> {
+        let invalid = |reason: &str| {
+            DataFusionError::Configuration(format!("invalid locus '{text}': {reason}"))
+        };
+        let (contig_ordinal, position) = text
+            .split_once(':')
+            .ok_or_else(|| invalid("expected contig:position"))?;
+        let contig_ordinal = contig_ordinal
+            .parse::<u32>()
+            .ok()
+            .ok_or_else(|| invalid("contig must be a non-negative integer"))?;
+        let position = position
+            .parse::<u32>()
+            .ok()
+            .and_then(|position| i32::try_from(position).ok())
+            .ok_or_else(|| invalid("position must be a non-negative integer that fits an i32"))?;
+        Self::new(contig_ordinal, position)
+    }
+}
+
+impl fmt::Display for Locus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}:{}", self.contig_ordinal, self.position)
+    }
+}
+
+/// The `j - 1` loci that cut the locus ordering into `j` locus intervals, strictly increasing.
+///
+/// Parses from and renders to a comma-separated list of `contig:position`, so a computed list
+/// prints in the syntax a caller pastes back.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SplitPoints(Vec<Locus>);
+
+impl SplitPoints {
+    /// The split points `points`, in the order given.
+    ///
+    /// The empty list is valid and defines the single interval covering the whole ordering.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the first pair of points that is not strictly increasing.
+    pub fn new(points: Vec<Locus>) -> Result<Self> {
+        let out_of_order = points.windows(2).find_map(|pair| match pair {
+            [earlier, later] if earlier >= later => Some((*earlier, *later)),
+            _ => None,
+        });
+        if let Some((earlier, later)) = out_of_order {
+            return Err(DataFusionError::Configuration(format!(
+                "split points must be strictly increasing: {later} does not follow {earlier}"
+            )));
+        }
+        Ok(Self(points))
+    }
+
+    /// The `j` half-open locus intervals these `j - 1` points define, in locus order: the first
+    /// unbounded below, the last unbounded above.
+    #[must_use]
+    pub fn intervals(&self) -> Vec<LocusInterval> {
+        let starts = std::iter::once(None).chain(self.0.iter().copied().map(Some));
+        let ends = self
+            .0
+            .iter()
+            .copied()
+            .map(Some)
+            .chain(std::iter::once(None));
+        starts
+            .zip(ends)
+            .map(|(start, end)| LocusInterval { start, end })
+            .collect()
+    }
+}
+
+impl FromStr for SplitPoints {
+    type Err = DataFusionError;
+
+    /// Parses a comma-separated list of `contig:position`, rejecting the empty string and empty
+    /// items.
+    fn from_str(text: &str) -> Result<Self> {
+        if text.is_empty() {
+            return Err(DataFusionError::Configuration(
+                "split points are empty: expected comma-separated contig:position".to_string(),
+            ));
+        }
+        let points = text
+            .split(',')
+            .map(str::parse)
+            .collect::<Result<Vec<Locus>>>()?;
+        Self::new(points)
+    }
+}
+
+impl fmt::Display for SplitPoints {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, point) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(",")?;
+            }
+            write!(formatter, "{point}")?;
+        }
+        Ok(())
+    }
+}
+
+/// A half-open locus interval: includes `start`, excludes `end`, either unbounded when absent.
+///
+/// Renders as `start..end` with an absent bound left blank: `1:100..2:50`, `..1:100`, `2:50..`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocusInterval {
+    start: Option<Locus>,
+    end: Option<Locus>,
+}
+
+impl LocusInterval {
+    /// The interval from `start` inclusive to `end` exclusive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if both bounds are present and `start` is not before `end`, which
+    /// would make the interval empty or inverted.
+    pub fn new(start: Option<Locus>, end: Option<Locus>) -> Result<Self> {
+        if let (Some(start), Some(end)) = (start, end)
+            && start >= end
+        {
+            return Err(DataFusionError::Configuration(format!(
+                "locus interval start {start} is not before its end {end}"
+            )));
+        }
+        Ok(Self { start, end })
+    }
+
+    /// The filter selecting this interval's rows under `representation`, or `None` when the
+    /// interval is unbounded on both sides and selects every row.
+    ///
+    /// Under contig-position a bound is the compound `contig > c OR (contig = c AND position >= p)`
+    /// (`<`, `<` at the end), so an interval may cross contigs; under packed it is a plain
+    /// comparison on `locus`. Both formats push this form whole into the scan and prune files
+    /// by it exactly, except that per-column statistics over-keep a file straddling a contig
+    /// boundary under contig-position.
+    #[must_use]
+    pub fn filter(self, representation: LocusRepresentation) -> Option<Expr> {
+        let lower = self.start.map(|start| match representation {
+            LocusRepresentation::ContigPosition => {
+                let contig = lit(start.contig_name());
+                col("contig").gt(contig.clone()).or(col("contig")
+                    .eq(contig)
+                    .and(col("position").gt_eq(lit(start.position))))
+            }
+            LocusRepresentation::Packed => col("locus").gt_eq(lit(start.packed())),
+        });
+        let upper = self.end.map(|end| match representation {
+            LocusRepresentation::ContigPosition => {
+                let contig = lit(end.contig_name());
+                col("contig").lt(contig.clone()).or(col("contig")
+                    .eq(contig)
+                    .and(col("position").lt(lit(end.position))))
+            }
+            LocusRepresentation::Packed => col("locus").lt(lit(end.packed())),
+        });
+        match (lower, upper) {
+            (Some(lower), Some(upper)) => Some(lower.and(upper)),
+            (Some(one), None) | (None, Some(one)) => Some(one),
+            (None, None) => None,
+        }
+    }
+}
+
+impl fmt::Display for LocusInterval {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(start) = self.start {
+            write!(formatter, "{start}")?;
+        }
+        formatter.write_str("..")?;
+        if let Some(end) = self.end {
+            write!(formatter, "{end}")?;
+        }
+        Ok(())
     }
 }

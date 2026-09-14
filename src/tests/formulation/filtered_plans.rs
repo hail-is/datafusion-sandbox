@@ -21,7 +21,7 @@ use super::{
 };
 use crate::fixture::{self, FixtureFormat, SAMPLES, SampleRow, block_on};
 use crate::formulation::Formulation;
-use crate::locus::LocusRepresentation;
+use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::pipeline::{self, PipelineOptions};
 
 use datafusion::{
@@ -35,7 +35,7 @@ use datafusion::{
     prelude::SessionContext,
 };
 
-use std::{ops::RangeInclusive, sync::Arc};
+use std::{ops::Range, sync::Arc};
 
 /// A locus restriction a caller might place on a run, with what the fixtures say it should
 /// select. Distinct from restricting the sample set.
@@ -43,7 +43,7 @@ use std::{ops::RangeInclusive, sync::Arc};
 enum LocusRestriction {
     /// Every row on one contig.
     Contig,
-    /// The rows of one interval within a contig.
+    /// The rows of one half-open locus interval within a contig.
     LocusInterval,
 }
 
@@ -51,16 +51,18 @@ impl LocusRestriction {
     const ALL: [Self; 2] = [Self::Contig, Self::LocusInterval];
     const CONTIG: &'static str = "chr2";
     const INTERVAL_CONTIG: &'static str = "chr1";
-    const INTERVAL: RangeInclusive<i32> = 3..=4;
+    const INTERVAL: Range<i32> = 3..5;
 
     fn filter(self, representation: LocusRepresentation) -> Expr {
         match self {
             Self::Contig => fixture::contig_filter(representation, Self::CONTIG),
-            Self::LocusInterval => fixture::locus_interval_filter(
-                representation,
-                Self::INTERVAL_CONTIG,
-                Self::INTERVAL,
-            ),
+            Self::LocusInterval => LocusInterval::new(
+                Some(Locus::from_contig_name(Self::INTERVAL_CONTIG, Self::INTERVAL.start).unwrap()),
+                Some(Locus::from_contig_name(Self::INTERVAL_CONTIG, Self::INTERVAL.end).unwrap()),
+            )
+            .unwrap()
+            .filter(representation)
+            .expect("a bounded interval has a filter"),
         }
     }
 

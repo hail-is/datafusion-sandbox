@@ -7,7 +7,7 @@ use super::{
     scalar_table, table,
 };
 use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
-use crate::locus::LocusRepresentation;
+use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::pipeline::{self, PipelineOptions};
 
 use async_trait::async_trait;
@@ -94,16 +94,12 @@ fn a_locus_interval_filter_prunes_files_outside_it_and_keeps_the_scan_ordered() 
             let (paths, batches) = pipeline::run(
                 move |_| async move {
                     let ctx = hostile_session(&fixture);
-                    let plan = filtered_plan(
-                        &ctx,
-                        &fixture,
-                        Some(fixture::locus_interval_filter(
-                            representation,
-                            "chr1",
-                            3..=4,
-                        )),
+                    let interval = LocusInterval::new(
+                        Some(Locus::new(1, 3).unwrap()),
+                        Some(Locus::new(1, 5).unwrap()),
                     )
-                    .await;
+                    .unwrap();
+                    let plan = filtered_plan(&ctx, &fixture, interval.filter(representation)).await;
                     assert!(plan.output_ordering().is_some(), "{plan:?}");
                     assert!(matches!(
                         plan.output_partitioning(),
