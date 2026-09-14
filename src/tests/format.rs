@@ -1,9 +1,14 @@
-use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
-use datafusion_sandbox::{
+#![expect(
+    clippy::as_conversions,
+    reason = "the in-memory object's test-controlled length fits in u64"
+)]
+
+use crate::{
     format::OutputFormat,
     generated::make_range_table,
     pipeline::{self, PipelineOptions},
 };
+use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
 use std::sync::Arc;

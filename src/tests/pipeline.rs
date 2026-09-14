@@ -1,9 +1,14 @@
+#![expect(
+    clippy::as_conversions,
+    reason = "the cast supplies the error branch's otherwise unconstrained result type"
+)]
+
+use crate::format::OutputFormat;
+use crate::generated::make_range_table;
+use crate::pipeline::{self, PipelineOptions};
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::{DataFrame, col, lit};
-use datafusion_sandbox::format::OutputFormat;
-use datafusion_sandbox::generated::make_range_table;
-use datafusion_sandbox::pipeline::{self, PipelineOptions};
 
 #[test]
 fn returns_the_pipeline_result_to_the_calling_thread() {

@@ -151,6 +151,8 @@ fn object_store_base_url(path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    //! These tests need private access to path-to-object-store derivation until it moves behind `PipelineOptions`.
+
     use super::*;
 
     #[test]

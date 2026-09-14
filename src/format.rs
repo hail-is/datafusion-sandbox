@@ -182,6 +182,8 @@ fn unrecognized_compression(compression: &str, output_format: &str) -> DataFusio
 
 #[cfg(test)]
 mod tests {
+    //! These tests need private access to writer-option mapping until it moves behind an output-format configuration surface.
+
     use super::*;
 
     #[test]

@@ -24,14 +24,31 @@ Violation, for contrast: "A dataset detects the representation from its resolved
 schema; detection requires every field the representation names." Both clauses
 describe code behavior, not the concept.
 
+## Library tests are sibling module tests
+
+A module test is a `#[cfg(test)]` sibling of the module it tests, declared by the
+module's parent. Its location states which module surface it checks. A crate test
+lives under `tests/` and is reserved for behavior that needs the built binary.
+"Module test" and "crate test" name locations; "unit test" and "integration test"
+describe what a test claims.
+
+The test: the tests of module X live in the `tests` subtree under X's parent and
+name X's items through X's path. They do not name private items of the parent,
+even though Rust permits it. An inline child test module in the library starts
+with a module doc stating why it needs private access and which surface it should
+eventually move behind. The binary is exempt from this inline-module rule.
+
+See [ADR 0013](docs/adr/0013-test-modules-as-siblings.md) for the decision and
+its tradeoffs.
+
 ## Only the combiner run and cli tests read a filesystem
 
-`tests/it/combiner_run.rs` and `tests/it/cli.rs` may read and write disk. Every
+`src/tests/combiner_run.rs` and `tests/cli.rs` may read and write disk. Every
 other test holds its dataset fixtures in an in-memory object store and creates
 no temporary directories. See
 [ADR 0010](docs/adr/0010-keep-tests-on-in-memory-object-stores.md) for why.
 
-The test: `tempdir`, `TempDir`, `CARGO_TARGET_TMPDIR`, or a filesystem path
-appearing in a test outside those two files is a violation. The fix is to move
-the test or switch it to an in-memory store, not to argue that the speed
-difference per operation is small; the ADR already weighed that.
+The test: `tempdir`, `TempDir`, or a filesystem path appearing in a test outside
+those two files is a violation. The fix is to move the test or switch it to an
+in-memory store, not to argue that the speed difference per operation is small;
+the ADR already weighed that.

@@ -5,8 +5,14 @@
 //! re-sort. A regression from merging to re-sorting is invisible in the results
 //! and costs an order of magnitude in time, so it is asserted structurally here.
 
-use datafusion_sandbox::fixture;
+use crate::fixture;
 
+use crate::{
+    dataset::{Dataset, DatasetLayout},
+    formulation::Formulation,
+    locus::{LocusOrdering, LocusRepresentation},
+    pipeline,
+};
 use datafusion::{
     common::DataFusionError,
     physical_plan::{
@@ -15,12 +21,6 @@ use datafusion::{
         union::UnionExec,
     },
     prelude::SessionContext,
-};
-use datafusion_sandbox::{
-    dataset::{Dataset, DatasetLayout},
-    formulation::Formulation,
-    locus::{LocusOrdering, LocusRepresentation},
-    pipeline,
 };
 
 use std::sync::Arc;

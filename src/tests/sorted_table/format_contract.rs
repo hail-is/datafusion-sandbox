@@ -1,6 +1,7 @@
 use super::{column_statistics, file_with_statistics};
-use datafusion_sandbox::fixture::MemoryStore;
+use crate::fixture::MemoryStore;
 
+use crate::sorted_table::SortedTable;
 use async_trait::async_trait;
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema, SchemaRef},
@@ -24,7 +25,6 @@ use datafusion::{
     physical_plan::{ExecutionPlan, ExecutionPlanProperties, Partitioning, empty::EmptyExec},
     prelude::{SessionContext, col},
 };
-use datafusion_sandbox::sorted_table::SortedTable;
 use object_store::{ObjectMeta, ObjectStore};
 use std::sync::{Arc, Mutex};
 
