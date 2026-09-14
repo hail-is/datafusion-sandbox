@@ -34,8 +34,8 @@
 //!
 //! Row helpers, for tests that filter a fixture and check what comes back:
 //! - `sample_rows`, the rows above as one sample's expected result.
-//! - `contig_filter` and `locus_interval_filter`, restrictions written in a
-//!   representation.
+//! - `contig_filter`, a whole-contig restriction written in a representation.
+//!   Interval restrictions are `LocusInterval::filter` in the library.
 //! - `decode_loci` and `string_column`, the contig and position or one string
 //!   field of each row a plan returned.
 
@@ -55,7 +55,7 @@ mod memory_store;
 pub use memory_store::MemoryStore;
 
 use crate::format::{InputFormat, OutputFormat};
-use crate::locus::LocusRepresentation;
+use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::pipeline::{self, PipelineOptions};
 use datafusion::{
     arrow::{
@@ -73,7 +73,6 @@ use object_store::{ObjectMeta, ObjectStore};
 
 use std::{
     future::Future,
-    ops::RangeInclusive,
     path::Path,
     sync::{Arc, LazyLock},
 };
@@ -495,30 +494,24 @@ pub fn sample_rows() -> Vec<SampleRow> {
         .collect()
 }
 
-/// The rows on `contig`, written in `representation`.
+/// The rows on `contig`, written in `representation`: an equality on `contig`, or under packed
+/// the locus interval from the contig's first position to the next contig's.
+///
+/// # Panics
+///
+/// Panics if `contig` is not a contig name the library can read an ordinal from.
 #[must_use]
 pub fn contig_filter(representation: LocusRepresentation, contig: &str) -> Expr {
     match representation {
         LocusRepresentation::ContigPosition => col("contig").eq(lit(contig)),
-        LocusRepresentation::Packed => locus_interval_filter(representation, contig, 0..=i32::MAX),
-    }
-}
-
-/// The rows on `contig` whose positions fall within `positions`, written in `representation`.
-#[must_use]
-pub fn locus_interval_filter(
-    representation: LocusRepresentation,
-    contig: &str,
-    positions: RangeInclusive<i32>,
-) -> Expr {
-    match representation {
-        LocusRepresentation::ContigPosition => col("contig")
-            .eq(lit(contig))
-            .and(col("position").between(lit(*positions.start()), lit(*positions.end()))),
-        LocusRepresentation::Packed => col("locus").between(
-            lit(packed_locus(contig, *positions.start())),
-            lit(packed_locus(contig, *positions.end())),
-        ),
+        LocusRepresentation::Packed => {
+            let first = Locus::from_contig_name(contig, 0).unwrap();
+            let next_contig = first.contig_ordinal().checked_add(1).unwrap();
+            LocusInterval::new(Some(first), Some(Locus::new(next_contig, 0).unwrap()))
+                .unwrap()
+                .filter(representation)
+                .expect("a bounded interval has a filter")
+        }
     }
 }
 
@@ -550,13 +543,11 @@ pub fn decode_loci(batch: &RecordBatch, representation: LocusRepresentation) -> 
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .unwrap();
-            (0..batch.num_rows())
-                .map(|row| {
-                    let locus = loci.value(row);
-                    (
-                        format!("chr{}", locus >> 32),
-                        i32::try_from(locus & 0xffff_ffff).unwrap(),
-                    )
+            loci.values()
+                .iter()
+                .map(|&packed| {
+                    let locus = Locus::from_packed(packed).unwrap();
+                    (locus.contig_name(), locus.position())
                 })
                 .collect()
         }
@@ -579,8 +570,7 @@ pub fn string_column(batch: &RecordBatch, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// The packed locus of `contig:position`: the contig ordinal in the high 32 bits.
+/// The packed locus of `contig:position`, under the library's packing rule.
 fn packed_locus(contig: &str, position: i32) -> i64 {
-    let ordinal = contig.strip_prefix("chr").unwrap().parse::<i64>().unwrap();
-    (ordinal << 32) | i64::from(position)
+    Locus::from_contig_name(contig, position).unwrap().packed()
 }

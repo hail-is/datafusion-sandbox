@@ -76,6 +76,17 @@ Which samples a combiner run covers: a nonempty property of the dataset, which a
 but neither empty nor extend.
 _Avoid_: samples (unqualified), sample list, cohort
 
+**Split point**:
+A locus at which one locus interval ends and the next begins. `j - 1` split points, strictly
+increasing in the locus ordering, define `j` locus intervals.
+_Avoid_: boundary, breakpoint, cut point, partition key
+
+**Locus interval**:
+A contiguous stretch of loci in the layout's locus ordering, half-open: it includes its start and
+excludes its end. The locus intervals of a run partition the whole ordering, so every row falls in
+exactly one.
+_Avoid_: range, region, vertical partition, genome partition
+
 **Dataset**:
 One stored instance of a dataset layout: its path, the format of each file, and the sample set
 found there. A dataset without a layout does not exist.
@@ -132,6 +143,11 @@ _Avoid_: file statistics (broader), min/max, pruning statistics
 A position in the genome: a contig together with a position within it. The unit both combiners
 order and group by.
 _Avoid_: site, coordinate, variant (a variant is a locus plus alleles)
+
+**Contig ordinal**:
+The integer standing for a contig, which names it as `chr{ordinal}` and places it in the locus
+ordering. The packed representation stores loci by it; a caller names split points by it.
+_Avoid_: contig index, chromosome number, contig id
 
 **Locus representation**:
 How one stored row records its locus. `contig-position` uses separate `contig` and `position`

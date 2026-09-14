@@ -7,7 +7,8 @@
 //! - [`fixture`] builds small stored datasets for tests and benchmarks.
 //! - [`format`] reads and writes supported file formats.
 //! - [`formulation`] builds the alternative combiner plans under comparison.
-//! - [`locus`] describes the supported stored locus representations.
+//! - [`locus`] describes the supported stored locus representations, split points, and locus
+//!   intervals.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
 //! - [`sorted_table`] scans files as one ordered partition.
 //! - [`generated`] builds generated tables for tests and benchmarks.
