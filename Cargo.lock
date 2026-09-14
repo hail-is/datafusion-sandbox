@@ -1753,6 +1753,7 @@ dependencies = [
  "async-trait",
  "clap",
  "datafusion",
+ "datafusion-datasource",
  "divan",
  "futures",
  "futures-util",

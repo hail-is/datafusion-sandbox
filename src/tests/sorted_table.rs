@@ -1,4 +1,5 @@
 mod format_contract;
+mod metadata_collection;
 
 use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
 
@@ -17,14 +18,17 @@ use datafusion::{
     catalog::TableProvider,
     common::{ColumnStatistics, DataFusionError, ScalarValue, Statistics, stats::Precision},
     datasource::{
-        file_format::parquet::ParquetFormat, listing::PartitionedFile, source::DataSourceExec,
+        file_format::{FileFormat, parquet::ParquetFormat},
+        listing::PartitionedFile,
+        source::DataSourceExec,
     },
     logical_expr::{Expr, TableProviderFilterPushDown, expr_fn::unnest},
     physical_expr::{
         LexOrdering, PhysicalSortExpr, expressions::Column, projection::ProjectionExprs,
     },
     physical_plan::{
-        ExecutionPlan, ExecutionPlanProperties, Partitioning, SortOrderPushdownResult, displayable,
+        ExecutionPlan, ExecutionPlanProperties, Partitioning, SortOrderPushdownResult,
+        StatisticsArgs, StatisticsContext, displayable,
     },
     prelude::{SessionConfig, SessionContext, col, lit},
 };
@@ -53,6 +57,28 @@ fn file_with_rows(path: &str, num_rows: usize, columns: Vec<ColumnStatistics>) -
         total_byte_size: Precision::Absent,
         column_statistics: columns,
     }))
+}
+
+/// A file with a known byte size and row-count precision, and `position` in `min..=max`.
+fn sized_file(
+    path: &str,
+    num_rows: Precision<usize>,
+    bytes: usize,
+    min: i32,
+    max: i32,
+) -> PartitionedFile {
+    PartitionedFile::new(path, 1).with_statistics(Arc::new(Statistics {
+        num_rows,
+        total_byte_size: Precision::Exact(bytes),
+        column_statistics: vec![column_statistics(Some(min), Some(max))],
+    }))
+}
+
+/// The statistics `plan` reports for one partition, or for all of them.
+fn statistics(plan: &dyn ExecutionPlan, partition: Option<usize>) -> Arc<Statistics> {
+    StatisticsContext::new()
+        .compute(plan, &StatisticsArgs::new().with_partition(partition))
+        .unwrap()
 }
 
 fn multi_column_table(store: &MemoryStore, files: Vec<PartitionedFile>) -> SortedTable {
@@ -805,6 +831,76 @@ fn physical_filter_pushdown_after_projection_keeps_one_ordered_partition_in_both
 }
 
 #[tokio::test]
+async fn scan_statistics_aggregate_the_files_in_the_scan() {
+    let ctx = SessionContext::new();
+    let store = MemoryStore::new("aggregate-statistics");
+    store.register(&ctx);
+    let files = || {
+        vec![
+            sized_file("later.parquet", Precision::Exact(5), 50, 11, 20),
+            file_with_rows("empty.parquet", 0, vec![column_statistics(None, None)]),
+            sized_file("earlier.parquet", Precision::Exact(3), 30, 1, 10),
+        ]
+    };
+    let value = ScalarValue::from("sample-1");
+    let table = scalar_table(&store, files(), value.clone());
+    let position = ColumnStatistics {
+        null_count: Precision::Exact(0),
+        min_value: Precision::Exact(ScalarValue::Int32(Some(1))),
+        max_value: Precision::Exact(ScalarValue::Int32(Some(20))),
+        ..Default::default()
+    };
+
+    let plan = table.scan(&ctx.state(), None, &[], None).await.unwrap();
+    let statistics = self::statistics(plan.as_ref(), None);
+    assert_eq!(statistics.num_rows, Precision::Exact(8));
+    assert_eq!(statistics.column_statistics.len(), 2);
+    assert_eq!(
+        statistics.column_statistics[0].min_value,
+        position.min_value
+    );
+    assert_eq!(
+        statistics.column_statistics[0].max_value,
+        position.max_value
+    );
+    assert_eq!(
+        statistics.column_statistics[0].null_count,
+        position.null_count
+    );
+    let source = &statistics.column_statistics[1];
+    assert_eq!(source.min_value, Precision::Exact(value.clone()));
+    assert_eq!(source.max_value, Precision::Exact(value.clone()));
+    assert_eq!(source.null_count, Precision::Exact(0));
+    assert_eq!(self::statistics(plan.as_ref(), Some(0)), statistics);
+
+    // Projection keeps the statistics aligned with the projected schema.
+    let projected = table
+        .scan(&ctx.state(), Some(&vec![1]), &[], None)
+        .await
+        .unwrap();
+    let statistics = self::statistics(projected.as_ref(), None);
+    assert_eq!(statistics.num_rows, Precision::Exact(8));
+    assert_eq!(statistics.column_statistics.len(), 1);
+    assert_eq!(
+        statistics.column_statistics[0].min_value,
+        Precision::Exact(value)
+    );
+
+    // An inexact input stays inexact rather than being promoted to exact.
+    let mut inexact = files();
+    inexact[0] = sized_file("later.parquet", Precision::Inexact(5), 50, 11, 20);
+    let table = self::table(&store, inexact);
+    let plan = table.scan(&ctx.state(), None, &[], None).await.unwrap();
+    let statistics = self::statistics(plan.as_ref(), None);
+    assert_eq!(statistics.num_rows, Precision::Inexact(8));
+    assert_eq!(statistics.column_statistics.len(), 1);
+    assert_eq!(
+        statistics.column_statistics[0].max_value,
+        position.max_value
+    );
+}
+
+#[tokio::test]
 async fn zero_row_files_are_dropped_from_the_file_group() {
     let store = MemoryStore::new("zero-row-files");
     let paths = file_group_paths(
@@ -936,8 +1032,18 @@ fn locus_column_values(batch: &RecordBatch) -> Vec<(String, i32)> {
 /// infer them from the file footers. Schema inference mirrors dataset discovery: the fixture
 /// cannot offer its written schema because Parquet reads `Utf8` back as `Utf8View`.
 async fn sample_table(ctx: &SessionContext, fixture: &DatasetFixture, sample: &str) -> SortedTable {
-    let metas = fixture.sample_files(sample).await;
     let format = fixture.input_format().read_format();
+    sample_table_with_format(ctx, fixture, sample, format).await
+}
+
+/// `sample_table` reading through `format`, for tests that observe the reads.
+async fn sample_table_with_format(
+    ctx: &SessionContext,
+    fixture: &DatasetFixture,
+    sample: &str,
+    format: Arc<dyn FileFormat>,
+) -> SortedTable {
+    let metas = fixture.sample_files(sample).await;
     let schema = format
         .infer_schema(&ctx.state(), fixture.store(), &metas)
         .await

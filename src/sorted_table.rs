@@ -9,6 +9,11 @@
 //! are inexact and retain a logical residual for `DataFusion`'s physical filter pushdown;
 //! statistics-based file pruning is not implemented here.
 //!
+//! Per-file statistics come from the caller, the runtime's file statistics cache, or footer
+//! inference, in that order of precedence; see `statistics_source`. The scan's table statistics
+//! aggregate the files in its file group with `DataFusion`'s helper, so a plan knows what the
+//! footers told it rather than claiming unknown statistics.
+//!
 //! Deliberately excluded listing-table capabilities:
 //! - File-group repartitioning contradicts the single ordered partition, per ADR 0007.
 //! - Path-derived Hive columns are unnecessary; the caller supplies the attached scalar.
@@ -20,8 +25,10 @@
 //!   and mismatches should fail rather than be adapted.
 
 mod ordered_source;
+mod statistics_source;
 
 use ordered_source::OrderedSource;
+use statistics_source::StatisticsSource;
 
 use crate::file_order::{Bounds, Direction, FileOrderError, recover_file_order};
 
@@ -33,7 +40,7 @@ use datafusion::{
     },
     catalog::{Session, TableProvider},
     common::{
-        DFSchema, DataFusionError, Result, ScalarValue, Statistics,
+        DFSchema, DataFusionError, Result, ScalarValue,
         stats::Precision,
         tree_node::{TreeNode, TreeNodeRecursion},
     },
@@ -53,6 +60,7 @@ use datafusion::{
     physical_expr::create_lex_ordering,
     physical_plan::{ExecutionPlan, Partitioning, empty::EmptyExec},
 };
+use datafusion_datasource::compute_all_files_statistics;
 use std::sync::Arc;
 
 /// A scalar column appended to every row in a sorted table.
@@ -73,6 +81,7 @@ pub struct SortedTable {
     table_schema: TableSchema,
     ordering: Vec<SortExpr>,
     attached_scalar: Option<AttachedScalar>,
+    statistics_source: StatisticsSource,
 }
 
 impl SortedTable {
@@ -91,6 +100,11 @@ impl SortedTable {
         let table_schema = TableSchema::builder(Arc::clone(&file_schema))
             .with_table_partition_cols(partition_fields)
             .build();
+        let statistics_source = StatisticsSource::new(
+            Arc::clone(&format),
+            object_store_url.clone(),
+            Arc::clone(&file_schema),
+        );
         Self {
             object_store_url,
             format,
@@ -99,35 +113,26 @@ impl SortedTable {
             table_schema,
             ordering,
             attached_scalar,
+            statistics_source,
         }
     }
 
+    /// Every file with its statistics, extended by the attached scalar's partition value.
     async fn files_with_statistics(&self, state: &dyn Session) -> Result<Vec<PartitionedFile>> {
-        let mut files = Vec::with_capacity(self.files.len());
-        for mut file in self.files.clone() {
-            let statistics = if let Some(statistics) = file.statistics.take() {
-                statistics
-            } else {
-                let store = state.runtime_env().object_store(&self.object_store_url)?;
-                Arc::new(
-                    self.format
-                        .infer_stats(
-                            state,
-                            &store,
-                            Arc::clone(&self.file_schema),
-                            &file.object_meta,
-                        )
-                        .await?,
-                )
-            };
-            file.partition_values = self
-                .attached_scalar
-                .iter()
-                .map(|attached| attached.value.clone())
-                .collect();
-            files.push(file.with_statistics(statistics));
-        }
-        Ok(files)
+        let files = self
+            .files
+            .iter()
+            .cloned()
+            .map(|mut file| {
+                file.partition_values = self
+                    .attached_scalar
+                    .iter()
+                    .map(|attached| attached.value.clone())
+                    .collect();
+                file
+            })
+            .collect();
+        self.statistics_source.for_files(state, files).await
     }
 
     /// The file-schema index and direction of every ordering column.
@@ -407,10 +412,28 @@ impl TableProvider for SortedTable {
         }
         let files = self.files_with_statistics(state).await?;
         let file_group = self.ordered_file_group(files)?;
+        // The scan holds exactly the files in this group, so their aggregate is its table
+        // statistics. Every file already has statistics, because order recovery needs them,
+        // so aggregating costs nothing even when the session does not collect statistics.
+        // The group is never truncated by the limit, so the aggregate keeps each input's
+        // precision rather than being marked inexact.
+        let collect_statistics = true;
+        let truncated_by_limit = false;
+        let (mut file_groups, statistics) = compute_all_files_statistics(
+            vec![file_group],
+            Arc::clone(self.table_schema.table_schema()),
+            collect_statistics,
+            truncated_by_limit,
+        )?;
+        let file_group = file_groups.pop().ok_or_else(|| {
+            DataFusionError::Internal(
+                "statistics aggregation returned no file group for the sorted table".to_string(),
+            )
+        })?;
         let source = self.format.file_source(self.table_schema.clone());
         let scan_config = FileScanConfigBuilder::new(self.object_store_url.clone(), source)
             .with_file_group(file_group)
-            .with_statistics(Statistics::new_unknown(self.table_schema.table_schema()))
+            .with_statistics(statistics)
             .with_projection_indices(projection.cloned())?
             .with_limit(limit)
             .with_output_ordering(output_ordering.clone())
