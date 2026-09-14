@@ -1,5 +1,5 @@
 use super::{column_statistics, file_with_statistics};
-use crate::fixture::MemoryStore;
+use datafusion_sandbox::fixture::MemoryStore;
 
 use async_trait::async_trait;
 use datafusion::{

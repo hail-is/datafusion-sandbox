@@ -1,6 +1,6 @@
 //! End-to-end tests of the binary.
 
-use crate::fixture::{self, FixtureFormat};
+use datafusion_sandbox::fixture::{self, FixtureFormat};
 
 use std::process::Command;
 
