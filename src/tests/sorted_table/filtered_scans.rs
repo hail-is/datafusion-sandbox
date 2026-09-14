@@ -3,8 +3,8 @@
 
 use super::{
     column_statistics, displayed_file_paths, file, file_with_rows, file_with_statistics,
-    locus_column_values, metadata_collection::MeteredFormat, multi_column_table, sample_table,
-    sample_table_with_format, scalar_table, table,
+    metadata_collection::MeteredFormat, multi_column_table, sample_table, sample_table_with_format,
+    scalar_table, table,
 };
 use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
 use crate::locus::LocusRepresentation;
@@ -18,7 +18,7 @@ use datafusion::{
     datasource::file_format::FileFormat,
     logical_expr::Expr,
     physical_plan::{ExecutionPlan, ExecutionPlanProperties, Partitioning, displayable},
-    prelude::{SessionConfig, SessionContext, col, lit},
+    prelude::{SessionContext, col, lit},
 };
 use futures::stream::BoxStream;
 use object_store::{
@@ -44,45 +44,13 @@ async fn filtered_plan(
     df.create_physical_plan().await.unwrap()
 }
 
-/// A session that would split or re-sort a scan wherever the table lets it.
+/// The shared session, plus permission to split or re-sort a scan wherever the table lets it.
 fn hostile_session(fixture: &DatasetFixture) -> SessionContext {
-    let mut config = SessionConfig::new().with_target_partitions(8);
+    let mut config = pipeline::session_config().with_target_partitions(8);
     config.options_mut().optimizer.repartition_file_min_size = 0;
-    config.options_mut().execution.parquet.pushdown_filters = true;
     let ctx = SessionContext::new_with_config(config);
     fixture.register(&ctx);
     ctx
-}
-
-/// The locus interval chr1:3 to chr1:4 in the fixture's representation.
-fn chr1_3_to_4(representation: LocusRepresentation) -> Expr {
-    match representation {
-        LocusRepresentation::ContigPosition => col("contig")
-            .eq(lit("chr1"))
-            .and(col("position").between(lit(3), lit(4))),
-        LocusRepresentation::Packed => {
-            col("locus").between(lit((1_i64 << 32) | 3), lit((1_i64 << 32) | 4))
-        }
-    }
-}
-
-fn packed_loci(batch: &RecordBatch) -> Vec<(String, i32)> {
-    use datafusion::arrow::array::{Array, Int64Array};
-    let loci = batch
-        .column_by_name("locus")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap();
-    (0..batch.num_rows())
-        .map(|row| {
-            let locus = loci.value(row);
-            (
-                format!("chr{}", locus >> 32),
-                i32::try_from(locus & 0xffff_ffff).unwrap(),
-            )
-        })
-        .collect()
 }
 
 /// The file stems of `paths`, in order.
@@ -126,8 +94,16 @@ fn a_locus_interval_filter_prunes_files_outside_it_and_keeps_the_scan_ordered() 
             let (paths, batches) = pipeline::run(
                 move |_| async move {
                     let ctx = hostile_session(&fixture);
-                    let plan =
-                        filtered_plan(&ctx, &fixture, Some(chr1_3_to_4(representation))).await;
+                    let plan = filtered_plan(
+                        &ctx,
+                        &fixture,
+                        Some(fixture::locus_interval_filter(
+                            representation,
+                            "chr1",
+                            3..=4,
+                        )),
+                    )
+                    .await;
                     assert!(plan.output_ordering().is_some(), "{plan:?}");
                     assert!(matches!(
                         plan.output_partitioning(),
@@ -148,12 +124,10 @@ fn a_locus_interval_filter_prunes_files_outside_it_and_keeps_the_scan_ordered() 
             .unwrap();
             // d ends at chr1:2 and a starts at chr2:2; c holds chr1:3 and b starts at chr1:4.
             assert_eq!(stems(&paths), ["c", "b"], "{format:?} {representation:?}");
-            let loci: Vec<_> = match representation {
-                LocusRepresentation::ContigPosition => {
-                    batches.iter().flat_map(locus_column_values).collect()
-                }
-                LocusRepresentation::Packed => batches.iter().flat_map(packed_loci).collect(),
-            };
+            let loci: Vec<_> = batches
+                .iter()
+                .flat_map(|batch| fixture::decode_loci(batch, representation))
+                .collect();
             assert_eq!(
                 loci,
                 [("chr1".to_string(), 3), ("chr1".to_string(), 4)],
@@ -438,7 +412,10 @@ fn an_unsupported_pruning_expression_keeps_every_file_and_filters_the_rows() {
                 filtered_plan(&ctx, &fixture, Some((col("position") % lit(2)).eq(lit(1)))).await;
             let paths = displayed_file_paths(plan.as_ref());
             let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx()).await?;
-            let loci: Vec<_> = batches.iter().flat_map(locus_column_values).collect();
+            let loci: Vec<_> = batches
+                .iter()
+                .flat_map(|batch| fixture::decode_loci(batch, LocusRepresentation::ContigPosition))
+                .collect();
             Ok((paths, loci))
         },
         PipelineOptions {
@@ -588,7 +565,12 @@ fn planning_reads_every_footer_once_and_execution_opens_only_retained_files() {
                     ["a", "b"].into_iter().map(ToString::to_string).collect();
                 assert_eq!(opened, retained, "{format:?}");
                 assert_eq!(metered.started().len(), 4, "{format:?}");
-                let loci: Vec<_> = batches.iter().flat_map(locus_column_values).collect();
+                let loci: Vec<_> = batches
+                    .iter()
+                    .flat_map(|batch| {
+                        fixture::decode_loci(batch, LocusRepresentation::ContigPosition)
+                    })
+                    .collect();
                 assert!(
                     loci.iter().all(|(contig, _)| contig == "chr2") && loci.len() == 3,
                     "{format:?}: {loci:?}"

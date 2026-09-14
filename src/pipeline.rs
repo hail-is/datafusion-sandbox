@@ -37,7 +37,12 @@ impl Default for PipelineOptions {
 #[must_use]
 pub fn session_config() -> SessionConfig {
     let mut config = SessionConfig::new();
-    config.options_mut().optimizer.prefer_existing_sort = true;
+    let options = config.options_mut();
+    options.optimizer.prefer_existing_sort = true;
+    // Parquet reports a pushed filter exact only when it filters at decode time, and only an
+    // exact filter leaves a filtered Parquet plan with the shape of a filtered Vortex plan.
+    // Filter reordering stays at its default. See ADR 0003.
+    options.execution.parquet.pushdown_filters = true;
     config
 }
 
