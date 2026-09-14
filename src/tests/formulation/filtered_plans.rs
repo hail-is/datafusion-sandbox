@@ -15,6 +15,9 @@
 //! filtered scan's row count is inexact. It does so in both formats alike, so that plan is
 //! compared across formats rather than against its unfiltered shape.
 
+// PROTOTYPE for wayfinder ticket #137; throwaway, not for main.
+mod cross_contig_prototype;
+
 use super::{
     FORMATS, FORMULATIONS, FixtureDataset, REPRESENTATIONS, assert_merges_one_partition_per_sample,
     dataset, displayed, hostile_config, nodes_of,
