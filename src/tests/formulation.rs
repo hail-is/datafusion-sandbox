@@ -4,6 +4,11 @@
 //! there: one sort-preserving merge over one partition per sample, and no
 //! re-sort. A regression from merging to re-sorting is invisible in the results
 //! and costs an order of magnitude in time, so it is asserted structurally here.
+//!
+//! The tests here build unfiltered plans. `filtered_plans` holds the same
+//! formulations under a caller's contig or locus-interval filter.
+
+mod filtered_plans;
 
 use crate::fixture;
 
@@ -20,7 +25,7 @@ use datafusion::{
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
         union::UnionExec,
     },
-    prelude::SessionContext,
+    prelude::{SessionConfig, SessionContext},
 };
 
 use std::sync::Arc;
@@ -195,16 +200,21 @@ fn physical_plan(formulation: Formulation, dataset: &FixtureDataset) -> Arc<dyn 
     physical_plan_with_target(formulation, dataset, 8)
 }
 
+/// The shared session settings, plus permission to split a file scan of any size across
+/// `target_partitions` partitions wherever the plan lets the optimizer do so.
+fn hostile_config(target_partitions: usize) -> SessionConfig {
+    let mut config = pipeline::session_config().with_target_partitions(target_partitions);
+    config.options_mut().optimizer.repartition_file_min_size = 0;
+    config
+}
+
 fn physical_plan_with_target(
     formulation: Formulation,
     dataset: &FixtureDataset,
     target_partitions: usize,
 ) -> Arc<dyn ExecutionPlan> {
-    let mut hostile_config = pipeline::session_config().with_target_partitions(target_partitions);
-    let optimizer = &mut hostile_config.options_mut().optimizer;
-    optimizer.repartition_file_min_size = 0;
     block_on(async {
-        let ctx = SessionContext::new_with_config(hostile_config);
+        let ctx = SessionContext::new_with_config(hostile_config(target_partitions));
         dataset.fixture.register(&ctx);
         formulation
             .plan(&ctx, &dataset.dataset)

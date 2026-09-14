@@ -11,7 +11,7 @@ use crate::{
 };
 use datafusion::{
     arrow::{
-        array::{Array, Int32Array, StringArray},
+        array::{Array, StringArray},
         compute::cast,
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
@@ -416,7 +416,12 @@ fn inexact_filters_keep_the_logical_residual_and_do_not_truncate_before_filterin
                         }
                         let batches =
                             datafusion::physical_plan::collect(plan, ctx.task_ctx()).await?;
-                        let loci: Vec<_> = batches.iter().flat_map(locus_column_values).collect();
+                        let loci: Vec<_> = batches
+                            .iter()
+                            .flat_map(|batch| {
+                                fixture::decode_loci(batch, LocusRepresentation::ContigPosition)
+                            })
+                            .collect();
                         // Without ORDER BY, the residual filter's repartition may change
                         // which matching rows satisfy the limit.
                         assert_eq!(loci.len(), 2, "{loci:?}");
@@ -1006,27 +1011,15 @@ fn collected_rows_arrive_in_locus_order() {
     )
     .unwrap();
 
-    let loci: Vec<(String, i32)> = batches.iter().flat_map(locus_column_values).collect();
+    let loci: Vec<(String, i32)> = batches
+        .iter()
+        .flat_map(|batch| fixture::decode_loci(batch, LocusRepresentation::ContigPosition))
+        .collect();
     assert_eq!(loci.len(), 8, "{loci:?}");
     assert!(
         loci.windows(2).all(|pair| pair[0] <= pair[1]),
         "rows out of locus order: {loci:?}"
     );
-}
-
-fn locus_column_values(batch: &RecordBatch) -> Vec<(String, i32)> {
-    // Parquet reads strings as `Utf8View` by default; cast so one array type covers both formats.
-    let contigs = cast(batch.column_by_name("contig").unwrap(), &DataType::Utf8).unwrap();
-    let contigs = contigs.as_any().downcast_ref::<StringArray>().unwrap();
-    let positions = batch
-        .column_by_name("position")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .unwrap();
-    (0..batch.num_rows())
-        .map(|row| (contigs.value(row).to_string(), positions.value(row)))
-        .collect()
 }
 
 /// Lists one sample's files from the fixture store with no statistics, so the table has to
