@@ -10,7 +10,8 @@
 //! - [`locus`] describes the supported stored locus representations, split points, and locus
 //!   intervals.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
-//! - [`sink`] ends a plan in a sink that requires the combiner's ordering.
+//! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of
+//!   every partition.
 //! - [`sorted_table`] scans files as one ordered partition.
 //! - [`generated`] builds generated tables for tests and benchmarks.
 //!

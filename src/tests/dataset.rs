@@ -7,7 +7,7 @@ use crate::fixture::{self, block_on};
 
 use crate::{
     dataset::{Dataset, DatasetLayout, ScanShape},
-    format::{InputFormat, OutputFormat},
+    format::{InputFormat, OutputFormat, OutputLayout},
     locus::{LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
 };
@@ -451,7 +451,9 @@ fn infers_the_schema_from_one_input_file() {
                 for (name, batch) in [("a.vortex", int_batch), ("b.vortex", string_batch)] {
                     let path = format!("{root}/s=sample-a/{name}");
                     let df = ctx.read_batch(batch)?;
-                    OutputFormat::VORTEX.write(df, &path, None).await?;
+                    OutputFormat::VORTEX
+                        .write(df, &path, None, OutputLayout::SingleFile)
+                        .await?;
                 }
 
                 let dataset =

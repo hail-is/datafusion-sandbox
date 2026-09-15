@@ -2,7 +2,7 @@
 
 use crate::{
     dataset::Dataset,
-    format::{InputFormat, OutputFormat},
+    format::{InputFormat, OutputFormat, OutputLayout},
     formulation::Formulation,
     locus::StoredOrdering,
     pipeline::{self, PipelineOptions},
@@ -104,6 +104,7 @@ impl CombinerRun {
                     None => dataset,
                 };
                 let ordering = dataset.query_ordering(&required_ordering)?;
+                let layout = formulation.output_layout();
                 let df = formulation.plan(&ctx, &dataset).await?;
                 let df = match row_limit {
                     Some(limit) => df.limit(0, Some(limit))?,
@@ -114,7 +115,7 @@ impl CombinerRun {
                     Action::Write(target) => Ok(Outcome::RowsWritten(
                         target
                             .output_format
-                            .write(df, &target.output_path, Some(&ordering))
+                            .write(df, &target.output_path, Some(&ordering), layout)
                             .await?,
                     )),
                     Action::Collect => {
@@ -123,10 +124,10 @@ impl CombinerRun {
                         Ok(Outcome::Batches(sink.take()))
                     }
                     Action::Explain { write } => {
-                        explain(sink_frame(df, write, &ordering)?, false).await
+                        explain(sink_frame(df, write, &ordering, layout)?, false).await
                     }
                     Action::ExplainAnalyze { write } => {
-                        explain(sink_frame(df, write, &ordering)?, true).await
+                        explain(sink_frame(df, write, &ordering, layout)?, true).await
                     }
                 }
             },
@@ -135,16 +136,20 @@ impl CombinerRun {
     }
 }
 
-/// The frame an explain renders: the write's file-sink frame, or a draining run without a write.
+/// The frame an explain renders: the write's file-sink frame in the formulation's `layout`, or a
+/// draining run without a write.
 fn sink_frame(
     df: DataFrame,
     write: Option<WriteTarget>,
     ordering: &StoredOrdering,
+    layout: OutputLayout,
 ) -> Result<DataFrame> {
     match write {
-        Some(target) => target
-            .output_format
-            .sink_frame(df, &target.output_path, Some(ordering)),
+        Some(target) => {
+            target
+                .output_format
+                .sink_frame(df, &target.output_path, Some(ordering), layout)
+        }
         None => sink::drain(df, ordering),
     }
 }

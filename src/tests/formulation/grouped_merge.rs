@@ -42,7 +42,7 @@ fn requires_the_reference_combiners_layout() {
 fn a_group_of_one_sample_feeds_the_final_merge_directly() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let plan = super::physical_plan(grouped_merge(3), &dataset(format, representation));
+            let plan = super::physical_plan(&grouped_merge(3), &dataset(format, representation));
             assert_merge_tree(&plan, &[2, 1, 1]);
         }
     }
@@ -54,9 +54,9 @@ fn one_group_or_one_sample_per_group_plans_as_the_union_formulation() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
-            let union = super::physical_plan(Formulation::CombineRefsUnion, &dataset);
+            let union = super::physical_plan(&Formulation::CombineRefsUnion, &dataset);
             for groups in [1, SAMPLES.len(), 8] {
-                let grouped = super::physical_plan(grouped_merge(groups), &dataset);
+                let grouped = super::physical_plan(&grouped_merge(groups), &dataset);
                 assert_eq!(
                     operators(&grouped),
                     operators(&union),
@@ -86,9 +86,9 @@ fn a_row_limit_becomes_a_fetch_on_every_merge() {
                     .unwrap()
                     .limit(0, Some(LIMIT))
                     .unwrap();
-                sink_plan(grouped_merge(2), frame, &dataset).await.unwrap()
+                sink_plan(&grouped_merge(2), frame, &dataset).await.unwrap()
             });
-            let written = file_sink_plan(grouped_merge(2), &dataset, Some(LIMIT));
+            let written = file_sink_plan(&grouped_merge(2), &dataset, Some(LIMIT));
 
             for (sink, plan) in [("draining", drained), ("file", written)] {
                 assert_merge_tree(&plan, &[2, 2]);
@@ -169,7 +169,7 @@ fn rows(
             } = &dataset;
             fixture.register(&ctx);
             let frame = formulation.plan(&ctx, inner).await?;
-            let (frame, collected) = sink::collect(frame, &ordering(formulation, &dataset))?;
+            let (frame, collected) = sink::collect(frame, &ordering(&formulation, &dataset))?;
             frame.collect().await?;
             Ok(collected.take())
         },

@@ -5,6 +5,7 @@ use crate::{
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
     locus::LocusRepresentation,
+    pipeline::{self, PipelineOptions},
 };
 use datafusion::{
     arrow::{
@@ -272,7 +273,7 @@ fn collects_references_in_locus_order_across_file_cuts() {
                 };
                 let batches = expect_batches(
                     run(
-                        formulation,
+                        formulation.clone(),
                         input.table_path(),
                         input.input_format(),
                         Action::Collect,
@@ -583,6 +584,233 @@ fn grouped_merge(groups: usize) -> Formulation {
     Formulation::CombineRefsGroupedMerge {
         groups: NonZeroUsize::new(groups).unwrap(),
     }
+}
+
+fn interval_merge(split_points: &str) -> Formulation {
+    Formulation::CombineRefsIntervalMerge {
+        split_points: split_points.parse().unwrap(),
+    }
+}
+
+/// On stored files, interval-merge writes a directory of one file per locus interval, named by
+/// index, whose rows read back in index order are the union formulation's rows in locus order;
+/// the count reported is the total. The middle interval here holds no locus and writes an empty
+/// file. Both output formats, from both stored representations.
+#[test]
+fn interval_merge_writes_one_file_per_interval_in_locus_order() {
+    for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
+        for representation in [
+            LocusRepresentation::ContigPosition,
+            LocusRepresentation::Packed,
+        ] {
+            let context = format!("{format:?} {representation:?}");
+            let dir = tempfile::tempdir().unwrap();
+            let input = match representation {
+                LocusRepresentation::ContigPosition => {
+                    fixture::contig_position_disk_fixture(format)
+                }
+                LocusRepresentation::Packed => fixture::packed_disk_fixture(format),
+            };
+            let output_format = || match format {
+                FixtureFormat::Parquet => OutputFormat::PARQUET,
+                FixtureFormat::Vortex => OutputFormat::VORTEX,
+            };
+            let directory = dir.path().join("intervals").to_str().unwrap().to_string();
+            let union = expect_batches(
+                run(
+                    Formulation::CombineRefsUnion,
+                    input.table_path(),
+                    input.input_format(),
+                    Action::Collect,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            );
+            let union_rows = rows_of(&union);
+
+            let outcome = run(
+                interval_merge("1:5,2:1"),
+                input.table_path(),
+                input.input_format(),
+                Action::Write(WriteTarget {
+                    output_path: directory.clone(),
+                    output_format: output_format(),
+                }),
+                None,
+                None,
+            )
+            .unwrap();
+            let Outcome::RowsWritten(rows) = outcome else {
+                panic!("{context}: expected rows written, got {outcome:?}");
+            };
+            assert_eq!(rows, 32, "{context}");
+
+            let mut names: Vec<String> = std::fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            let extension = output_format().extension();
+            assert_eq!(
+                names,
+                [
+                    format!("0.{extension}"),
+                    format!("1.{extension}"),
+                    format!("2.{extension}")
+                ],
+                "{context}"
+            );
+            let mut written = Vec::new();
+            for index in 0..3 {
+                let path = output_format().partition_file_path(&directory, index, 3);
+                let file_rows = rows_of(&read_back(&path, format));
+                if index == 1 {
+                    assert!(file_rows.is_empty(), "{context}: {path}: {file_rows:?}");
+                } else {
+                    assert!(!file_rows.is_empty(), "{context}: {path} is empty");
+                }
+                written.extend(file_rows);
+            }
+            // The reference combiner orders by locus alone, so the loci match in order and the
+            // rows match as sets.
+            assert_eq!(loci_of(&written), loci_of(&union_rows), "{context}");
+            written.sort();
+            let mut union_rows = union_rows;
+            union_rows.sort();
+            assert_eq!(written, union_rows, "{context}");
+        }
+    }
+}
+
+/// The locus of each rendered row: every column but the trailing alleles and sample.
+fn loci_of(rows: &[Vec<String>]) -> Vec<&[String]> {
+    rows.iter()
+        .map(|row| &row[..row.len().checked_sub(2).unwrap()])
+        .collect()
+}
+
+/// Explaining an interval-merge write renders the partitioned sink over the union of interval
+/// merges and writes nothing; analyzing it performs the writes.
+#[test]
+fn interval_merge_explains_the_partitioned_sink_and_analyze_performs_the_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let directory = dir.path().join("explained");
+    let write = || WriteTarget {
+        output_path: directory.to_str().unwrap().to_string(),
+        output_format: OutputFormat::VORTEX,
+    };
+
+    let explained = expect_plan(
+        run(
+            interval_merge("1:3,2:2"),
+            input.table_path(),
+            input.input_format(),
+            Action::Explain {
+                write: Some(write()),
+            },
+            None,
+            None,
+        )
+        .unwrap(),
+    );
+    assert!(
+        explained.contains("PartitionedSinkExec: partitions=3, sink=VortexSink"),
+        "plan:\n{explained}"
+    );
+    assert_eq!(
+        explained.matches("SortPreservingMergeExec").count(),
+        3,
+        "plan:\n{explained}"
+    );
+    assert!(!explained.contains("SortExec"), "plan:\n{explained}");
+    assert!(
+        !explained.contains("CoalescePartitionsExec"),
+        "plan:\n{explained}"
+    );
+    assert!(!directory.exists(), "explain wrote {}", directory.display());
+
+    let analyzed = expect_plan(
+        run(
+            interval_merge("1:3,2:2"),
+            input.table_path(),
+            input.input_format(),
+            Action::ExplainAnalyze {
+                write: Some(write()),
+            },
+            None,
+            None,
+        )
+        .unwrap(),
+    );
+    assert!(analyzed.contains("Plan with Metrics"), "plan:\n{analyzed}");
+    assert_eq!(exec_names(&explained), exec_names(&analyzed));
+    // The partitioned sink reports its partition sinks' metrics together, so the analyzed line
+    // carries the Vortex sink's row counter.
+    let sink_line = analyzed
+        .lines()
+        .find(|line| line.contains("PartitionedSinkExec"))
+        .unwrap_or_else(|| panic!("plan:\n{analyzed}"));
+    assert!(
+        sink_line.contains("rows_written"),
+        "sink line without write metrics: {sink_line}\nplan:\n{analyzed}"
+    );
+    let mut names: Vec<String> = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["0.vortex", "1.vortex", "2.vortex"]);
+    assert_eq!(
+        (0..3)
+            .map(|index| {
+                rows_of(&read_back(
+                    &OutputFormat::VORTEX.partition_file_path(
+                        directory.to_str().unwrap(),
+                        index,
+                        3,
+                    ),
+                    FixtureFormat::Vortex,
+                ))
+                .len()
+            })
+            .sum::<usize>(),
+        32
+    );
+}
+
+/// Every row of `batches` as its column values rendered in order.
+fn rows_of(batches: &[RecordBatch]) -> Vec<Vec<String>> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            (0..batch.num_rows()).map(|row| {
+                batch
+                    .columns()
+                    .iter()
+                    .map(|column| array_value_to_string(column, row).unwrap())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect()
+}
+
+/// Reads the one file at `path` on disk, written in `format`, back into batches.
+fn read_back(path: &str, format: FixtureFormat) -> Vec<RecordBatch> {
+    let path = path.to_string();
+    let input_format = match format {
+        FixtureFormat::Parquet => InputFormat::PARQUET,
+        FixtureFormat::Vortex => InputFormat::VORTEX,
+    };
+    pipeline::run(
+        move |ctx| async move { fixture::read_file(&ctx, &path, &input_format, None).await },
+        PipelineOptions {
+            threads: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 
 fn expect_plan(outcome: Outcome) -> String {

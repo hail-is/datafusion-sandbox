@@ -38,6 +38,7 @@
 //!   Interval restrictions are `LocusInterval::filter` in the library.
 //! - `decode_loci` and `string_column`, the contig and position or one string
 //!   field of each row a plan returned.
+//! - `read_file`, the rows of one file a test wrote, on any registered store.
 
 #![expect(
     clippy::as_conversions,
@@ -54,17 +55,17 @@ mod memory_store;
 
 pub use memory_store::MemoryStore;
 
-use crate::format::{InputFormat, OutputFormat};
+use crate::format::{InputFormat, OutputFormat, OutputLayout};
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::pipeline::{self, PipelineOptions};
 use datafusion::{
     arrow::{
         array::{Array, ArrayRef, Int32Array, Int64Array, StringArray},
         compute::cast,
-        datatypes::{DataType, Field, Schema},
+        datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
     },
-    datasource::listing::ListingTableUrl,
+    datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
     logical_expr::Expr,
     prelude::*,
 };
@@ -332,7 +333,9 @@ fn build_in_memory_fixture_without_alleles(name: &'static str) -> Arc<DatasetFix
             async move {
                 let path = format!("{root}/s=sample-a/a.vortex");
                 let df = ctx.read_batch(batch)?;
-                OutputFormat::VORTEX.write(df, &path, None).await?;
+                OutputFormat::VORTEX
+                    .write(df, &path, None, OutputLayout::SingleFile)
+                    .await?;
                 Ok(())
             }
         },
@@ -431,7 +434,11 @@ fn build_sample_tables(
                         output_format.extension()
                     );
                     let df = ctx.read_batch(sample_batch(rows, representation))?;
-                    writes.push(async move { output_format.write(df, &path, None).await });
+                    writes.push(async move {
+                        output_format
+                            .write(df, &path, None, OutputLayout::SingleFile)
+                            .await
+                    });
                 }
             }
             join_all(writes)
@@ -568,6 +575,30 @@ pub fn string_column(batch: &RecordBatch, name: &str) -> Vec<String> {
         .iter()
         .map(|value| value.unwrap().to_string())
         .collect()
+}
+
+/// Reads the one file at `path`, written in `input_format`, back through `ctx` into batches:
+/// with `schema` when the caller knows it, otherwise inferred from the file.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be listed, its schema cannot be inferred, or the read
+/// fails.
+pub async fn read_file(
+    ctx: &SessionContext,
+    path: &str,
+    input_format: &InputFormat,
+    schema: Option<SchemaRef>,
+) -> datafusion::error::Result<Vec<RecordBatch>> {
+    let config = ListingTableConfig::new(ListingTableUrl::parse(path)?)
+        .with_listing_options(ListingOptions::new(input_format.read_format()));
+    let config = match schema {
+        Some(schema) => config.with_schema(schema),
+        None => config.infer_schema(&ctx.state()).await?,
+    };
+    ctx.read_table(Arc::new(ListingTable::try_new(config)?))?
+        .collect()
+        .await
 }
 
 /// The packed locus of `contig:position`, under the library's packing rule.
