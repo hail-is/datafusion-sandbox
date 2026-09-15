@@ -11,25 +11,29 @@
 //! the final merge, so a bare frame's physical plan is not the plan a run
 //! executes. See ADR 0014.
 //!
-//! The tests here build unfiltered plans. `filtered_plans` holds the same
-//! formulations under a caller's contig or locus-interval filter, and
-//! `grouped_merge` holds what is particular to merging by sample group.
+//! The tests here build unfiltered plans of the single-file formulations.
+//! `filtered_plans` holds the same formulations under a caller's contig or
+//! locus-interval filter, `grouped_merge` holds what is particular to merging
+//! by sample group, and `interval_merge` holds the interval-merge formulation,
+//! whose plan has one scan per sample per locus interval and whose write ends
+//! in the partitioned sink rather than the file sink.
 
 mod filtered_plans;
 mod grouped_merge;
+mod interval_merge;
 
 use crate::fixture;
 
 use crate::{
     dataset::{Dataset, DatasetLayout},
-    format::OutputFormat,
+    format::{OutputFormat, OutputLayout},
     formulation::Formulation,
     locus::{LocusOrdering, LocusRepresentation, StoredOrdering},
     pipeline, sink,
 };
 use datafusion::{
     common::DataFusionError,
-    datasource::sink::DataSinkExec,
+    datasource::{sink::DataSinkExec, source::DataSourceExec},
     error::Result,
     physical_expr::expressions::Column,
     physical_plan::{
@@ -48,11 +52,15 @@ use fixture::{FixtureFormat, SAMPLES, block_on};
 /// samples, so every group holds more than one sample and there is more than one group.
 const GROUPS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
-const FORMULATIONS: [Formulation; 3] = [
-    Formulation::CombineRefsUnion,
-    Formulation::CombineRefsGroupedMerge { groups: GROUPS },
-    Formulation::CombineAllelesUnion,
-];
+/// The formulations the shared loops cover: every one that writes a single file. A function
+/// rather than a constant because a formulation may hold split points, so it is not `Copy`.
+fn formulations() -> [Formulation; 3] {
+    [
+        Formulation::CombineRefsUnion,
+        Formulation::CombineRefsGroupedMerge { groups: GROUPS },
+        Formulation::CombineAllelesUnion,
+    ]
+}
 const FORMATS: [FixtureFormat; 2] = [FixtureFormat::Parquet, FixtureFormat::Vortex];
 const REPRESENTATIONS: [LocusRepresentation; 2] = [
     LocusRepresentation::ContigPosition,
@@ -83,7 +91,7 @@ fn formulations_keep_their_plan_shape_under_a_hostile_session() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
-            for formulation in FORMULATIONS {
+            for formulation in &formulations() {
                 let plan = physical_plan(formulation, &dataset);
                 assert_merge_tree(&plan, &expected_groups(formulation, SAMPLES.len()));
             }
@@ -98,7 +106,7 @@ fn formulations_keep_their_plan_shape_through_the_file_sink() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
-            for formulation in FORMULATIONS {
+            for formulation in &formulations() {
                 let plan = file_sink_plan(formulation, &dataset, None);
                 assert_merge_tree(&plan, &expected_groups(formulation, SAMPLES.len()));
                 let sink_exec = plan.downcast_ref::<DataSinkExec>().unwrap_or_else(|| {
@@ -133,7 +141,7 @@ fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
-            for formulation in FORMULATIONS {
+            for formulation in &formulations() {
                 let single_target = physical_plan_with_target(formulation, &dataset, 1);
                 let eight_targets = physical_plan_with_target(formulation, &dataset, 8);
                 assert_has_no_sorts(&single_target);
@@ -150,7 +158,7 @@ fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
 fn combine_refs_union_parquet_merges_one_partition_per_sample_without_re_sorting() {
     for representation in REPRESENTATIONS {
         let plan = physical_plan(
-            Formulation::CombineRefsUnion,
+            &Formulation::CombineRefsUnion,
             &dataset(FixtureFormat::Parquet, representation),
         );
         assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
@@ -163,7 +171,7 @@ fn combine_refs_union_parquet_merges_one_partition_per_sample_without_re_sorting
 fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting() {
     for representation in REPRESENTATIONS {
         let plan = physical_plan(
-            Formulation::CombineRefsUnion,
+            &Formulation::CombineRefsUnion,
             &dataset(FixtureFormat::Vortex, representation),
         );
         assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
@@ -177,7 +185,7 @@ fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting(
 fn combine_alleles_union_parquet_merges_one_partition_per_sample_without_re_sorting() {
     for representation in REPRESENTATIONS {
         let plan = physical_plan(
-            Formulation::CombineAllelesUnion,
+            &Formulation::CombineAllelesUnion,
             &dataset(FixtureFormat::Parquet, representation),
         );
         assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
@@ -190,7 +198,7 @@ fn combine_alleles_union_parquet_merges_one_partition_per_sample_without_re_sort
 fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorting() {
     for representation in REPRESENTATIONS {
         let plan = physical_plan(
-            Formulation::CombineAllelesUnion,
+            &Formulation::CombineAllelesUnion,
             &dataset(FixtureFormat::Vortex, representation),
         );
         assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
@@ -207,7 +215,7 @@ fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
         for representation in REPRESENTATIONS {
             let mut dataset = dataset(format, representation);
             dataset.dataset = dataset.dataset.restrict_to(&requested).unwrap();
-            for formulation in FORMULATIONS {
+            for formulation in &formulations() {
                 let plan = physical_plan(formulation, &dataset);
                 assert_merge_tree(&plan, &expected_groups(formulation, requested.len()));
             }
@@ -217,12 +225,16 @@ fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
 
 /// The sample groups a formulation's plan should merge over `n_samples`, as their sizes in
 /// sample order. Written out rather than computed, so the test cannot agree with a wrong split.
-fn expected_groups(formulation: Formulation, n_samples: usize) -> Vec<usize> {
+/// Interval-merge merges every sample once per locus interval; `interval_merge` spells that out.
+fn expected_groups(formulation: &Formulation, n_samples: usize) -> Vec<usize> {
     match (formulation, n_samples) {
-        (Formulation::CombineRefsGroupedMerge { groups }, 4) if groups == GROUPS => vec![2, 2],
-        (Formulation::CombineRefsGroupedMerge { groups }, 2) if groups == GROUPS => vec![1, 1],
+        (Formulation::CombineRefsGroupedMerge { groups }, 4) if *groups == GROUPS => vec![2, 2],
+        (Formulation::CombineRefsGroupedMerge { groups }, 2) if *groups == GROUPS => vec![1, 1],
         (Formulation::CombineRefsGroupedMerge { groups }, n) => {
             panic!("no expected groups for {groups} groups over {n} samples")
+        }
+        (Formulation::CombineRefsIntervalMerge { split_points }, n) => {
+            panic!("no expected groups for split points {split_points} over {n} samples")
         }
         (Formulation::CombineRefsUnion | Formulation::CombineAllelesUnion, n) => vec![n],
     }
@@ -268,7 +280,7 @@ fn dataset_with_layout(
 /// Builds a formulation under settings that would split an unpinned file scan.
 /// The sorted table must keep one partition per sample even when the optimizer
 /// is allowed to split files of any size.
-fn physical_plan(formulation: Formulation, dataset: &FixtureDataset) -> Arc<dyn ExecutionPlan> {
+fn physical_plan(formulation: &Formulation, dataset: &FixtureDataset) -> Arc<dyn ExecutionPlan> {
     physical_plan_with_target(formulation, dataset, 8)
 }
 
@@ -281,7 +293,7 @@ fn hostile_config(target_partitions: usize) -> SessionConfig {
 }
 
 fn physical_plan_with_target(
-    formulation: Formulation,
+    formulation: &Formulation,
     dataset: &FixtureDataset,
     target_partitions: usize,
 ) -> Arc<dyn ExecutionPlan> {
@@ -294,40 +306,67 @@ fn physical_plan_with_target(
 }
 
 /// The ordering a run's sink requires of `formulation` over `dataset`.
-fn ordering(formulation: Formulation, dataset: &FixtureDataset) -> StoredOrdering {
+fn ordering(formulation: &Formulation, dataset: &FixtureDataset) -> StoredOrdering {
     dataset
         .dataset
         .query_ordering(&formulation.required_layout().locus_ordering)
         .unwrap()
 }
 
+/// The fixture format as an output format, so a plan writes what it read.
+const fn output_format(format: FixtureFormat) -> OutputFormat {
+    match format {
+        FixtureFormat::Parquet => OutputFormat::PARQUET,
+        FixtureFormat::Vortex => OutputFormat::VORTEX,
+    }
+}
+
+/// The in-memory path a write of `formulation` over `dataset` goes to: a file named with the
+/// output format's extension, or a directory for a formulation writing one file per partition.
+fn output_path(formulation: &Formulation, dataset: &FixtureDataset) -> String {
+    let root = dataset.fixture.table_path().as_str().trim_end_matches('/');
+    match formulation.output_layout() {
+        OutputLayout::SingleFile => format!(
+            "{root}/combined.{}",
+            output_format(dataset.format).extension()
+        ),
+        OutputLayout::FilePerPartition => format!("{root}/combined"),
+    }
+}
+
 /// The physical plan of `formulation` over `dataset` under the hostile session, with a row limit
-/// of `limit` if given, run into the fixture format's file sink at an in-memory path. Planned,
-/// not executed.
+/// of `limit` if given, run into the fixture format's file sink in the formulation's output
+/// layout at an in-memory path. Planned, not executed.
 fn file_sink_plan(
-    formulation: Formulation,
+    formulation: &Formulation,
     dataset: &FixtureDataset,
     limit: Option<usize>,
 ) -> Arc<dyn ExecutionPlan> {
-    let output_format = match dataset.format {
-        FixtureFormat::Parquet => OutputFormat::PARQUET,
-        FixtureFormat::Vortex => OutputFormat::VORTEX,
-    };
-    let path = format!(
-        "{}combined.{}",
-        dataset.fixture.table_path().as_str(),
-        output_format.extension()
-    );
+    file_sink_plan_with_config(formulation, dataset, limit, hostile_config(8))
+}
+
+/// [`file_sink_plan`] under the session settings `config`.
+fn file_sink_plan_with_config(
+    formulation: &Formulation,
+    dataset: &FixtureDataset,
+    limit: Option<usize>,
+    config: SessionConfig,
+) -> Arc<dyn ExecutionPlan> {
     block_on(async {
-        let ctx = SessionContext::new_with_config(hostile_config(8));
+        let ctx = SessionContext::new_with_config(config);
         dataset.fixture.register(&ctx);
         let frame = formulation.plan(&ctx, &dataset.dataset).await.unwrap();
         let frame = match limit {
             Some(limit) => frame.limit(0, Some(limit)).unwrap(),
             None => frame,
         };
-        output_format
-            .sink_frame(frame, &path, Some(&ordering(formulation, dataset)))
+        output_format(dataset.format)
+            .sink_frame(
+                frame,
+                &output_path(formulation, dataset),
+                Some(&ordering(formulation, dataset)),
+                formulation.output_layout(),
+            )
             .unwrap()
             .create_physical_plan()
             .await
@@ -338,7 +377,7 @@ fn file_sink_plan(
 /// The physical plan of `frame` run into a draining sink, which is the plan an action executes
 /// up to the sink's name.
 async fn sink_plan(
-    formulation: Formulation,
+    formulation: &Formulation,
     frame: DataFrame,
     dataset: &FixtureDataset,
 ) -> Result<Arc<dyn ExecutionPlan>> {
@@ -450,6 +489,34 @@ fn assert_flat_merge(plan: &Arc<dyn ExecutionPlan>, n_samples: usize) {
         displayed(plan),
     );
     assert_has_no_sorts(plan);
+}
+
+/// Every one of the `n_scans` scans displays a predicate over the representation's locus column.
+/// `EXPLAIN` is the public observation of a pushed filter, and each format names it differently.
+/// That the predicate is the whole filter is shown by the results: with no filter operator
+/// anywhere in the plan, only the scans could have narrowed the rows.
+fn assert_filter_reaches_every_scan(
+    plan: &Arc<dyn ExecutionPlan>,
+    n_scans: usize,
+    representation: LocusRepresentation,
+) {
+    let locus_column = match representation {
+        LocusRepresentation::ContigPosition => "contig",
+        LocusRepresentation::Packed => "locus",
+    };
+    let scans = nodes_of::<DataSourceExec>(plan);
+    assert_eq!(scans.len(), n_scans, "{}", displayed(plan));
+    for scan in &scans {
+        let text = displayed(scan);
+        let predicate = text
+            .split_once("predicate=")
+            .or_else(|| text.split_once("predicate:"))
+            .map(|(_, predicate)| predicate);
+        assert!(
+            predicate.is_some_and(|predicate| predicate.contains(locus_column)),
+            "expected a filter on {locus_column} to reach the scan: {text}"
+        );
+    }
 }
 
 fn assert_has_no_sorts(plan: &Arc<dyn ExecutionPlan>) {

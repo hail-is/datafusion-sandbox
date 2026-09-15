@@ -11,8 +11,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use datafusion::error::{DataFusionError, Result};
 
 use datafusion_sandbox::combiner_run::{Action, CombinerRun, WriteTarget};
-use datafusion_sandbox::format::{InputFormat, OutputFormat};
+use datafusion_sandbox::format::{InputFormat, OutputFormat, OutputLayout};
 use datafusion_sandbox::formulation::Formulation;
+use datafusion_sandbox::locus::SplitPoints;
 use std::{num::NonZeroUsize, path::Path, thread::available_parallelism};
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
@@ -61,26 +62,53 @@ struct CombineRefsArgs {
     /// Accepted only with `--formulation grouped-merge`.
     #[arg(long, value_name = "N")]
     groups: Option<NonZeroUsize>,
+    /// The loci cutting the locus ordering into the intervals the interval-merge formulation
+    /// merges, one file each: comma-separated `contig:position`, strictly increasing, where
+    /// `contig` is the contig ordinal. Required by, and accepted only with,
+    /// `--formulation interval-merge`.
+    #[arg(long, value_name = "CONTIG:POSITION,...")]
+    split_points: Option<SplitPoints>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum CombineRefsFormulationArg {
     Union,
     GroupedMerge,
+    IntervalMerge,
 }
 
 impl CombineRefsFormulationArg {
-    /// The formulation for this argument, given `--groups` and the run's thread count.
-    fn formulation(self, groups: Option<NonZeroUsize>, threads: usize) -> Result<Formulation> {
-        match (self, groups) {
-            (Self::Union, None) => Ok(Formulation::CombineRefsUnion),
-            (Self::Union, Some(_)) => Err(DataFusionError::Configuration(
+    /// The formulation for this argument, given `--groups`, `--split-points`, and the run's
+    /// thread count.
+    fn formulation(
+        self,
+        groups: Option<NonZeroUsize>,
+        split_points: Option<SplitPoints>,
+        threads: usize,
+    ) -> Result<Formulation> {
+        if groups.is_some() && self != Self::GroupedMerge {
+            return Err(DataFusionError::Configuration(
                 "--groups applies only to the grouped-merge formulation".to_string(),
-            )),
-            (Self::GroupedMerge, groups) => Ok(Formulation::CombineRefsGroupedMerge {
+            ));
+        }
+        if split_points.is_some() && self != Self::IntervalMerge {
+            return Err(DataFusionError::Configuration(
+                "--split-points applies only to the interval-merge formulation".to_string(),
+            ));
+        }
+        match self {
+            Self::Union => Ok(Formulation::CombineRefsUnion),
+            Self::GroupedMerge => Ok(Formulation::CombineRefsGroupedMerge {
                 groups: groups
                     .unwrap_or_else(|| NonZeroUsize::new(threads).unwrap_or(NonZeroUsize::MIN)),
             }),
+            Self::IntervalMerge => split_points
+                .map(|split_points| Formulation::CombineRefsIntervalMerge { split_points })
+                .ok_or_else(|| {
+                    DataFusionError::Configuration(
+                        "the interval-merge formulation requires --split-points".to_string(),
+                    )
+                }),
         }
     }
 }
@@ -230,7 +258,8 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
     let threads = threads.unwrap_or_else(|| available_parallelism().map_or(1, NonZeroUsize::get));
     let (formulation, args) = match command {
         Command::CombineRefs(args) => (
-            args.formulation.formulation(args.groups, threads)?,
+            args.formulation
+                .formulation(args.groups, args.split_points, threads)?,
             args.combiner,
         ),
         Command::CombineAlleles(args) => (Formulation::CombineAllelesUnion, args),
@@ -245,10 +274,19 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
     } = args;
     let cli_action = CliAction::try_from(action)?;
     let input_format = formats.input_format.format();
+    let output_layout = formulation.output_layout();
+    if limit.is_some() && output_layout == OutputLayout::FilePerPartition {
+        // A limit above the union of intervals forces one partition, and so one file, which
+        // would silently undo the formulation's parallelism.
+        return Err(DataFusionError::Configuration(format!(
+            "--limit cannot be combined with the {formulation} formulation, which writes one file \
+             per locus interval"
+        )));
+    }
     let limit = cli_action.row_limit(limit);
     let write_target = |output_path: String| -> Result<WriteTarget> {
         let output_format = formats.output_format().format();
-        validate_output_extension(&output_path, &output_format)?;
+        validate_output_path(&output_path, &output_format, &formulation)?;
         let output_format = match &compression {
             Some(compression) => output_format.with_compression(compression)?,
             None => output_format,
@@ -289,19 +327,29 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn validate_output_extension(output_path: &str, output_format: &OutputFormat) -> Result<()> {
+/// Rejects an output path whose extension contradicts the format, or any extension at all when
+/// the path names the directory a file-per-partition formulation fills.
+fn validate_output_path(
+    output_path: &str,
+    output_format: &OutputFormat,
+    formulation: &Formulation,
+) -> Result<()> {
     let Some(extension) = Path::new(output_path)
         .extension()
         .and_then(|ext| ext.to_str())
     else {
         return Ok(());
     };
-    if extension != output_format.extension() {
-        return Err(datafusion::error::DataFusionError::Configuration(format!(
+    match formulation.output_layout() {
+        OutputLayout::SingleFile if extension == output_format.extension() => Ok(()),
+        OutputLayout::SingleFile => Err(DataFusionError::Configuration(format!(
             "output path '{output_path}' has extension '.{extension}', which contradicts output format '{output_format}'"
-        )));
+        ))),
+        OutputLayout::FilePerPartition => Err(DataFusionError::Configuration(format!(
+            "output path '{output_path}' has extension '.{extension}', but it names the directory \
+             the {formulation} formulation writes one file per partition into"
+        ))),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -575,9 +623,195 @@ mod tests {
             "diagnostic:\n{diagnostic}"
         );
         assert!(
-            diagnostic.contains("possible values: union, grouped-merge"),
+            diagnostic.contains("possible values: union, grouped-merge, interval-merge"),
             "diagnostic:\n{diagnostic}"
         );
+    }
+
+    #[test]
+    fn split_points_resolve_to_the_interval_merge_formulation() {
+        let run = resolve(parse_combiner([
+            "--formulation",
+            "interval-merge",
+            "--split-points",
+            "22:1000,22:2000",
+            "--write",
+            "out",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            run.formulation,
+            Formulation::CombineRefsIntervalMerge {
+                split_points: "22:1000,22:2000".parse().unwrap()
+            }
+        );
+        let Action::Write(target) = run.action else {
+            panic!("expected a write");
+        };
+        assert_eq!(target.output_path, "out");
+        assert_eq!(run.row_limit, None);
+    }
+
+    #[test]
+    fn interval_merge_requires_split_points() {
+        let error = resolve(parse_combiner([
+            "--formulation",
+            "interval-merge",
+            "--write",
+            "out",
+        ]))
+        .err()
+        .unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(
+            diagnostic.contains("--split-points"),
+            "diagnostic:\n{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("interval-merge"),
+            "diagnostic:\n{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn split_points_are_rejected_with_every_other_formulation() {
+        for formulation in ["union", "grouped-merge"] {
+            let error = resolve(parse_combiner([
+                "--formulation",
+                formulation,
+                "--split-points",
+                "22:1000",
+                "--show",
+            ]))
+            .err()
+            .unwrap();
+            let diagnostic = error.to_string();
+
+            assert!(
+                diagnostic.contains("--split-points"),
+                "{formulation} diagnostic:\n{diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("interval-merge"),
+                "{formulation} diagnostic:\n{diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_split_points_are_rejected_when_parsed() {
+        for split_points in ["22:2000,22:1000", "chr22:1000", ""] {
+            let error = Cli::try_parse_from([
+                "datafusion-sandbox",
+                "combine-refs",
+                "input",
+                "--formulation",
+                "interval-merge",
+                "--split-points",
+                split_points,
+                "--write",
+                "out",
+            ])
+            .err()
+            .unwrap();
+            let diagnostic = error.to_string();
+
+            assert!(
+                diagnostic.contains("--split-points"),
+                "{split_points:?} diagnostic:\n{diagnostic}"
+            );
+        }
+    }
+
+    /// A limit above the union of intervals would collapse the write to one file. The twenty-row
+    /// default of `--show` is not a `--limit` and stays.
+    #[test]
+    fn a_limit_is_rejected_with_interval_merge() {
+        for (action, limit) in [("--write", "out"), ("--show", "")] {
+            let args = [
+                "--formulation",
+                "interval-merge",
+                "--split-points",
+                "22:1000",
+                "--limit",
+                "5",
+                action,
+                limit,
+            ];
+            let error = resolve(
+                Cli::try_parse_from(
+                    ["datafusion-sandbox", "combine-refs", "input"]
+                        .into_iter()
+                        .chain(args.into_iter().filter(|arg| !arg.is_empty())),
+                )
+                .unwrap(),
+            )
+            .err()
+            .unwrap();
+            let diagnostic = error.to_string();
+
+            assert!(
+                diagnostic.contains("--limit"),
+                "{action} diagnostic:\n{diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("interval-merge"),
+                "{action} diagnostic:\n{diagnostic}"
+            );
+        }
+
+        let run = resolve(parse_combiner([
+            "--formulation",
+            "interval-merge",
+            "--split-points",
+            "22:1000",
+            "--show",
+        ]))
+        .unwrap();
+        assert!(matches!(run.action, Action::Collect));
+        assert_eq!(run.row_limit, Some(20));
+    }
+
+    #[test]
+    fn an_output_extension_is_rejected_with_interval_merge() {
+        let error = resolve(parse_combiner([
+            "--formulation",
+            "interval-merge",
+            "--split-points",
+            "22:1000",
+            "--write",
+            "out.vortex",
+        ]))
+        .err()
+        .unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(
+            diagnostic.contains("out.vortex"),
+            "diagnostic:\n{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("interval-merge"),
+            "diagnostic:\n{diagnostic}"
+        );
+
+        for path in ["out", "out/", "data/combined"] {
+            let run = resolve(parse_combiner([
+                "--formulation",
+                "interval-merge",
+                "--split-points",
+                "22:1000",
+                "--write",
+                path,
+            ]))
+            .unwrap();
+            let Action::Write(target) = run.action else {
+                panic!("{path}: expected a write");
+            };
+            assert_eq!(target.output_path, path);
+        }
     }
 
     #[test]

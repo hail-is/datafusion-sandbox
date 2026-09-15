@@ -1,11 +1,12 @@
 use crate::{
     locus::StoredOrdering,
-    sink::{self, SinkTarget},
+    sink::{self, PartitionedSinkExec, SinkTarget},
 };
 
 use datafusion::{
     arrow::{
         array::{Array, UInt64Array},
+        datatypes::SchemaRef,
         record_batch::RecordBatch,
     },
     catalog::Session,
@@ -21,7 +22,7 @@ use datafusion::{
     error::{DataFusionError, Result},
     logical_expr::dml::InsertOp,
     physical_expr::LexRequirement,
-    physical_plan::ExecutionPlan,
+    physical_plan::{ExecutionPlan, ExecutionPlanProperties},
     prelude::DataFrame,
 };
 use datafusion_datasource::{file_groups::FileGroup, file_sink_config::FileOutputMode};
@@ -50,6 +51,17 @@ impl InputFormat {
             InputRepr::Vortex => Arc::new(VortexFormat::new(VortexSession::default())),
         }
     }
+}
+
+/// How a write lays its rows out at the output path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputLayout {
+    /// One file at the path, its rows in the sink's required order.
+    SingleFile,
+    /// A directory at the path holding one file per partition of the written frame, named by
+    /// the partition's zero-padded index with the format's extension, each file's rows in the
+    /// sink's required order. An empty partition writes an empty file.
+    FilePerPartition,
 }
 
 #[derive(Debug)]
@@ -104,26 +116,31 @@ impl OutputFormat {
         }
     }
 
-    /// Writes all rows in `df` to `path`, returning the number of rows written. `ordering` is the
-    /// order the rows must arrive at the file sink in, which the sink requires of its input; `None`
-    /// places no requirement.
+    /// Writes all rows in `df` to `path` in `layout`, returning the number of rows written.
+    /// `ordering` is the order the rows must arrive at the file sink in, which the sink requires
+    /// of its input; `None` places no requirement.
     ///
     /// # Errors
     ///
     /// Returns an error if the write plan cannot be built or executed, or if the execution result
-    /// does not contain the expected row count.
+    /// does not contain the expected row counts.
     pub async fn write(
         &self,
         df: DataFrame,
         path: &str,
         ordering: Option<&StoredOrdering>,
+        layout: OutputLayout,
     ) -> Result<u64> {
-        let batches = self.sink_frame(df, path, ordering)?.collect().await?;
+        let batches = self
+            .sink_frame(df, path, ordering, layout)?
+            .collect()
+            .await?;
         decode_row_count(&batches)
     }
 
-    /// The frame that writes all rows in `df` to `path` when executed: `df` under this format's
-    /// file sink, which requires `ordering` of its input.
+    /// The frame that writes all rows in `df` to `path` in `layout` when executed: `df` under
+    /// this format's file sink, which requires `ordering` of its input, or under a partitioned
+    /// sink of this format's file sinks, one per partition of `df`, each requiring `ordering`.
     ///
     /// # Errors
     ///
@@ -133,19 +150,38 @@ impl OutputFormat {
         df: DataFrame,
         path: &str,
         ordering: Option<&StoredOrdering>,
+        layout: OutputLayout,
     ) -> Result<DataFrame> {
-        let target = Arc::new(FileSinkTarget {
-            factory: self.output_factory(),
-            format_options: self.format_options(),
-            path: path.to_string(),
-        });
+        let target: Arc<dyn SinkTarget> = match layout {
+            OutputLayout::SingleFile => Arc::new(FileSinkTarget {
+                output: self.output_factory(),
+                path: path.to_string(),
+            }),
+            OutputLayout::FilePerPartition => Arc::new(PartitionedFileSinkTarget {
+                output: self.output_factory(),
+                directory: path.to_string(),
+            }),
+        };
         sink::run_into(df, path, ordering, target)
     }
 
-    fn output_factory(&self) -> Arc<dyn FileFormatFactory> {
-        match self.0 {
+    /// The path of the file holding partition `index` of `count` when this format writes a
+    /// directory at `directory` in [`OutputLayout::FilePerPartition`], with this format's
+    /// extension. A format with a compression suffix would add it to the extension when it
+    /// writes; neither format here has one.
+    #[must_use]
+    pub fn partition_file_path(&self, directory: &str, index: usize, count: usize) -> String {
+        partition_file_path(directory, index, count, self.extension())
+    }
+
+    fn output_factory(&self) -> OutputFactory {
+        let factory: Arc<dyn FileFormatFactory> = match self.0 {
             OutputRepr::Parquet { .. } => Arc::new(ParquetFormatFactory::new()),
             OutputRepr::Vortex { .. } => Arc::new(VortexFormatFactory::new()),
+        };
+        OutputFactory {
+            factory,
+            format_options: self.format_options(),
         }
     }
 
@@ -167,12 +203,25 @@ impl OutputFormat {
     }
 }
 
+/// The factory and options that make a format's writer on a session.
+#[derive(Debug)]
+struct OutputFactory {
+    factory: Arc<dyn FileFormatFactory>,
+    format_options: HashMap<String, String>,
+}
+
+impl OutputFactory {
+    /// The writer on `state`, with this output's options applied over the session's defaults.
+    fn create(&self, state: &dyn Session) -> Result<Arc<dyn FileFormat>> {
+        self.factory.create(state, &self.format_options)
+    }
+}
+
 /// A format's file sink at a path, built the way `COPY TO` builds it except that the caller
 /// supplies the ordering requirement instead of the planner deriving one from the input.
 #[derive(Debug)]
 struct FileSinkTarget {
-    factory: Arc<dyn FileFormatFactory>,
-    format_options: HashMap<String, String>,
+    output: OutputFactory,
     path: String,
 }
 
@@ -184,49 +233,128 @@ impl SinkTarget for FileSinkTarget {
         input: Arc<dyn ExecutionPlan>,
         ordering: Option<LexRequirement>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let format = self.factory.create(state, &self.format_options)?;
-        let file_extension = format.compression_type().map_or_else(
-            || format.get_ext(),
-            |compression| {
-                format
-                    .get_ext_with_compression(&compression)
-                    .unwrap_or_else(|_| format.get_ext())
-            },
-        );
-        let table_path = ListingTableUrl::parse(&self.path)?;
-        let config = FileSinkConfig {
-            original_url: self.path.clone(),
-            object_store_url: table_path.object_store(),
-            table_paths: vec![table_path],
-            file_group: FileGroup::default(),
-            output_schema: input.schema(),
-            table_partition_cols: Vec::new(),
-            insert_op: InsertOp::Append,
-            keep_partition_by_columns: state.config_options().execution.keep_partition_by_columns,
-            file_extension,
-            file_output_mode: FileOutputMode::Automatic,
-        };
+        let format = self.output.create(state)?;
+        let config = single_file_sink_config(state, format.as_ref(), &self.path, input.schema())?;
         format
             .create_writer_physical_plan(input, state, config, ordering)
             .await
     }
 }
 
+/// A format's file sinks under one partitioned sink: one single-file sink per partition of the
+/// input, at the partition's path in `directory`, each built the way [`FileSinkTarget`] builds
+/// its one sink.
+///
+/// The format builds every partition's sink itself, so each gets what the format adds beyond the
+/// sink's constructor: Parquet's sorting-column metadata from the ordering, Vortex's compact
+/// encodings from the compression option, and the session's table options. See ADR 0015.
+#[derive(Debug)]
+struct PartitionedFileSinkTarget {
+    output: OutputFactory,
+    directory: String,
+}
+
+#[async_trait::async_trait]
+impl SinkTarget for PartitionedFileSinkTarget {
+    async fn plan(
+        &self,
+        state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        ordering: Option<LexRequirement>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let format = self.output.create(state)?;
+        let count = input.output_partitioning().partition_count();
+        let extension = file_extension(format.as_ref());
+        let mut partition_sinks = Vec::with_capacity(count);
+        for index in 0..count {
+            let path = partition_file_path(&self.directory, index, count, &extension);
+            let config = single_file_sink_config(state, format.as_ref(), &path, input.schema())?;
+            let partition = PartitionedSinkExec::input_partition(Arc::clone(&input), index);
+            partition_sinks.push(
+                format
+                    .create_writer_physical_plan(partition, state, config, ordering.clone())
+                    .await?,
+            );
+        }
+        Ok(Arc::new(PartitionedSinkExec::try_new(
+            input,
+            partition_sinks,
+            ordering,
+        )?))
+    }
+}
+
+/// The sink configuration writing one file of `format` at `path`, as `COPY TO` would configure it.
+fn single_file_sink_config(
+    state: &dyn Session,
+    format: &dyn FileFormat,
+    path: &str,
+    output_schema: SchemaRef,
+) -> Result<FileSinkConfig> {
+    let table_path = ListingTableUrl::parse(path)?;
+    Ok(FileSinkConfig {
+        original_url: path.to_string(),
+        object_store_url: table_path.object_store(),
+        table_paths: vec![table_path],
+        file_group: FileGroup::default(),
+        output_schema,
+        table_partition_cols: Vec::new(),
+        insert_op: InsertOp::Append,
+        keep_partition_by_columns: state.config_options().execution.keep_partition_by_columns,
+        file_extension: file_extension(format),
+        file_output_mode: FileOutputMode::Automatic,
+    })
+}
+
+/// The path of the file holding partition `index` of `count` in `directory`: the index
+/// zero-padded to the digit count of `count`, with `extension`.
+fn partition_file_path(directory: &str, index: usize, count: usize, extension: &str) -> String {
+    let width = count.to_string().len();
+    format!(
+        "{}/{index:0width$}.{extension}",
+        directory.trim_end_matches('/')
+    )
+}
+
+/// The extension `format` writes, with its compression suffix when it has one.
+fn file_extension(format: &dyn FileFormat) -> String {
+    format.compression_type().map_or_else(
+        || format.get_ext(),
+        |compression| {
+            format
+                .get_ext_with_compression(&compression)
+                .unwrap_or_else(|_| format.get_ext())
+        },
+    )
+}
+
+/// The rows written, summed over the count batches a sink plan yields: one from a single-file
+/// sink, one per partition from a partitioned sink.
 fn decode_row_count(batches: &[RecordBatch]) -> Result<u64> {
-    match batches {
-        [batch] if batch.num_columns() == 1 && batch.num_rows() == 1 => batch
+    let malformed = || {
+        DataFusionError::Internal(format!(
+            "expected batches of one non-null count: UInt64 column from the sink, got {batches:?}"
+        ))
+    };
+    if batches.is_empty() {
+        return Err(malformed());
+    }
+    let mut total = 0_u64;
+    for batch in batches {
+        if batch.num_columns() != 1 {
+            return Err(malformed());
+        }
+        let counts = batch
             .column(0)
             .as_any()
             .downcast_ref::<UInt64Array>()
-            .filter(|counts| !counts.is_null(0))
-            .map(|counts| counts.value(0)),
-        _ => None,
+            .filter(|counts| counts.null_count() == 0)
+            .ok_or_else(malformed)?;
+        for count in counts.values() {
+            total = total.checked_add(*count).ok_or_else(malformed)?;
+        }
     }
-    .ok_or_else(|| {
-        DataFusionError::Internal(format!(
-            "expected one batch with a single non-null count: UInt64 row from copy-to, got {batches:?}"
-        ))
-    })
+    Ok(total)
 }
 
 impl fmt::Display for OutputFormat {

@@ -63,13 +63,20 @@ cargo run -r -- combine-alleles data/vortices_alleles_packed_chr22
 The directory alone selects the representation. Packed input produces packed output; there is no
 representation flag.
 
-The reference combiner has two formulations. `--formulation union` merges every sample's scan in
+The reference combiner has three formulations. `--formulation union` merges every sample's scan in
 one merge. `--formulation grouped-merge` merges each sample group first and then merges the groups,
 so the merges run on several cores; `--groups N` sets the number of sample groups and defaults to
-the thread count. `--explain` and `--explain-analyze` may be combined with `--write` to render or
-analyze the plan of the write itself.
+the thread count. `--formulation interval-merge` merges every sample within each locus interval
+and writes one file per interval, so the merges run on several cores and the write does too;
+`--split-points` names the loci that cut the ordering into intervals, as comma-separated
+`contig:position` with the contig ordinal, strictly increasing, and is required. Its `--write`
+path names a directory, which gets one file per interval named by index, `0.vortex`, `1.vortex`,
+and so on; a path with an extension is rejected, as is `--limit`. `--explain` and
+`--explain-analyze` may be combined with `--write` to render or analyze the plan of the write
+itself.
 ```
 cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --groups 7 --explain --write data/combined.vortex
+cargo run -r -- combine-refs data/vortices_chr22 --formulation interval-merge --split-points 22:20000000,22:30000000,22:40000000 --write data/combined
 ```
 An earlier variant of the reference combiner is still available as `cargo run -r --example combiner1`.
 

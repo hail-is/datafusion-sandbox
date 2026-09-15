@@ -176,6 +176,12 @@ impl Dataset {
         &self.schema
     }
 
+    /// How the dataset's rows record their locus.
+    #[must_use]
+    pub const fn locus_representation(&self) -> LocusRepresentation {
+        self.locus_representation
+    }
+
     /// Expands the required query ordering after checking it against the layout.
     ///
     /// # Errors

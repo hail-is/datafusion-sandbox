@@ -30,9 +30,11 @@ _Avoid_: result (too broad), output (ambiguous with a written artifact)
 
 **Sink**:
 The operator a combiner run's rows end in, and the plan's only consumer: a file sink when the
-action writes, a collecting sink when it collects, a draining sink when it only analyzes. The
-action chooses the sink; the sink requires the combiner's ordering. See
-[ADR 0014](docs/adr/0014-hold-the-merge-tree-with-the-sinks-ordering-requirement.md).
+action writes, a partitioned file sink when it writes one file per locus interval, a collecting
+sink when it collects, a draining sink when it only analyzes. The action chooses the sink; the sink
+requires the combiner's ordering. See
+[ADR 0014](docs/adr/0014-hold-the-merge-tree-with-the-sinks-ordering-requirement.md) and
+[ADR 0015](docs/adr/0015-write-one-file-per-partition-through-a-partitioned-sink.md).
 _Avoid_: consumer, writer, terminal, output
 
 **Combiner**:
@@ -92,7 +94,8 @@ _Avoid_: boundary, breakpoint, cut point, partition key
 **Locus interval**:
 A contiguous stretch of loci in the layout's locus ordering, half-open: it includes its start and
 excludes its end. The locus intervals of a run partition the whole ordering, so every row falls in
-exactly one.
+exactly one; a plan that merges by locus interval merges every sample within each interval and
+writes each interval's rows to its own file.
 _Avoid_: range, region, vertical partition, genome partition
 
 **Sample group**:
