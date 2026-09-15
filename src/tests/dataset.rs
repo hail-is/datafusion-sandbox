@@ -6,7 +6,7 @@
 use crate::fixture::{self, block_on};
 
 use crate::{
-    dataset::{Dataset, DatasetLayout},
+    dataset::{Dataset, DatasetLayout, ScanShape},
     format::{InputFormat, OutputFormat},
     locus::{LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
@@ -22,12 +22,16 @@ use datafusion::{
     datasource::{listing::ListingTableUrl, source::DataSourceExec},
     error::Result,
     execution::object_store::ObjectStoreUrl,
-    physical_plan::{ExecutionPlan, ExecutionPlanProperties, displayable, union::UnionExec},
+    physical_plan::{
+        ExecutionPlan, ExecutionPlanProperties, displayable,
+        sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
+        union::UnionExec,
+    },
     prelude::{SessionContext, col, lit},
 };
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 #[test]
 fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
@@ -55,7 +59,7 @@ fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
                         )
                         .await?
                         .restrict_to(std::slice::from_ref(&sample_id))?;
-                        let df = dataset.read(&ctx).await?;
+                        let df = dataset.read(&ctx, &ScanShape::Flat).await?;
                         let columns = match representation {
                             LocusRepresentation::ContigPosition => {
                                 vec!["contig", "position", "alleles", "s"]
@@ -143,25 +147,169 @@ fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
                 .await
                 .unwrap();
                 let plan = dataset
-                    .read(&ctx)
+                    .read(&ctx, &ScanShape::Flat)
                     .await
                     .unwrap()
                     .create_physical_plan()
                     .await
                     .unwrap();
-                let unions = nodes_of::<UnionExec>(&plan);
 
-                assert_eq!(unions.len(), 1);
-                assert_eq!(unions[0].children().len(), fixture::SAMPLES.len());
+                assert_unions_one_partition_per_sample(&plan, fixture::SAMPLES.len());
+            });
+        }
+    }
+}
+
+#[test]
+fn splits_the_sample_set_into_contiguous_count_balanced_sample_groups() {
+    let dataset = dataset_from_data(&["a", "b", "c", "d", "e"]);
+
+    assert_eq!(
+        dataset.sample_groups(groups(1)),
+        [&["a", "b", "c", "d", "e"][..]]
+    );
+    assert_eq!(
+        dataset.sample_groups(groups(2)),
+        [&["a", "b", "c"][..], &["d", "e"][..]]
+    );
+    assert_eq!(
+        dataset.sample_groups(groups(3)),
+        [&["a", "b"][..], &["c", "d"][..], &["e"][..]]
+    );
+    assert_eq!(
+        dataset.sample_groups(groups(8)),
+        [&["a"][..], &["b"][..], &["c"][..], &["d"][..], &["e"][..]]
+    );
+}
+
+/// Each sample group's scans are unioned and merged; the groups are unioned above that. The
+/// merge over a group is the only operator between its union and the union of groups, and no
+/// sort appears anywhere.
+#[test]
+fn reading_sample_groups_merges_each_group_beneath_a_union_of_groups() {
+    for format in [
+        fixture::FixtureFormat::Parquet,
+        fixture::FixtureFormat::Vortex,
+    ] {
+        for representation in [
+            LocusRepresentation::ContigPosition,
+            LocusRepresentation::Packed,
+        ] {
+            let fixture = fixture::dataset_fixture(format, representation);
+
+            block_on(async {
+                let ctx = SessionContext::new();
+                fixture.register(&ctx);
+                let dataset = Dataset::discover(
+                    &ctx,
+                    fixture.table_path().clone(),
+                    fixture.input_format(),
+                    allele_layout(),
+                    None,
+                )
+                .await
+                .unwrap();
+                let shape = ScanShape::SampleGroups {
+                    groups: groups(2),
+                    ordering: dataset.query_ordering(&LocusOrdering::locus()).unwrap(),
+                };
+                let plan = dataset
+                    .read(&ctx, &shape)
+                    .await
+                    .unwrap()
+                    .create_physical_plan()
+                    .await
+                    .unwrap();
+
+                let unions = nodes_of::<UnionExec>(&plan);
+                assert_eq!(unions.len(), 3, "{}", displayed(&plan));
+                let groups = unions[0].children();
+                assert_eq!(groups.len(), 2, "{}", displayed(&plan));
+                for group in groups {
+                    assert!(
+                        group.downcast_ref::<SortPreservingMergeExec>().is_some(),
+                        "{}",
+                        displayed(&plan)
+                    );
+                    assert_eq!(group.output_partitioning().partition_count(), 1);
+                    assert_unions_one_partition_per_sample(group, 2);
+                }
                 assert!(
-                    unions[0]
-                        .children()
-                        .iter()
-                        .all(|input| input.output_partitioning().partition_count() == 1)
+                    nodes_of::<SortExec>(&plan).is_empty(),
+                    "{}",
+                    displayed(&plan)
                 );
             });
         }
     }
+}
+
+/// One group, or one sample per group, is the flat scan: nothing is merged beneath the union.
+#[test]
+fn reading_one_sample_per_group_or_one_group_is_the_flat_scan() {
+    let fixture = fixture::dataset_fixture(
+        fixture::FixtureFormat::Vortex,
+        LocusRepresentation::ContigPosition,
+    );
+
+    block_on(async {
+        let ctx = SessionContext::new();
+        fixture.register(&ctx);
+        let dataset = Dataset::discover(
+            &ctx,
+            fixture.table_path().clone(),
+            fixture.input_format(),
+            allele_layout(),
+            None,
+        )
+        .await
+        .unwrap();
+        let ordering = dataset.query_ordering(&LocusOrdering::locus()).unwrap();
+        for group_count in [1, fixture::SAMPLES.len(), 8] {
+            let shape = ScanShape::SampleGroups {
+                groups: groups(group_count),
+                ordering: ordering.clone(),
+            };
+            let plan = dataset
+                .read(&ctx, &shape)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+
+            assert_unions_one_partition_per_sample(&plan, fixture::SAMPLES.len());
+            assert!(
+                nodes_of::<SortPreservingMergeExec>(&plan).is_empty(),
+                "{group_count} groups:\n{}",
+                displayed(&plan)
+            );
+            assert!(
+                nodes_of::<SortExec>(&plan).is_empty(),
+                "{group_count} groups:\n{}",
+                displayed(&plan)
+            );
+        }
+    });
+}
+
+fn groups(count: usize) -> NonZeroUsize {
+    NonZeroUsize::new(count).unwrap()
+}
+
+/// Exactly one union in `plan`, with one single-partition input per sample.
+fn assert_unions_one_partition_per_sample(plan: &Arc<dyn ExecutionPlan>, n_samples: usize) {
+    let unions = nodes_of::<UnionExec>(plan);
+    assert_eq!(unions.len(), 1, "{}", displayed(plan));
+    assert_eq!(unions[0].children().len(), n_samples, "{}", displayed(plan));
+    assert!(
+        unions[0]
+            .children()
+            .iter()
+            .all(|input| input.output_partitioning().partition_count() == 1),
+        "{}",
+        displayed(plan)
+    );
 }
 
 #[test]
@@ -199,7 +347,7 @@ fn filtering_the_attached_sample_column_composes_with_the_dataset_sample_set() {
                             (fixture::SAMPLES[2], 0, 0),
                         ] {
                             let df = dataset
-                                .read(&ctx)
+                                .read(&ctx, &ScanShape::Flat)
                                 .await?
                                 .filter(col("s").eq(lit(sample)))?
                                 .select_columns(&["s"])?;
@@ -303,7 +451,7 @@ fn infers_the_schema_from_one_input_file() {
                 for (name, batch) in [("a.vortex", int_batch), ("b.vortex", string_batch)] {
                     let path = format!("{root}/s=sample-a/{name}");
                     let df = ctx.read_batch(batch)?;
-                    OutputFormat::VORTEX.write(df, &path).await?;
+                    OutputFormat::VORTEX.write(df, &path, None).await?;
                 }
 
                 let dataset =
@@ -485,6 +633,10 @@ fn allele_layout() -> DatasetLayout {
     DatasetLayout {
         locus_ordering: LocusOrdering::locus_then_alleles(),
     }
+}
+
+fn displayed(plan: &Arc<dyn ExecutionPlan>) -> String {
+    displayable(plan.as_ref()).indent(true).to_string()
 }
 
 fn nodes_of<T: ExecutionPlan>(plan: &Arc<dyn ExecutionPlan>) -> Vec<Arc<dyn ExecutionPlan>> {

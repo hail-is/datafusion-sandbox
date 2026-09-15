@@ -9,20 +9,23 @@
 //!
 //! The tests here check that the filter stays inside every sample's scan, which files each scan
 //! kept, that Parquet and Vortex plans have the same operators, and that the rows that come back
-//! are the filter's rows. The reference combiner's filtered plan is its unfiltered plan. The
+//! are the filter's rows. Every plan is observed through a sink, as the parent module explains,
+//! and rows are collected through the collecting sink so grouped-merge returns them in locus
+//! order. The reference combiner's filtered plan is its unfiltered plan. The
 //! allele combiner's parallel operators repartition above the union with or without a filter,
 //! and under a filter the optimizer adds one more order-preserving round-robin there because a
 //! filtered scan's row count is inexact. It does so in both formats alike, so that plan is
 //! compared across formats rather than against its unfiltered shape.
 
 use super::{
-    FORMATS, FORMULATIONS, FixtureDataset, REPRESENTATIONS, assert_merges_one_partition_per_sample,
-    dataset, displayed, hostile_config, nodes_of,
+    FORMATS, FORMULATIONS, FixtureDataset, REPRESENTATIONS, assert_merge_tree, dataset, displayed,
+    expected_groups, hostile_config, nodes_of, operators, ordering, sink_plan,
 };
 use crate::fixture::{self, FixtureFormat, SAMPLES, SampleRow, block_on};
 use crate::formulation::Formulation;
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::pipeline::{self, PipelineOptions};
+use crate::sink;
 
 use datafusion::{
     arrow::record_batch::RecordBatch,
@@ -32,7 +35,7 @@ use datafusion::{
     physical_plan::{
         ExecutionPlan, filter::FilterExec, repartition::RepartitionExec, union::UnionExec,
     },
-    prelude::SessionContext,
+    prelude::{DataFrame, SessionContext},
 };
 
 use std::{ops::Range, sync::Arc};
@@ -108,7 +111,10 @@ fn filtered_plans_keep_the_filter_inside_the_scans_in_both_formats_and_represent
                         &dataset,
                         restriction.filter(representation),
                     );
-                    assert_filter_stays_inside_the_scans(&plan, SAMPLES.len());
+                    assert_filter_stays_inside_the_scans(
+                        &plan,
+                        &expected_groups(formulation, SAMPLES.len()),
+                    );
                     assert_filter_reaches_every_scan(&plan, SAMPLES.len(), representation);
                 }
             }
@@ -146,27 +152,38 @@ fn parquet_and_vortex_filtered_plans_have_the_same_operators() {
     }
 }
 
-/// The reference combiner has no parallel operators between its union and its merge, so a filter
-/// leaves its operators exactly as they are without one.
+/// The reference combiner's formulations among the shared list.
+const REFERENCE_FORMULATIONS: [Formulation; 2] = [FORMULATIONS[0], FORMULATIONS[1]];
+
+/// The reference combiner has no parallel operators between its unions and its merges, so a
+/// filter leaves the operators of each of its formulations exactly as they are without one.
 #[test]
 fn filtering_the_reference_combiner_leaves_its_operators_unchanged() {
+    for formulation in REFERENCE_FORMULATIONS {
+        assert!(
+            !matches!(formulation, Formulation::CombineAllelesUnion),
+            "{formulation:?} is not a reference combiner formulation"
+        );
+    }
     for format in FORMATS {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
-            let unfiltered = super::physical_plan(Formulation::CombineRefsUnion, &dataset);
-            for restriction in LocusRestriction::ALL {
-                let filtered = filtered_physical_plan(
-                    Formulation::CombineRefsUnion,
-                    &dataset,
-                    restriction.filter(representation),
-                );
-                assert_eq!(
-                    operators(&filtered),
-                    operators(&unfiltered),
-                    "{format:?} {representation:?} {restriction:?}:\n{}\n{}",
-                    displayed(&filtered),
-                    displayed(&unfiltered),
-                );
+            for formulation in REFERENCE_FORMULATIONS {
+                let unfiltered = super::physical_plan(formulation, &dataset);
+                for restriction in LocusRestriction::ALL {
+                    let filtered = filtered_physical_plan(
+                        formulation,
+                        &dataset,
+                        restriction.filter(representation),
+                    );
+                    assert_eq!(
+                        operators(&filtered),
+                        operators(&unfiltered),
+                        "{format:?} {representation:?} {formulation:?} {restriction:?}:\n{}\n{}",
+                        displayed(&filtered),
+                        displayed(&unfiltered),
+                    );
+                }
             }
         }
     }
@@ -198,7 +215,10 @@ fn assert_selects_files_and_returns_rows(restriction: LocusRestriction) {
                     dataset(format, representation),
                     restriction.filter(representation),
                 );
-                assert_filter_stays_inside_the_scans(&plan, SAMPLES.len());
+                assert_filter_stays_inside_the_scans(
+                    &plan,
+                    &expected_groups(formulation, SAMPLES.len()),
+                );
                 assert_filter_reaches_every_scan(&plan, SAMPLES.len(), representation);
                 assert_eq!(
                     scanned_stems(&plan),
@@ -212,7 +232,7 @@ fn assert_selects_files_and_returns_rows(restriction: LocusRestriction) {
                     .flat_map(|batch| rows(batch, representation))
                     .collect();
                 match formulation {
-                    Formulation::CombineRefsUnion => {
+                    Formulation::CombineRefsUnion | Formulation::CombineRefsGroupedMerge { .. } => {
                         let samples: Vec<String> = batches
                             .iter()
                             .flat_map(|batch| fixture::string_column(batch, "s"))
@@ -250,23 +270,22 @@ fn assert_selects_files_and_returns_rows(restriction: LocusRestriction) {
     }
 }
 
-/// Plans `formulation` over `dataset` and applies `filter` above it, as a caller would.
+/// Builds `formulation` over `dataset` and applies `filter` above it, as a caller would, before
+/// the run's sink.
 async fn plan_filtered(
     ctx: &SessionContext,
     formulation: Formulation,
     dataset: &FixtureDataset,
     filter: Expr,
-) -> Result<Arc<dyn ExecutionPlan>> {
+) -> Result<DataFrame> {
     dataset.fixture.register(ctx);
     formulation
         .plan(ctx, &dataset.dataset)
         .await?
-        .filter(filter)?
-        .create_physical_plan()
-        .await
+        .filter(filter)
 }
 
-/// Plans `formulation` under `filter` on a hostile session without executing it.
+/// Plans `formulation` under `filter` on a hostile session, through a sink, without executing it.
 fn filtered_physical_plan(
     formulation: Formulation,
     dataset: &FixtureDataset,
@@ -274,14 +293,15 @@ fn filtered_physical_plan(
 ) -> Arc<dyn ExecutionPlan> {
     block_on(async {
         let ctx = SessionContext::new_with_config(hostile_config(8));
-        plan_filtered(&ctx, formulation, dataset, filter)
+        let frame = plan_filtered(&ctx, formulation, dataset, filter)
             .await
-            .unwrap()
+            .unwrap();
+        sink_plan(formulation, frame, dataset).await.unwrap()
     })
 }
 
 /// Plans `formulation` under `filter` on a hostile session and executes it through the pipeline
-/// runner, returning the plan alongside its rows.
+/// runner into a collecting sink, returning the plan alongside the rows the sink received.
 fn run_filtered(
     formulation: Formulation,
     dataset: FixtureDataset,
@@ -290,10 +310,11 @@ fn run_filtered(
     pipeline::run(
         move |_| async move {
             let ctx = SessionContext::new_with_config(hostile_config(8));
-            let plan = plan_filtered(&ctx, formulation, &dataset, filter).await?;
-            let batches =
-                datafusion::physical_plan::collect(Arc::clone(&plan), ctx.task_ctx()).await?;
-            Ok((plan, batches))
+            let frame = plan_filtered(&ctx, formulation, &dataset, filter).await?;
+            let (frame, collected) = sink::collect(frame, &ordering(formulation, &dataset))?;
+            let plan = frame.create_physical_plan().await?;
+            datafusion::physical_plan::collect(Arc::clone(&plan), ctx.task_ctx()).await?;
+            Ok((plan, collected.take()))
         },
         PipelineOptions {
             threads: 1,
@@ -303,24 +324,25 @@ fn run_filtered(
     .unwrap()
 }
 
-/// The filter changed nothing between the scans and the merge: no filter operator, one ordered
-/// partition per sample into the union with no repartition beneath it, one sort-preserving merge,
-/// and no sort. Operators above the union may repartition under the hostile session's target
-/// partitions, as long as every repartition preserves its input order.
-fn assert_filter_stays_inside_the_scans(plan: &Arc<dyn ExecutionPlan>, n_samples: usize) {
-    assert_merges_one_partition_per_sample(plan, n_samples);
+/// The filter changed nothing between the scans and the merges: no filter operator, the merge
+/// tree over `groups` with one ordered partition into every union input and no repartition
+/// beneath any union, and no sort. Operators above the outermost union may repartition under the
+/// hostile session's target partitions, as long as every repartition preserves its input order.
+fn assert_filter_stays_inside_the_scans(plan: &Arc<dyn ExecutionPlan>, groups: &[usize]) {
+    assert_merge_tree(plan, groups);
     assert!(
         nodes_of::<FilterExec>(plan).is_empty(),
         "expected the filter to be applied inside every scan, but the plan contains a FilterExec:\n{}",
         displayed(plan),
     );
-    let unions = nodes_of::<UnionExec>(plan);
-    for input in unions[0].children() {
-        assert!(
-            nodes_of::<RepartitionExec>(input).is_empty(),
-            "expected no repartition between a sample's scan and the union:\n{}",
-            displayed(plan),
-        );
+    for union in nodes_of::<UnionExec>(plan) {
+        for input in union.children() {
+            assert!(
+                nodes_of::<RepartitionExec>(input).is_empty(),
+                "expected no repartition beneath a union:\n{}",
+                displayed(plan),
+            );
+        }
     }
     for repartition in nodes_of::<RepartitionExec>(plan) {
         assert!(
@@ -357,19 +379,6 @@ fn assert_filter_reaches_every_scan(
             "expected a filter on {locus_column} to reach the scan: {text}"
         );
     }
-}
-
-/// The operator on each line of the plan's display, root first and indented as displayed, without
-/// the operator's details.
-fn operators(plan: &Arc<dyn ExecutionPlan>) -> Vec<String> {
-    displayed(plan)
-        .lines()
-        .map(|line| {
-            line.split_once(':')
-                .map_or(line, |(operator, _)| operator)
-                .to_string()
-        })
-        .collect()
 }
 
 /// The file stems each scan displays, one scan per sample in union order.

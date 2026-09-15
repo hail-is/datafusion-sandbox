@@ -10,6 +10,7 @@
 //! - [`locus`] describes the supported stored locus representations, split points, and locus
 //!   intervals.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
+//! - [`sink`] ends a plan in a sink that requires the combiner's ordering.
 //! - [`sorted_table`] scans files as one ordered partition.
 //! - [`generated`] builds generated tables for tests and benchmarks.
 //!
@@ -43,6 +44,7 @@ pub mod formulation;
 pub mod generated;
 pub mod locus;
 pub mod pipeline;
+pub mod sink;
 pub mod sorted_table;
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use crate::fixture;
 
 use crate::{
-    combiner_run::{Action, CombinerRun, Outcome},
+    combiner_run::{Action, CombinerRun, Outcome, WriteTarget},
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
     locus::LocusRepresentation,
@@ -21,7 +21,7 @@ use datafusion::{
         },
     },
 };
-use std::{path::Path, sync::Arc};
+use std::{num::NonZeroUsize, path::Path, sync::Arc};
 
 use fixture::{FixtureFormat, SAMPLES};
 
@@ -109,10 +109,10 @@ fn both_combiners_report_rows_written() {
             formulation,
             input.table_path(),
             input.input_format(),
-            Action::Write {
+            Action::Write(WriteTarget {
                 output_path: dir.path().join(output_name).to_str().unwrap().to_string(),
                 output_format: OutputFormat::VORTEX,
-            },
+            }),
             None,
             None,
         )
@@ -134,12 +134,12 @@ fn writes_uncompressed_parquet() {
         Formulation::CombineRefsUnion,
         input.table_path(),
         input.input_format(),
-        Action::Write {
+        Action::Write(WriteTarget {
             output_path: output_path.to_str().unwrap().to_string(),
             output_format: OutputFormat::PARQUET
                 .with_compression("uncompressed")
                 .unwrap(),
-        },
+        }),
         None,
         None,
     )
@@ -173,10 +173,10 @@ fn compact_and_standard_vortex_have_different_file_sizes() {
             Formulation::CombineRefsUnion,
             input.table_path(),
             input.input_format(),
-            Action::Write {
+            Action::Write(WriteTarget {
                 output_path: output_path.to_str().unwrap().to_string(),
                 output_format: OutputFormat::VORTEX.with_compression(compression).unwrap(),
-            },
+            }),
             None,
             None,
         )
@@ -254,6 +254,8 @@ fn collects_ordered_alleles_with_ranks_across_file_cuts() {
     }
 }
 
+/// Both reference combiner formulations collect the same rows in locus order; grouped-merge
+/// only does so because collect runs through a sink that requires the ordering.
 #[test]
 fn collects_references_in_locus_order_across_file_cuts() {
     for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
@@ -261,69 +263,74 @@ fn collects_references_in_locus_order_across_file_cuts() {
             LocusRepresentation::ContigPosition,
             LocusRepresentation::Packed,
         ] {
-            let input = match representation {
-                LocusRepresentation::ContigPosition => {
-                    fixture::contig_position_disk_fixture(format)
-                }
-                LocusRepresentation::Packed => fixture::packed_disk_fixture(format),
-            };
-            let batches = expect_batches(
-                run(
-                    Formulation::CombineRefsUnion,
-                    input.table_path(),
-                    input.input_format(),
-                    Action::Collect,
-                    None,
-                    None,
-                )
-                .unwrap(),
-            );
-            let columns = match representation {
-                LocusRepresentation::ContigPosition => vec!["contig", "position"],
-                LocusRepresentation::Packed => vec!["locus"],
-            };
-            let loci = batches
-                .iter()
-                .flat_map(|batch| {
-                    let columns = &columns;
-                    (0..batch.num_rows()).map(move |row| {
-                        columns
-                            .iter()
-                            .map(|name| {
-                                array_value_to_string(batch.column_by_name(name).unwrap(), row)
-                                    .unwrap()
-                            })
-                            .collect::<Vec<_>>()
+            for formulation in [Formulation::CombineRefsUnion, grouped_merge(2)] {
+                let input = match representation {
+                    LocusRepresentation::ContigPosition => {
+                        fixture::contig_position_disk_fixture(format)
+                    }
+                    LocusRepresentation::Packed => fixture::packed_disk_fixture(format),
+                };
+                let batches = expect_batches(
+                    run(
+                        formulation,
+                        input.table_path(),
+                        input.input_format(),
+                        Action::Collect,
+                        None,
+                        None,
+                    )
+                    .unwrap(),
+                );
+                let columns = match representation {
+                    LocusRepresentation::ContigPosition => vec!["contig", "position"],
+                    LocusRepresentation::Packed => vec!["locus"],
+                };
+                let loci = batches
+                    .iter()
+                    .flat_map(|batch| {
+                        let columns = &columns;
+                        (0..batch.num_rows()).map(move |row| {
+                            columns
+                                .iter()
+                                .map(|name| {
+                                    array_value_to_string(batch.column_by_name(name).unwrap(), row)
+                                        .unwrap()
+                                })
+                                .collect::<Vec<_>>()
+                        })
                     })
-                })
+                    .collect::<Vec<_>>();
+                // The reference combiner orders only by locus, not alleles or sample id.
+                let expected = match representation {
+                    LocusRepresentation::ContigPosition => vec![
+                        vec!["chr1", "1"],
+                        vec!["chr1", "2"],
+                        vec!["chr1", "2"],
+                        vec!["chr1", "3"],
+                        vec!["chr1", "4"],
+                        vec!["chr2", "1"],
+                        vec!["chr2", "2"],
+                        vec!["chr2", "3"],
+                    ],
+                    LocusRepresentation::Packed => vec![
+                        vec!["4294967297"],
+                        vec!["4294967298"],
+                        vec!["4294967298"],
+                        vec!["4294967299"],
+                        vec!["4294967300"],
+                        vec!["8589934593"],
+                        vec!["8589934594"],
+                        vec!["8589934595"],
+                    ],
+                }
+                .into_iter()
+                .flat_map(|locus| std::iter::repeat_n(locus, SAMPLES.len()))
                 .collect::<Vec<_>>();
-            // The reference combiner orders only by locus, not alleles or sample id.
-            let expected = match representation {
-                LocusRepresentation::ContigPosition => vec![
-                    vec!["chr1", "1"],
-                    vec!["chr1", "2"],
-                    vec!["chr1", "2"],
-                    vec!["chr1", "3"],
-                    vec!["chr1", "4"],
-                    vec!["chr2", "1"],
-                    vec!["chr2", "2"],
-                    vec!["chr2", "3"],
-                ],
-                LocusRepresentation::Packed => vec![
-                    vec!["4294967297"],
-                    vec!["4294967298"],
-                    vec!["4294967298"],
-                    vec!["4294967299"],
-                    vec!["4294967300"],
-                    vec!["8589934593"],
-                    vec!["8589934594"],
-                    vec!["8589934595"],
-                ],
+                assert_eq!(
+                    loci, expected,
+                    "{format:?} {representation:?} {formulation:?}"
+                );
             }
-            .into_iter()
-            .flat_map(|locus| std::iter::repeat_n(locus, SAMPLES.len()))
-            .collect::<Vec<_>>();
-            assert_eq!(loci, expected);
         }
     }
 }
@@ -350,7 +357,7 @@ fn explicit_limit_applies_under_every_action() {
         Formulation::CombineRefsUnion,
         input.table_path(),
         input.input_format(),
-        Action::Write {
+        Action::Write(WriteTarget {
             output_path: dir
                 .path()
                 .join("limited.vortex")
@@ -358,7 +365,7 @@ fn explicit_limit_applies_under_every_action() {
                 .unwrap()
                 .to_string(),
             output_format: OutputFormat::VORTEX,
-        },
+        }),
         None,
         Some(3),
     )
@@ -368,7 +375,10 @@ fn explicit_limit_applies_under_every_action() {
     };
     assert_eq!(rows, 3);
 
-    for action in [Action::Explain, Action::ExplainAnalyze] {
+    for action in [
+        Action::Explain { write: None },
+        Action::ExplainAnalyze { write: None },
+    ] {
         let outcome = run(
             Formulation::CombineAllelesUnion,
             input.table_path(),
@@ -393,7 +403,7 @@ fn explain_actions_return_plain_and_analyzed_plans() {
         Formulation::CombineRefsUnion,
         input.table_path(),
         input.input_format(),
-        Action::Explain,
+        Action::Explain { write: None },
         None,
         None,
     )
@@ -403,12 +413,16 @@ fn explain_actions_return_plain_and_analyzed_plans() {
     };
     assert!(plan.contains("physical_plan"), "plan:\n{plan}");
     assert!(!plan.contains("LimitExec"), "plan:\n{plan}");
+    assert!(
+        plan.contains("DataSinkExec: sink=DrainingSink"),
+        "plan:\n{plan}"
+    );
 
     let outcome = run(
         Formulation::CombineAllelesUnion,
         input.table_path(),
         input.input_format(),
-        Action::ExplainAnalyze,
+        Action::ExplainAnalyze { write: None },
         None,
         None,
     )
@@ -419,6 +433,163 @@ fn explain_actions_return_plain_and_analyzed_plans() {
     assert!(plan.contains("Plan with Metrics"), "plan:\n{plan}");
     assert!(plan.contains("elapsed_compute"), "plan:\n{plan}");
     assert!(!plan.contains("LimitExec"), "plan:\n{plan}");
+    assert!(
+        plan.contains("DataSinkExec: sink=DrainingSink"),
+        "plan:\n{plan}"
+    );
+}
+
+/// An explain renders the plan the action would execute: with a write, the file sink's plan,
+/// and the plain explain writes nothing.
+#[test]
+fn explain_with_a_write_renders_the_file_sink_plan_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let output_path = dir.path().join("explained.vortex");
+
+    let outcome = run(
+        Formulation::CombineRefsUnion,
+        input.table_path(),
+        input.input_format(),
+        Action::Explain {
+            write: Some(WriteTarget {
+                output_path: output_path.to_str().unwrap().to_string(),
+                output_format: OutputFormat::VORTEX,
+            }),
+        },
+        None,
+        None,
+    )
+    .unwrap();
+
+    let Outcome::Plan(plan) = outcome else {
+        panic!("expected a plan, got {outcome:?}");
+    };
+    assert!(
+        plan.contains("DataSinkExec: sink=VortexSink"),
+        "plan:\n{plan}"
+    );
+    assert!(!plan.contains("DrainingSink"), "plan:\n{plan}");
+    assert!(
+        !output_path.exists(),
+        "explain wrote {}",
+        output_path.display()
+    );
+}
+
+#[test]
+fn explain_analyze_with_a_write_performs_the_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let output_path = dir.path().join("analyzed.parquet");
+
+    let outcome = run(
+        grouped_merge(2),
+        input.table_path(),
+        input.input_format(),
+        Action::ExplainAnalyze {
+            write: Some(WriteTarget {
+                output_path: output_path.to_str().unwrap().to_string(),
+                output_format: OutputFormat::PARQUET,
+            }),
+        },
+        None,
+        None,
+    )
+    .unwrap();
+
+    let Outcome::Plan(plan) = outcome else {
+        panic!("expected a plan, got {outcome:?}");
+    };
+    assert!(plan.contains("Plan with Metrics"), "plan:\n{plan}");
+    assert!(plan.contains("DataSinkExec"), "plan:\n{plan}");
+    let reader = SerializedFileReader::try_from(output_path.as_path()).unwrap();
+    assert_eq!(reader.metadata().file_metadata().num_rows(), 32);
+}
+
+/// On stored files, grouped-merge over two groups shows one merge per group beneath the final
+/// merge and no sort, whether the frame ends in the draining sink or the file sink, and the
+/// plain explain lists the operators the analyzed run executed.
+#[test]
+fn grouped_merge_explains_a_merge_per_group_beneath_the_final_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let write = || WriteTarget {
+        output_path: dir
+            .path()
+            .join("grouped.vortex")
+            .to_str()
+            .unwrap()
+            .to_string(),
+        output_format: OutputFormat::VORTEX,
+    };
+
+    for (explain, analyze) in [
+        (
+            Action::Explain { write: None },
+            Action::ExplainAnalyze { write: None },
+        ),
+        (
+            Action::Explain {
+                write: Some(write()),
+            },
+            Action::ExplainAnalyze {
+                write: Some(write()),
+            },
+        ),
+    ] {
+        let context = format!("{explain:?}");
+        let explained = expect_plan(
+            run(
+                grouped_merge(2),
+                input.table_path(),
+                input.input_format(),
+                explain,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let analyzed = expect_plan(
+            run(
+                grouped_merge(2),
+                input.table_path(),
+                input.input_format(),
+                analyze,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            explained.matches("SortPreservingMergeExec").count(),
+            3,
+            "{context}:\n{explained}"
+        );
+        assert!(!explained.contains("SortExec"), "{context}:\n{explained}");
+        assert_eq!(exec_names(&explained), exec_names(&analyzed), "{context}");
+    }
+}
+
+/// The execution plan node names in a rendered plan, in display order.
+fn exec_names(plan: &str) -> Vec<&str> {
+    plan.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| word.ends_with("Exec"))
+        .collect()
+}
+
+fn grouped_merge(groups: usize) -> Formulation {
+    Formulation::CombineRefsGroupedMerge {
+        groups: NonZeroUsize::new(groups).unwrap(),
+    }
+}
+
+fn expect_plan(outcome: Outcome) -> String {
+    let Outcome::Plan(plan) = outcome else {
+        panic!("expected a plan, got {outcome:?}");
+    };
+    plan
 }
 
 #[test]
@@ -431,10 +602,10 @@ fn restricts_the_dataset_to_the_requested_sample_set() {
         Formulation::CombineRefsUnion,
         input.table_path(),
         input.input_format(),
-        Action::Write {
+        Action::Write(WriteTarget {
             output_path: output_path.to_str().unwrap().to_string(),
             output_format: OutputFormat::VORTEX,
-        },
+        }),
         Some(SAMPLES[..2].iter().map(ToString::to_string).collect()),
         None,
     )

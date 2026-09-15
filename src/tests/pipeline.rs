@@ -63,7 +63,7 @@ fn runs_a_pipeline_that_writes_output() {
     let rows_written = pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            OutputFormat::VORTEX.write(df, &output_path).await
+            OutputFormat::VORTEX.write(df, &output_path, None).await
         },
         PipelineOptions::default(),
     )
@@ -83,7 +83,7 @@ fn runs_a_pipeline_that_writes_parquet_output() {
     pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            OutputFormat::PARQUET.write(df, &output_path).await
+            OutputFormat::PARQUET.write(df, &output_path, None).await
         },
         PipelineOptions::default(),
     )
@@ -119,7 +119,7 @@ fn surfaces_errors_from_plans_that_fail_at_execution() {
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?
                 .select(vec![(lit(1) / (col("idx") - lit(1))).alias("boom")])?;
-            OutputFormat::VORTEX.write(df, &output_path).await
+            OutputFormat::VORTEX.write(df, &output_path, None).await
         },
         PipelineOptions::default(),
     )
@@ -184,7 +184,7 @@ fn runs_with_one_thread() {
     pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            OutputFormat::VORTEX.write(df, &output_path).await
+            OutputFormat::VORTEX.write(df, &output_path, None).await
         },
         PipelineOptions {
             threads: 1,

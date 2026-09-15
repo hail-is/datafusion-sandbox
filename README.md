@@ -62,6 +62,15 @@ cargo run -r -- combine-alleles data/vortices_alleles_packed_chr22
 ```
 The directory alone selects the representation. Packed input produces packed output; there is no
 representation flag.
+
+The reference combiner has two formulations. `--formulation union` merges every sample's scan in
+one merge. `--formulation grouped-merge` merges each sample group first and then merges the groups,
+so the merges run on several cores; `--groups N` sets the number of sample groups and defaults to
+the thread count. `--explain` and `--explain-analyze` may be combined with `--write` to render or
+analyze the plan of the write itself.
+```
+cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --groups 7 --explain --write data/combined.vortex
+```
 An earlier variant of the reference combiner is still available as `cargo run -r --example combiner1`.
 
 ### Building for a specific GCE instance family

@@ -332,7 +332,7 @@ fn build_in_memory_fixture_without_alleles(name: &'static str) -> Arc<DatasetFix
             async move {
                 let path = format!("{root}/s=sample-a/a.vortex");
                 let df = ctx.read_batch(batch)?;
-                OutputFormat::VORTEX.write(df, &path).await?;
+                OutputFormat::VORTEX.write(df, &path, None).await?;
                 Ok(())
             }
         },
@@ -431,7 +431,7 @@ fn build_sample_tables(
                         output_format.extension()
                     );
                     let df = ctx.read_batch(sample_batch(rows, representation))?;
-                    writes.push(async move { output_format.write(df, &path).await });
+                    writes.push(async move { output_format.write(df, &path, None).await });
                 }
             }
             join_all(writes)

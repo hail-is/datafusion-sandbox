@@ -10,7 +10,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use datafusion::error::{DataFusionError, Result};
 
-use datafusion_sandbox::combiner_run::{Action, CombinerRun};
+use datafusion_sandbox::combiner_run::{Action, CombinerRun, WriteTarget};
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::formulation::Formulation;
 use std::{num::NonZeroUsize, path::Path, thread::available_parallelism};
@@ -55,17 +55,32 @@ struct CombineRefsArgs {
     /// How to build the reference combiner's plan.
     #[arg(long, value_enum, default_value = "union")]
     formulation: CombineRefsFormulationArg,
+    /// Number of sample groups the grouped-merge formulation merges before merging the groups.
+    ///
+    /// Defaults to the thread count. One fewer gives the final merge a thread of its own.
+    /// Accepted only with `--formulation grouped-merge`.
+    #[arg(long, value_name = "N")]
+    groups: Option<NonZeroUsize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum CombineRefsFormulationArg {
     Union,
+    GroupedMerge,
 }
 
 impl CombineRefsFormulationArg {
-    const fn formulation(self) -> Formulation {
-        match self {
-            Self::Union => Formulation::CombineRefsUnion,
+    /// The formulation for this argument, given `--groups` and the run's thread count.
+    fn formulation(self, groups: Option<NonZeroUsize>, threads: usize) -> Result<Formulation> {
+        match (self, groups) {
+            (Self::Union, None) => Ok(Formulation::CombineRefsUnion),
+            (Self::Union, Some(_)) => Err(DataFusionError::Configuration(
+                "--groups applies only to the grouped-merge formulation".to_string(),
+            )),
+            (Self::GroupedMerge, groups) => Ok(Formulation::CombineRefsGroupedMerge {
+                groups: groups
+                    .unwrap_or_else(|| NonZeroUsize::new(threads).unwrap_or(NonZeroUsize::MIN)),
+            }),
         }
     }
 }
@@ -81,11 +96,13 @@ struct CombinerArgs {
     ///
     /// Parquet accepts `uncompressed`, `snappy`, `gzip(LEVEL)`, `brotli(LEVEL)`, `lz4`,
     /// `zstd(LEVEL)`, or `lz4_raw`. Vortex accepts `standard` or `compact`.
+    // The explicit conflict with `--show` is needed: clap drops a `requires` whose target
+    // conflicts with a present argument, so `--compression --show` would otherwise parse.
     #[arg(
         long,
         value_name = "COMPRESSION",
         requires = "write",
-        conflicts_with_all = ["show", "explain", "explain_analyze"]
+        conflicts_with = "show"
     )]
     compression: Option<String>,
     /// Return at most ROWS combined rows. Defaults to 20 with --show and unlimited otherwise.
@@ -150,17 +167,21 @@ impl OutputFormatArg {
     }
 }
 
+/// The action flags. At least one is required. `--explain` and `--explain-analyze` may combine
+/// with `--write`, in which case they render or analyze the write's plan; every other pair
+/// conflicts.
 #[derive(Args)]
-#[group(required = true, multiple = false)]
+#[group(required = true, multiple = true)]
 struct ActionArgs {
-    /// Write the combined rows to PATH.
+    /// Write the combined rows to PATH. With --explain or --explain-analyze, the plan shown is
+    /// the write's, and --explain-analyze performs the write.
     #[arg(long, value_name = "PATH")]
     write: Option<String>,
     /// Print the combined rows.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["write", "explain", "explain_analyze"])]
     show: bool,
     /// Print the logical and physical plan without executing it.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "explain_analyze")]
     explain: bool,
     /// Execute the plan and print it with per-operator metrics.
     #[arg(long)]
@@ -170,8 +191,8 @@ struct ActionArgs {
 enum CliAction {
     Write(String),
     Show,
-    Explain,
-    ExplainAnalyze,
+    Explain { write: Option<String> },
+    ExplainAnalyze { write: Option<String> },
 }
 
 impl CliAction {
@@ -184,18 +205,21 @@ impl TryFrom<ActionArgs> for CliAction {
     type Error = DataFusionError;
 
     fn try_from(args: ActionArgs) -> Result<Self> {
-        match args {
-            ActionArgs {
-                write: Some(path), ..
-            } => Ok(Self::Write(path)),
-            ActionArgs { show: true, .. } => Ok(Self::Show),
-            ActionArgs { explain: true, .. } => Ok(Self::Explain),
-            ActionArgs {
-                explain_analyze: true,
-                ..
-            } => Ok(Self::ExplainAnalyze),
+        let ActionArgs {
+            write,
+            show,
+            explain,
+            explain_analyze,
+        } = args;
+        match (write, show, explain, explain_analyze) {
+            (Some(path), false, false, false) => Ok(Self::Write(path)),
+            (None, true, false, false) => Ok(Self::Show),
+            (write, false, true, false) => Ok(Self::Explain { write }),
+            (write, false, false, true) => Ok(Self::ExplainAnalyze { write }),
             _ => Err(DataFusionError::Configuration(
-                "exactly one action is required".to_string(),
+                "an action is required: --write, --show, --explain, or --explain-analyze, where \
+                 --explain and --explain-analyze may combine with --write"
+                    .to_string(),
             )),
         }
     }
@@ -203,8 +227,12 @@ impl TryFrom<ActionArgs> for CliAction {
 
 fn resolve(cli: Cli) -> Result<CombinerRun> {
     let Cli { command, threads } = cli;
+    let threads = threads.unwrap_or_else(|| available_parallelism().map_or(1, NonZeroUsize::get));
     let (formulation, args) = match command {
-        Command::CombineRefs(args) => (args.formulation.formulation(), args.combiner),
+        Command::CombineRefs(args) => (
+            args.formulation.formulation(args.groups, threads)?,
+            args.combiner,
+        ),
         Command::CombineAlleles(args) => (Formulation::CombineAllelesUnion, args),
     };
     let CombinerArgs {
@@ -218,25 +246,29 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
     let cli_action = CliAction::try_from(action)?;
     let input_format = formats.input_format.format();
     let limit = cli_action.row_limit(limit);
+    let write_target = |output_path: String| -> Result<WriteTarget> {
+        let output_format = formats.output_format().format();
+        validate_output_extension(&output_path, &output_format)?;
+        let output_format = match &compression {
+            Some(compression) => output_format.with_compression(compression)?,
+            None => output_format,
+        };
+        Ok(WriteTarget {
+            output_path,
+            output_format,
+        })
+    };
     let action = match cli_action {
-        CliAction::Write(output_path) => {
-            let output_format = formats.output_format().format();
-            validate_output_extension(&output_path, &output_format)?;
-            let output_format = match compression {
-                Some(compression) => output_format.with_compression(&compression)?,
-                None => output_format,
-            };
-            Action::Write {
-                output_path,
-                output_format,
-            }
-        }
+        CliAction::Write(output_path) => Action::Write(write_target(output_path)?),
         CliAction::Show => Action::Collect,
-        CliAction::Explain => Action::Explain,
-        CliAction::ExplainAnalyze => Action::ExplainAnalyze,
+        CliAction::Explain { write } => Action::Explain {
+            write: write.map(write_target).transpose()?,
+        },
+        CliAction::ExplainAnalyze { write } => Action::ExplainAnalyze {
+            write: write.map(write_target).transpose()?,
+        },
     };
     let sample_set = (!sample_set.is_empty()).then_some(sample_set);
-    let threads = threads.unwrap_or_else(|| available_parallelism().map_or(1, NonZeroUsize::get));
     Ok(CombinerRun {
         formulation,
         input_path: path,
@@ -277,7 +309,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exactly_one_action_is_required() {
+    fn an_action_is_required() {
         let error = Cli::try_parse_from(["datafusion-sandbox", "combine-refs", "input"])
             .err()
             .unwrap();
@@ -289,22 +321,68 @@ mod tests {
     }
 
     #[test]
-    fn two_actions_conflict() {
-        let error = Cli::try_parse_from([
-            "datafusion-sandbox",
-            "combine-alleles",
-            "input",
-            "--show",
-            "--explain",
-        ])
-        .err()
-        .unwrap();
-        let diagnostic = error.to_string();
+    fn show_conflicts_with_every_other_action_and_explain_with_explain_analyze() {
+        for pair in [
+            ["--show", "--explain"],
+            ["--show", "--explain-analyze"],
+            ["--show", "--write=out.vortex"],
+            ["--explain", "--explain-analyze"],
+        ] {
+            let error = Cli::try_parse_from(
+                ["datafusion-sandbox", "combine-alleles", "input"]
+                    .into_iter()
+                    .chain(pair),
+            )
+            .err()
+            .unwrap();
+            let diagnostic = error.to_string();
 
-        assert!(
-            diagnostic.contains("cannot be used with"),
-            "diagnostic:\n{diagnostic}"
-        );
+            assert!(
+                diagnostic.contains("cannot be used with"),
+                "{pair:?} diagnostic:\n{diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn explain_and_explain_analyze_may_combine_with_write() {
+        let run = resolve(parse_combiner(["--explain", "--write", "out.vortex"])).unwrap();
+        let Action::Explain {
+            write: Some(target),
+        } = run.action
+        else {
+            panic!("expected an explained write");
+        };
+        assert_eq!(target.output_path, "out.vortex");
+        assert_eq!(run.row_limit, None);
+
+        let run = resolve(parse_combiner([
+            "--explain-analyze",
+            "--write",
+            "out.parquet",
+            "--output-format",
+            "parquet",
+            "--compression",
+            "snappy",
+        ]))
+        .unwrap();
+        let Action::ExplainAnalyze {
+            write: Some(target),
+        } = run.action
+        else {
+            panic!("expected an analyzed write");
+        };
+        assert_eq!(target.output_path, "out.parquet");
+        assert_eq!(target.output_format.extension(), "parquet");
+    }
+
+    #[test]
+    fn explain_actions_without_a_write_resolve_to_no_write_target() {
+        let run = resolve(parse_combiner(["--explain"])).unwrap();
+        assert!(matches!(run.action, Action::Explain { write: None }));
+
+        let run = resolve(parse_combiner(["--explain-analyze"])).unwrap();
+        assert!(matches!(run.action, Action::ExplainAnalyze { write: None }));
     }
 
     #[test]
@@ -327,9 +405,15 @@ mod tests {
         assert!(diagnostic.contains("--write"), "diagnostic:\n{diagnostic}");
     }
 
+    /// `--show` conflicts with `--compression` outright; the explain actions may take a write,
+    /// so there the diagnostic names the missing `--write`.
     #[test]
-    fn compression_conflicts_with_each_non_write_action() {
-        for action in ["--show", "--explain", "--explain-analyze"] {
+    fn compression_still_requires_a_write_under_each_non_write_action() {
+        for (action, expected) in [
+            ("--show", "cannot be used with"),
+            ("--explain", "--write"),
+            ("--explain-analyze", "--write"),
+        ] {
             let error = Cli::try_parse_from([
                 "datafusion-sandbox",
                 "combine-refs",
@@ -343,10 +427,109 @@ mod tests {
             let diagnostic = error.to_string();
 
             assert!(
-                diagnostic.contains("cannot be used with"),
+                diagnostic.contains(expected),
                 "{action} diagnostic:\n{diagnostic}"
             );
         }
+    }
+
+    #[test]
+    fn allele_combiner_rejects_a_groups_argument() {
+        let error = Cli::try_parse_from([
+            "datafusion-sandbox",
+            "combine-alleles",
+            "input",
+            "--groups",
+            "2",
+            "--show",
+        ])
+        .err()
+        .unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(diagnostic.contains("--groups"), "diagnostic:\n{diagnostic}");
+        assert!(
+            diagnostic.contains("unexpected argument"),
+            "diagnostic:\n{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn groups_default_to_the_thread_count_under_grouped_merge() {
+        let run = resolve(
+            Cli::try_parse_from([
+                "datafusion-sandbox",
+                "--threads",
+                "3",
+                "combine-refs",
+                "input",
+                "--formulation",
+                "grouped-merge",
+                "--show",
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            run.formulation,
+            Formulation::CombineRefsGroupedMerge {
+                groups: NonZeroUsize::new(3).unwrap()
+            }
+        );
+        assert_eq!(run.threads, 3);
+    }
+
+    #[test]
+    fn an_explicit_group_count_overrides_the_thread_count() {
+        let run = resolve(parse_combiner([
+            "--formulation",
+            "grouped-merge",
+            "--groups",
+            "5",
+            "--show",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            run.formulation,
+            Formulation::CombineRefsGroupedMerge {
+                groups: NonZeroUsize::new(5).unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn groups_are_rejected_with_the_union_formulation() {
+        let error = resolve(parse_combiner(["--groups", "2", "--show"]))
+            .err()
+            .unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(diagnostic.contains("--groups"), "diagnostic:\n{diagnostic}");
+        assert!(
+            diagnostic.contains("grouped-merge"),
+            "diagnostic:\n{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn a_group_count_of_zero_is_rejected() {
+        let error = Cli::try_parse_from([
+            "datafusion-sandbox",
+            "combine-refs",
+            "input",
+            "--formulation",
+            "grouped-merge",
+            "--groups",
+            "0",
+            "--show",
+        ])
+        .err()
+        .unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(diagnostic.contains("--groups"), "diagnostic:\n{diagnostic}");
     }
 
     #[test]
@@ -392,7 +575,7 @@ mod tests {
             "diagnostic:\n{diagnostic}"
         );
         assert!(
-            diagnostic.contains("possible values: union"),
+            diagnostic.contains("possible values: union, grouped-merge"),
             "diagnostic:\n{diagnostic}"
         );
     }
