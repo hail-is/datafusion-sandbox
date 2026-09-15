@@ -33,7 +33,7 @@ fn assert_writes_rows(format: &'static OutputFormat, extension: &'static str) {
             ctx.register_object_store(store_url.as_ref(), Arc::clone(&store));
             let df = make_range_table(&ctx, 1000, 128)?;
             let rows_written = format
-                .write(df, &format!("memory://out/rows.{extension}"))
+                .write(df, &format!("memory://out/rows.{extension}"), None)
                 .await?;
             let metadata = store.head(&object_path).await?;
             let bytes = store.get(&object_path).await?.bytes().await?;

@@ -20,12 +20,20 @@ _Avoid_: invocation, command
 **Action**:
 What a caller asks a combiner run to do with its combined rows: write them, collect them for display,
 render the plan, or execute and render the analyzed plan. The Action determines the run's Outcome.
-_Avoid_: mode (taken by **Compression mode**), ending, sink
+_Avoid_: mode (taken by **Compression mode**), ending, sink (the operator the rows end in, which
+the action chooses; a separate term)
 
 **Outcome**:
 What a pipeline hands back after it runs: rows written, collected batches, or a plan rendered as
 text.
 _Avoid_: result (too broad), output (ambiguous with a written artifact)
+
+**Sink**:
+The operator a combiner run's rows end in, and the plan's only consumer: a file sink when the
+action writes, a collecting sink when it collects, a draining sink when it only analyzes. The
+action chooses the sink; the sink requires the combiner's ordering. See
+[ADR 0014](docs/adr/0014-hold-the-merge-tree-with-the-sinks-ordering-requirement.md).
+_Avoid_: consumer, writer, terminal, output
 
 **Combiner**:
 A merge of per-sample tables into a single locus-ordered table, named by the table it produces. A
@@ -86,6 +94,12 @@ A contiguous stretch of loci in the layout's locus ordering, half-open: it inclu
 excludes its end. The locus intervals of a run partition the whole ordering, so every row falls in
 exactly one.
 _Avoid_: range, region, vertical partition, genome partition
+
+**Sample group**:
+A subset of a combiner run's sample set whose per-sample tables one merge node combines. The
+sample groups of a run partition its sample set; a plan that merges by sample group merges the
+groups again afterwards.
+_Avoid_: batch, shard, horizontal partition
 
 **Dataset**:
 One stored instance of a dataset layout: its path, the format of each file, and the sample set

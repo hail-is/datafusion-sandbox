@@ -1,4 +1,4 @@
-use crate::dataset::Dataset;
+use crate::dataset::{Dataset, ScanShape};
 use crate::locus::LocusOrdering;
 
 use datafusion::{error::Result, functions_window::rank::rank, prelude::*};
@@ -12,7 +12,7 @@ pub fn required_ordering() -> LocusOrdering {
 pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
     let query_ordering = dataset.query_ordering(&required_ordering())?;
     let df = dataset
-        .read(ctx)
+        .read(ctx, &ScanShape::Flat)
         .await?
         .select_columns(&query_ordering.column_names())?
         .distinct()?;

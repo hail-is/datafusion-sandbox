@@ -1,17 +1,30 @@
+use crate::{
+    locus::StoredOrdering,
+    sink::{self, SinkTarget},
+};
+
 use datafusion::{
     arrow::{
         array::{Array, UInt64Array},
         record_batch::RecordBatch,
     },
+    catalog::Session,
     common::file_options::parquet_writer,
-    datasource::file_format::{
-        FileFormat, FileFormatFactory, format_as_file_type,
-        parquet::{ParquetFormat, ParquetFormatFactory},
+    datasource::{
+        file_format::{
+            FileFormat, FileFormatFactory,
+            parquet::{ParquetFormat, ParquetFormatFactory},
+        },
+        listing::ListingTableUrl,
+        physical_plan::FileSinkConfig,
     },
     error::{DataFusionError, Result},
-    logical_expr::logical_plan::LogicalPlanBuilder,
+    logical_expr::dml::InsertOp,
+    physical_expr::LexRequirement,
+    physical_plan::ExecutionPlan,
     prelude::DataFrame,
 };
+use datafusion_datasource::{file_groups::FileGroup, file_sink_config::FileOutputMode};
 use std::{collections::HashMap, fmt, sync::Arc};
 use vortex::{VortexSessionDefault, session::VortexSession};
 use vortex_datafusion::{VortexFormat, VortexFormatFactory};
@@ -91,25 +104,42 @@ impl OutputFormat {
         }
     }
 
-    /// Writes all rows in `df` to `path`, returning the number of rows written.
+    /// Writes all rows in `df` to `path`, returning the number of rows written. `ordering` is the
+    /// order the rows must arrive at the file sink in, which the sink requires of its input; `None`
+    /// places no requirement.
     ///
     /// # Errors
     ///
-    /// Returns an error if the copy plan cannot be built or executed, or if the execution result
+    /// Returns an error if the write plan cannot be built or executed, or if the execution result
     /// does not contain the expected row count.
-    pub async fn write(&self, df: DataFrame, path: &str) -> Result<u64> {
-        let file_type = format_as_file_type(self.output_factory());
-        let (session_state, plan) = df.into_parts();
-        let plan = LogicalPlanBuilder::copy_to(
-            plan,
-            path.into(),
-            file_type,
-            self.format_options(),
-            vec![],
-        )?
-        .build()?;
-        let batches = DataFrame::new(session_state, plan).collect().await?;
+    pub async fn write(
+        &self,
+        df: DataFrame,
+        path: &str,
+        ordering: Option<&StoredOrdering>,
+    ) -> Result<u64> {
+        let batches = self.sink_frame(df, path, ordering)?.collect().await?;
         decode_row_count(&batches)
+    }
+
+    /// The frame that writes all rows in `df` to `path` when executed: `df` under this format's
+    /// file sink, which requires `ordering` of its input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write plan cannot be built.
+    pub fn sink_frame(
+        &self,
+        df: DataFrame,
+        path: &str,
+        ordering: Option<&StoredOrdering>,
+    ) -> Result<DataFrame> {
+        let target = Arc::new(FileSinkTarget {
+            factory: self.output_factory(),
+            format_options: self.format_options(),
+            path: path.to_string(),
+        });
+        sink::run_into(df, path, ordering, target)
     }
 
     fn output_factory(&self) -> Arc<dyn FileFormatFactory> {
@@ -134,6 +164,51 @@ impl OutputFormat {
                 compact.to_string(),
             )]),
         }
+    }
+}
+
+/// A format's file sink at a path, built the way `COPY TO` builds it except that the caller
+/// supplies the ordering requirement instead of the planner deriving one from the input.
+#[derive(Debug)]
+struct FileSinkTarget {
+    factory: Arc<dyn FileFormatFactory>,
+    format_options: HashMap<String, String>,
+    path: String,
+}
+
+#[async_trait::async_trait]
+impl SinkTarget for FileSinkTarget {
+    async fn plan(
+        &self,
+        state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        ordering: Option<LexRequirement>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let format = self.factory.create(state, &self.format_options)?;
+        let file_extension = format.compression_type().map_or_else(
+            || format.get_ext(),
+            |compression| {
+                format
+                    .get_ext_with_compression(&compression)
+                    .unwrap_or_else(|_| format.get_ext())
+            },
+        );
+        let table_path = ListingTableUrl::parse(&self.path)?;
+        let config = FileSinkConfig {
+            original_url: self.path.clone(),
+            object_store_url: table_path.object_store(),
+            table_paths: vec![table_path],
+            file_group: FileGroup::default(),
+            output_schema: input.schema(),
+            table_partition_cols: Vec::new(),
+            insert_op: InsertOp::Append,
+            keep_partition_by_columns: state.config_options().execution.keep_partition_by_columns,
+            file_extension,
+            file_output_mode: FileOutputMode::Automatic,
+        };
+        format
+            .create_writer_physical_plan(input, state, config, ordering)
+            .await
     }
 }
 

@@ -18,7 +18,23 @@ use datafusion::{
     prelude::*,
 };
 use futures_util::{StreamExt, TryStreamExt};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, num::NonZeroUsize, sync::Arc};
+
+/// How [`Dataset::read`] arranges the per-sample scans beneath the frame it returns.
+///
+/// The formulation chooses the shape; the dataset knows nothing about why.
+#[derive(Clone, Debug)]
+pub enum ScanShape {
+    /// The union of every sample's scan, or the one scan of a single sample.
+    Flat,
+    /// The sample set split into `groups` sample groups by [`Dataset::sample_groups`], each
+    /// group's scans unioned and sorted by `ordering`, and the groups unioned. A group of one
+    /// sample is its scan, and one group is the flat shape.
+    SampleGroups {
+        groups: NonZeroUsize,
+        ordering: StoredOrdering,
+    },
+}
 
 /// How a dataset's rows and files are arranged on disk.
 #[derive(Clone, Debug)]
@@ -170,31 +186,61 @@ impl Dataset {
         Ok(required.expand(self.locus_representation))
     }
 
-    /// Reads the dataset's whole sample set into one frame.
-    ///
-    /// The formulation chooses the scan shape. If another shape is added, it should
-    /// become an argument here rather than a branch owned by the dataset.
+    /// Splits the sample set into at most `groups` sample groups: contiguous slices of the
+    /// sorted sample set whose sizes differ by at most one, larger groups first. A group count
+    /// above the sample count clamps to one sample per group.
+    #[must_use]
+    pub fn sample_groups(&self, groups: NonZeroUsize) -> Vec<&[String]> {
+        // A nonempty sample set keeps the clamped count nonzero, so the divisions cannot fail.
+        let groups = groups.get().min(self.sample_set.len());
+        let quotient = self.sample_set.len().checked_div(groups).unwrap_or(0);
+        let remainder = self.sample_set.len().checked_rem(groups).unwrap_or(0);
+        let mut rest = self.sample_set.as_slice();
+        (0..groups)
+            .map(|index| {
+                let size = quotient.saturating_add(usize::from(index < remainder));
+                let (group, tail) = rest.split_at(size);
+                rest = tail;
+                group
+            })
+            .collect()
+    }
+
+    /// Reads the dataset's whole sample set into one frame arranged as `shape`.
     ///
     /// # Errors
     ///
     /// Returns an error if a sample cannot be read or the sample plans cannot be combined.
-    pub async fn read(&self, ctx: &SessionContext) -> Result<DataFrame> {
-        let mut plans = Vec::with_capacity(self.sample_set.len());
-        for sample in &self.sample_set {
-            let frame = self.read_sample(ctx, sample).await?;
-            plans.push(Arc::new(frame.into_unoptimized_plan()));
-        }
-        let plan = if plans.len() == 1 {
-            let plan = plans.pop().ok_or_else(|| {
-                DataFusionError::Internal(
-                    "a non-empty dataset produced no sample plans".to_string(),
-                )
-            })?;
-            (*plan).clone()
-        } else {
-            LogicalPlan::Union(Union::try_new(plans)?)
+    pub async fn read(&self, ctx: &SessionContext, shape: &ScanShape) -> Result<DataFrame> {
+        let (sample_groups, ordering) = match shape {
+            ScanShape::Flat => return self.read_sample_group(ctx, &self.sample_set).await,
+            ScanShape::SampleGroups { groups, ordering } => (self.sample_groups(*groups), ordering),
         };
-        Ok(DataFrame::new(ctx.state(), plan))
+        if sample_groups.len() == 1 {
+            return self.read_sample_group(ctx, &self.sample_set).await;
+        }
+        let mut plans = Vec::with_capacity(sample_groups.len());
+        for group in sample_groups {
+            let frame = self.read_sample_group(ctx, group).await?;
+            let frame = if group.len() > 1 {
+                frame.sort(ordering.sort_expressions())?
+            } else {
+                frame
+            };
+            plans.push(frame.into_unoptimized_plan());
+        }
+        union_plans(ctx, plans)
+    }
+
+    /// Reads a nonempty group of samples into one frame: the union of their scans, or the one
+    /// scan of a single sample.
+    async fn read_sample_group(&self, ctx: &SessionContext, group: &[String]) -> Result<DataFrame> {
+        let mut plans = Vec::with_capacity(group.len());
+        for sample in group {
+            let frame = self.read_sample(ctx, sample).await?;
+            plans.push(frame.into_unoptimized_plan());
+        }
+        union_plans(ctx, plans)
     }
 
     /// Reads one sample directory as a sorted table and attaches its sample id.
@@ -276,6 +322,18 @@ impl Dataset {
             .retain(|sample| requested_sample_set.contains(sample.as_str()));
         Ok(self)
     }
+}
+
+/// The union of nonempty `plans`, or the one plan itself.
+fn union_plans(ctx: &SessionContext, mut plans: Vec<LogicalPlan>) -> Result<DataFrame> {
+    let plan = if plans.len() == 1 {
+        plans.pop().ok_or_else(|| {
+            DataFusionError::Internal("a non-empty sample group produced no plans".to_string())
+        })?
+    } else {
+        LogicalPlan::Union(Union::try_new(plans.into_iter().map(Arc::new).collect())?)
+    };
+    Ok(DataFrame::new(ctx.state(), plan))
 }
 
 fn normalize_table_path(mut table_path: ListingTableUrl) -> Result<ListingTableUrl> {

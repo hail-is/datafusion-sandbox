@@ -4,29 +4,62 @@ use crate::{
     dataset::Dataset,
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
+    locus::StoredOrdering,
     pipeline::{self, PipelineOptions},
+    sink,
 };
 
 use datafusion::{
     arrow::{record_batch::RecordBatch, util::pretty::pretty_format_batches},
     datasource::listing::ListingTableUrl,
     error::Result,
+    prelude::DataFrame,
 };
 
+/// Where a write puts its rows.
+#[derive(Debug)]
+pub struct WriteTarget {
+    pub output_path: String,
+    pub output_format: OutputFormat,
+}
+
 /// What to do with the combined rows.
+///
+/// Every action runs the rows into a sink that requires the formulation's ordering: the file
+/// sink for a write, a collecting sink for collect, and a draining sink for an explain without a
+/// write. The run supplies the ordering to each. See ADR 0014 for why the plan ends in a sink
+/// rather than a sort.
 #[derive(Debug)]
 pub enum Action {
-    /// Write the rows to a path using the given format.
-    Write {
-        output_path: String,
-        output_format: OutputFormat,
-    },
+    /// Write the rows to the target.
+    Write(WriteTarget),
     /// Collect the rows in memory.
     Collect,
-    /// Render the logical and physical plan without executing it.
-    Explain,
-    /// Execute the plan and render it with per-operator metrics.
-    ExplainAnalyze,
+    /// Render the logical and physical plan of the write, or of a draining run without one,
+    /// without executing it.
+    Explain { write: Option<WriteTarget> },
+    /// Execute the write, or a draining run without one, and render its plan with per-operator
+    /// metrics.
+    ExplainAnalyze { write: Option<WriteTarget> },
+}
+
+impl Action {
+    /// The write this action performs or renders, if any.
+    #[must_use]
+    pub const fn write_target(&self) -> Option<&WriteTarget> {
+        match self {
+            Self::Write(target)
+            | Self::Explain {
+                write: Some(target),
+            }
+            | Self::ExplainAnalyze {
+                write: Some(target),
+            } => Some(target),
+            Self::Collect
+            | Self::Explain { write: None }
+            | Self::ExplainAnalyze { write: None } => None,
+        }
+    }
 }
 
 /// One execution of a combiner against a dataset.
@@ -63,12 +96,14 @@ impl CombinerRun {
             move |ctx| async move {
                 let table_path = ListingTableUrl::parse(input_path)?;
                 let layout = formulation.required_layout();
+                let required_ordering = layout.locus_ordering.clone();
                 let dataset =
                     Dataset::discover(&ctx, table_path, input_format, layout, None).await?;
                 let dataset = match sample_set {
                     Some(sample_set) => dataset.restrict_to(&sample_set)?,
                     None => dataset,
                 };
+                let ordering = dataset.query_ordering(&required_ordering)?;
                 let df = formulation.plan(&ctx, &dataset).await?;
                 let df = match row_limit {
                     Some(limit) => df.limit(0, Some(limit))?,
@@ -76,23 +111,47 @@ impl CombinerRun {
                 };
 
                 match action {
-                    Action::Write {
-                        output_path,
-                        output_format,
-                    } => Ok(Outcome::RowsWritten(
-                        output_format.write(df, &output_path).await?,
+                    Action::Write(target) => Ok(Outcome::RowsWritten(
+                        target
+                            .output_format
+                            .write(df, &target.output_path, Some(&ordering))
+                            .await?,
                     )),
-                    Action::Collect => Ok(Outcome::Batches(df.collect().await?)),
-                    action @ (Action::Explain | Action::ExplainAnalyze) => {
-                        let analyze = matches!(action, Action::ExplainAnalyze);
-                        let batches = df.explain(false, analyze)?.collect().await?;
-                        Ok(Outcome::Plan(pretty_format_batches(&batches)?.to_string()))
+                    Action::Collect => {
+                        let (frame, sink) = sink::collect(df, &ordering)?;
+                        frame.collect().await?;
+                        Ok(Outcome::Batches(sink.take()))
+                    }
+                    Action::Explain { write } => {
+                        explain(sink_frame(df, write, &ordering)?, false).await
+                    }
+                    Action::ExplainAnalyze { write } => {
+                        explain(sink_frame(df, write, &ordering)?, true).await
                     }
                 }
             },
             options,
         )
     }
+}
+
+/// The frame an explain renders: the write's file-sink frame, or a draining run without a write.
+fn sink_frame(
+    df: DataFrame,
+    write: Option<WriteTarget>,
+    ordering: &StoredOrdering,
+) -> Result<DataFrame> {
+    match write {
+        Some(target) => target
+            .output_format
+            .sink_frame(df, &target.output_path, Some(ordering)),
+        None => sink::drain(df, ordering),
+    }
+}
+
+async fn explain(frame: DataFrame, analyze: bool) -> Result<Outcome> {
+    let batches = frame.explain(false, analyze)?.collect().await?;
+    Ok(Outcome::Plan(pretty_format_batches(&batches)?.to_string()))
 }
 
 /// What a pipeline hands back to its caller.
@@ -123,10 +182,9 @@ impl Outcome {
 
 /// Pipeline options for a run. Object stores follow from the paths the run reads and writes.
 fn options_for(input_path: &str, action: &Action, threads: usize) -> PipelineOptions {
-    let output_path = match action {
-        Action::Write { output_path, .. } => Some(output_path.as_str()),
-        Action::Collect | Action::Explain | Action::ExplainAnalyze => None,
-    };
+    let output_path = action
+        .write_target()
+        .map(|target| target.output_path.as_str());
     let mut object_stores = [Some(input_path), output_path]
         .into_iter()
         .flatten()
@@ -155,39 +213,58 @@ mod tests {
 
     use super::*;
 
+    fn write_to(output_path: &str) -> WriteTarget {
+        WriteTarget {
+            output_path: output_path.to_string(),
+            output_format: OutputFormat::VORTEX,
+        }
+    }
+
     #[test]
     fn registers_the_object_stores_of_both_input_and_output() {
-        let action = Action::Write {
-            output_path: "gs://bucket-b/out.vortex".to_string(),
-            output_format: OutputFormat::VORTEX,
-        };
+        let action = Action::Write(write_to("gs://bucket-b/out.vortex"));
         let options = options_for("gs://bucket-a/path", &action, 1);
         assert_eq!(options.object_stores, ["gs://bucket-a", "gs://bucket-b"]);
     }
 
     #[test]
+    fn registers_the_output_store_of_an_explained_write() {
+        for action in [
+            Action::Explain {
+                write: Some(write_to("gs://bucket-b/out.vortex")),
+            },
+            Action::ExplainAnalyze {
+                write: Some(write_to("gs://bucket-b/out.vortex")),
+            },
+        ] {
+            let options = options_for("gs://bucket-a/path", &action, 1);
+            assert_eq!(options.object_stores, ["gs://bucket-a", "gs://bucket-b"]);
+        }
+    }
+
+    #[test]
     fn registers_a_shared_object_store_once() {
-        let action = Action::Write {
-            output_path: "gs://bucket/out.vortex".to_string(),
-            output_format: OutputFormat::VORTEX,
-        };
+        let action = Action::Write(write_to("gs://bucket/out.vortex"));
         let options = options_for("gs://bucket/path/", &action, 1);
         assert_eq!(options.object_stores, ["gs://bucket"]);
     }
 
     #[test]
     fn registers_no_object_stores_for_local_paths() {
-        let action = Action::Write {
-            output_path: "data/out.vortex".to_string(),
-            output_format: OutputFormat::VORTEX,
-        };
+        let action = Action::Write(write_to("data/out.vortex"));
         let options = options_for("data/samples", &action, 1);
         assert_eq!(options.object_stores, Vec::<String>::new());
     }
 
     #[test]
     fn registers_only_the_input_store_when_there_is_no_output() {
-        let options = options_for("gs://bucket-a/path", &Action::Collect, 1);
-        assert_eq!(options.object_stores, ["gs://bucket-a"]);
+        for action in [
+            Action::Collect,
+            Action::Explain { write: None },
+            Action::ExplainAnalyze { write: None },
+        ] {
+            let options = options_for("gs://bucket-a/path", &action, 1);
+            assert_eq!(options.object_stores, ["gs://bucket-a"]);
+        }
     }
 }

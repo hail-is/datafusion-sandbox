@@ -1,8 +1,9 @@
-use crate::dataset::Dataset;
+use crate::dataset::{Dataset, ScanShape};
 use crate::locus::LocusOrdering;
 
 use datafusion::{error::Result, prelude::*};
 
+/// The reference combiner's ordering, shared by every reference combiner formulation.
 pub fn required_ordering() -> LocusOrdering {
     LocusOrdering::locus()
 }
@@ -14,7 +15,7 @@ pub fn required_ordering() -> LocusOrdering {
 pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
     let query_ordering = dataset.query_ordering(&required_ordering())?;
     dataset
-        .read(ctx)
+        .read(ctx, &ScanShape::Flat)
         .await?
         .sort(query_ordering.sort_expressions())
 }
