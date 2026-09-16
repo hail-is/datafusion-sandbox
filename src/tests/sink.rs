@@ -7,24 +7,29 @@ use crate::{
     locus::LocusRepresentation,
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
-    sink::{self, CollectingSink, PartitionedSinkExec, SinkTarget},
+    sink::{self, CollectingSink, DataSinkTarget, PartitionedSinkExec, SinkTarget},
 };
 
 use datafusion::{
     arrow::array::{Array, UInt64Array},
     catalog::Session,
-    datasource::sink::{DataSink, DataSinkExec},
+    datasource::sink::DataSinkExec,
     error::{DataFusionError, Result},
     physical_expr::{LexRequirement, expressions::Column},
     physical_plan::{
-        Distribution, ExecutionPlan, ExecutionPlanProperties,
+        ChildrenPropertiesMode, Distribution, ExecutionPlan, ExecutionPlanProperties,
+        ReplaceChildrenOptions,
         coalesce_partitions::CoalescePartitionsExec,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
+        union::UnionExec,
     },
     prelude::SessionContext,
 };
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::{
+    fmt,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 /// The number of rows every fixture dataset holds across its samples.
 const FIXTURE_ROWS: usize = 32;
@@ -303,84 +308,125 @@ fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partit
     );
 }
 
-/// The partitioned sink refuses sinks that read the input some other way than through its
-/// input-partition plan for their own index. Fewer sinks than input partitions are accepted when
-/// built, because the optimizer probes the sink with hypothetical children, and refused when
-/// executed.
+/// The partitioned sink refuses a target whose plan is no sink over its partition: rows handed
+/// back unwritten do not carry the count schema, and counts from two sinks at once do not carry
+/// one partition.
 #[test]
-fn the_partitioned_sink_rejects_sinks_that_do_not_match_its_partitions() {
+fn the_partitioned_sink_rejects_a_target_that_does_not_yield_counts() {
     let fixture = fixture_of(FixtureFormat::Vortex);
-    let input = block_on(async {
-        let (_ctx, frame) = flat_read(fixture).await;
-        frame.frame.create_physical_plan().await.unwrap()
+    block_on(async {
+        let (ctx, frame) = flat_read(fixture).await;
+        let input = frame.frame.create_physical_plan().await.unwrap();
+        let state = ctx.state();
+
+        let unwritten: Arc<dyn SinkTarget> = Arc::new(PlanAsGiven);
+        let not_the_count_schema =
+            PartitionedSinkExec::plan(&state, Arc::clone(&input), None, &|_, _| {
+                Arc::clone(&unwritten)
+            })
+            .await;
+        assert_internal_error(not_the_count_schema, "instead of the count schema");
+
+        let two_sinks: Arc<dyn SinkTarget> = Arc::new(PlanInstead(counts_of_two_sinks(&input)));
+        let more_than_one_partition =
+            PartitionedSinkExec::plan(&state, Arc::clone(&input), None, &|_, _| {
+                Arc::clone(&two_sinks)
+            })
+            .await;
+        assert_internal_error(more_than_one_partition, "partitions instead of one");
     });
+}
+
+/// Two sinks over `input` unioned: the count schema, in two partitions rather than one.
+fn counts_of_two_sinks(input: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
     let schema = input.schema();
-    let sink = |input: Arc<dyn ExecutionPlan>| -> Arc<dyn ExecutionPlan> {
+    let one_sink = || -> Arc<dyn ExecutionPlan> {
         Arc::new(DataSinkExec::new(
-            input,
+            Arc::new(CoalescePartitionsExec::new(Arc::clone(input))),
             Arc::new(CollectingSink::new(Arc::clone(&schema))),
             None,
         ))
     };
+    UnionExec::try_new(vec![one_sink(), one_sink()]).unwrap()
+}
 
-    let too_few: Arc<dyn ExecutionPlan> = Arc::new(
-        PartitionedSinkExec::try_new(
-            Arc::clone(&input),
-            vec![sink(PartitionedSinkExec::input_partition(
-                Arc::clone(&input),
-                0,
-            ))],
-            None,
-        )
-        .unwrap(),
-    );
-    assert_eq!(
-        too_few.output_partitioning().partition_count(),
-        SAMPLES.len()
-    );
+/// Asserts `result` is the internal error whose message contains `expected`, so that a case
+/// cannot pass by tripping a different check.
+fn assert_internal_error<T: fmt::Debug>(result: Result<T>, expected: &str) {
+    match result {
+        Err(DataFusionError::Internal(message)) => assert!(
+            message.contains(expected),
+            "expected an error mentioning {expected:?}, got {message:?}"
+        ),
+        other => panic!("expected an internal error mentioning {expected:?}, got {other:?}"),
+    }
+}
+
+/// The partitioned sink refuses to execute once its input's partition count no longer matches the
+/// sinks it was planned over. Distribution enforcement probes the sink with a coalesced child, so
+/// the swap itself must succeed; only the execution fails. See ADR 0015.
+#[test]
+fn the_partitioned_sink_refuses_to_execute_when_its_input_partitions_change() {
+    let fixture = fixture_of(FixtureFormat::Vortex);
+    let swapped = block_on(async {
+        let (ctx, frame) = flat_read(fixture).await;
+        let input = frame.frame.create_physical_plan().await.unwrap();
+        let planned = CollectingPartitions::default()
+            .plan(&ctx.state(), Arc::clone(&input), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            planned.output_partitioning().partition_count(),
+            SAMPLES.len()
+        );
+        let coalesced: Arc<dyn ExecutionPlan> = Arc::new(CoalescePartitionsExec::new(input));
+        planned
+            .replace_children(
+                vec![coalesced],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .unwrap()
+    });
+    assert_eq!(swapped.output_partitioning().partition_count(), 1);
+
     let executed = pipeline::run(
-        move |ctx| async move { datafusion::physical_plan::collect(too_few, ctx.task_ctx()).await },
+        move |ctx| async move { datafusion::physical_plan::collect(swapped, ctx.task_ctx()).await },
         one_thread(),
     );
-    assert!(
-        matches!(executed, Err(DataFusionError::Internal(_))),
-        "{executed:?}"
-    );
+    assert_internal_error(executed, "was planned over");
+}
 
-    let mut sinks: Vec<Arc<dyn ExecutionPlan>> = (0..SAMPLES.len())
-        .map(|index| {
-            sink(PartitionedSinkExec::input_partition(
-                Arc::clone(&input),
-                index,
-            ))
-        })
-        .collect();
-    sinks.swap(0, 1);
-    let out_of_order = PartitionedSinkExec::try_new(Arc::clone(&input), sinks, None);
-    assert!(
-        matches!(out_of_order, Err(DataFusionError::Internal(_))),
-        "{out_of_order:?}"
-    );
+/// A target that is no sink at all: it hands back the single partition it was given, rows and
+/// schema unchanged.
+#[derive(Debug)]
+struct PlanAsGiven;
 
-    let whole_input: Vec<Arc<dyn ExecutionPlan>> = (0..SAMPLES.len())
-        .map(|_| sink(Arc::clone(&input)))
-        .collect();
-    let not_a_partition = PartitionedSinkExec::try_new(Arc::clone(&input), whole_input, None);
-    assert!(
-        matches!(not_a_partition, Err(DataFusionError::Internal(_))),
-        "{not_a_partition:?}"
-    );
+#[async_trait::async_trait]
+impl SinkTarget for PlanAsGiven {
+    async fn plan(
+        &self,
+        _: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        _: Option<LexRequirement>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(input)
+    }
+}
 
-    let matching: Vec<Arc<dyn ExecutionPlan>> = (0..SAMPLES.len())
-        .map(|index| {
-            sink(PartitionedSinkExec::input_partition(
-                Arc::clone(&input),
-                index,
-            ))
-        })
-        .collect();
-    let accepted = PartitionedSinkExec::try_new(input, matching, None).unwrap();
-    assert_eq!(accepted.partition_sinks().len(), SAMPLES.len());
+/// A target ignoring the partition it was given and handing back a plan of its own.
+#[derive(Debug)]
+struct PlanInstead(Arc<dyn ExecutionPlan>);
+
+#[async_trait::async_trait]
+impl SinkTarget for PlanInstead {
+    async fn plan(
+        &self,
+        _: &dyn Session,
+        _: Arc<dyn ExecutionPlan>,
+        _: Option<LexRequirement>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::clone(&self.0))
+    }
 }
 
 /// A target running each partition of its input into its own collecting sink, kept for the test
@@ -403,7 +449,7 @@ impl CollectingPartitions {
 impl SinkTarget for CollectingPartitions {
     async fn plan(
         &self,
-        _: &dyn Session,
+        state: &dyn Session,
         input: Arc<dyn ExecutionPlan>,
         ordering: Option<LexRequirement>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
@@ -411,25 +457,12 @@ impl SinkTarget for CollectingPartitions {
         let sinks: Vec<Arc<CollectingSink>> = (0..count)
             .map(|_| Arc::new(CollectingSink::new(input.schema())))
             .collect();
-        let partition_sinks = sinks
-            .iter()
-            .enumerate()
-            .map(|(index, sink)| {
-                let data_sink: Arc<dyn DataSink> = sink.clone();
-                let partition_sink: Arc<dyn ExecutionPlan> = Arc::new(DataSinkExec::new(
-                    PartitionedSinkExec::input_partition(Arc::clone(&input), index),
-                    data_sink,
-                    ordering.clone(),
-                ));
-                partition_sink
-            })
-            .collect();
+        let partition = |index: usize, _: usize| -> Arc<dyn SinkTarget> {
+            Arc::new(DataSinkTarget::new(sinks[index].clone()))
+        };
+        let exec = PartitionedSinkExec::plan(state, input, ordering, &partition).await?;
         *self.sinks.lock().unwrap_or_else(PoisonError::into_inner) = sinks;
-        Ok(Arc::new(PartitionedSinkExec::try_new(
-            input,
-            partition_sinks,
-            ordering,
-        )?))
+        Ok(Arc::new(exec))
     }
 }
 

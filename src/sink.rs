@@ -10,11 +10,16 @@
 //! [`PartitionedSinkExec`] here instead runs a sink plan per input partition, so a formulation
 //! whose partitions are the locus intervals writes one file per interval from one plan. See
 //! [ADR 0015](../docs/adr/0015-write-one-file-per-partition-through-a-partitioned-sink.md).
+//!
+//! The [`SinkTarget`] implementations here are the ones needing no format: the collecting and
+//! draining sinks. A write's targets live in [`crate::format`], beside the writer factories and
+//! options they build a sink from.
 
 use crate::{locus::StoredOrdering, ordered_frame::OrderedFrame};
 
 use datafusion::{
     arrow::{
+        array::{Array, UInt64Array},
         compute::SortOptions,
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
@@ -105,7 +110,7 @@ pub fn collect(ordered: OrderedFrame) -> Result<(DataFrame, Arc<CollectingSink>)
     let sink = Arc::new(CollectingSink::new(Arc::clone(
         ordered.frame.schema().inner(),
     )));
-    let target = Arc::new(DataSinkTarget(sink.clone()));
+    let target = Arc::new(DataSinkTarget::new(sink.clone()));
     let frame = run_into(ordered.frame, "collect", Some(&ordered.ordering), target)?;
     Ok((frame, sink))
 }
@@ -123,7 +128,7 @@ pub fn drain(ordered: OrderedFrame) -> Result<DataFrame> {
         ordered.frame,
         "drain",
         Some(&ordered.ordering),
-        Arc::new(DataSinkTarget(sink)),
+        Arc::new(DataSinkTarget::new(sink)),
     )
 }
 
@@ -219,7 +224,14 @@ async fn count_rows(
 
 /// A target that is a `DataSink` behind `DataFusion`'s own `DataSinkExec`.
 #[derive(Debug)]
-struct DataSinkTarget(Arc<dyn DataSink>);
+pub(crate) struct DataSinkTarget(Arc<dyn DataSink>);
+
+impl DataSinkTarget {
+    /// The target writing into `sink`.
+    pub(crate) const fn new(sink: Arc<dyn DataSink>) -> Self {
+        Self(sink)
+    }
+}
 
 #[async_trait::async_trait]
 impl SinkTarget for DataSinkTarget {
@@ -246,14 +258,13 @@ impl SinkTarget for DataSinkTarget {
 /// coalesces nor repartitions beneath it. See
 /// [ADR 0015](../docs/adr/0015-write-one-file-per-partition-through-a-partitioned-sink.md).
 ///
-/// A partition sink is a single-partition plan whose only child is
-/// [`PartitionedSinkExec::input_partition`] for its index, so a format builds it exactly as it
-/// builds a single file's sink and the count schema is the sink's. The partition sinks are built
-/// once, when the target is planned, for the partitions the input has then; the optimizer swaps its
-/// final input beneath every one of them through `replace_children`. That call accepts an input
-/// with any partition count, because distribution enforcement probes the sink with a hypothetical
-/// coalesced child to compare pipeline behavior; executing a sink whose input's partition count no
-/// longer matches its sinks fails with an internal error rather than writing the wrong files.
+/// The exec builds the single-partition input each partition sink reads, so a sink is never paired
+/// with the wrong partition. The partition sinks are built once, when the target is planned, for
+/// the partitions the input has then; the optimizer swaps its final input beneath every one of them
+/// through `replace_children`. That call accepts an input with any partition count, because
+/// distribution enforcement probes the sink with a hypothetical coalesced child to compare pipeline
+/// behavior; executing a sink whose input's partition count no longer matches its sinks fails with
+/// an internal error rather than writing the wrong files.
 #[derive(Debug)]
 pub struct PartitionedSinkExec {
     input: Arc<dyn ExecutionPlan>,
@@ -263,66 +274,69 @@ pub struct PartitionedSinkExec {
 }
 
 impl PartitionedSinkExec {
-    /// The single-partition plan yielding partition `index` of `input`, for a partition sink to
-    /// read as its only input partition.
-    #[must_use]
-    pub fn input_partition(input: Arc<dyn ExecutionPlan>, index: usize) -> Arc<dyn ExecutionPlan> {
-        Arc::new(InputPartitionExec::new(input, index))
-    }
-
-    /// The sink over `input` whose `partition_sinks[i]` writes input partition `i`, requiring
-    /// `ordering` of every partition.
+    /// The sink over `input` running each of its partitions into the sink its own target plans,
+    /// requiring `ordering` of every partition.
+    ///
+    /// `target(index, count)` supplies the target for partition `index` of `count`. The exec reads
+    /// the partition count off `input` and builds the single-partition plan each target writes, so
+    /// there is no protocol for a caller to get wrong.
+    ///
+    /// `ordering` reaches every partition sink as well as this exec, because a format turns it into
+    /// file metadata there, such as Parquet's sorting columns. It is not enforced there: the
+    /// partition sinks are not this exec's children, so the optimizer never walks them. What the
+    /// optimizer satisfies is the requirement this exec reports for its own input.
     ///
     /// # Errors
     ///
-    /// Returns an error if a sink does not read its partition through
-    /// [`Self::input_partition`], yield one partition, or produce the count schema.
-    pub fn try_new(
+    /// Returns an error if a target's plan cannot be built, or if it yields anything other than one
+    /// partition of the count schema.
+    pub async fn plan(
+        state: &dyn Session,
         input: Arc<dyn ExecutionPlan>,
-        partition_sinks: Vec<Arc<dyn ExecutionPlan>>,
         ordering: Option<LexRequirement>,
+        target: &(dyn Fn(usize, usize) -> Arc<dyn SinkTarget> + Send + Sync),
     ) -> Result<Self> {
         let count = input.output_partitioning().partition_count();
         let count_schema = count_schema();
-        for (index, sink) in partition_sinks.iter().enumerate() {
-            let reads_its_partition = match sink.children().as_slice() {
-                [child] => child
-                    .downcast_ref::<InputPartitionExec>()
-                    .is_some_and(|child| child.index == index && Arc::ptr_eq(&child.input, &input)),
-                _ => false,
-            };
-            if !reads_its_partition {
-                return Err(DataFusionError::Internal(format!(
-                    "partition sink {index} does not read input partition {index}"
-                )));
-            }
+        let mut partition_sinks = Vec::with_capacity(count);
+        for index in 0..count {
+            let partition = input_partition(Arc::clone(&input), index);
+            let sink = target(index, count)
+                .plan(state, partition, ordering.clone())
+                .await?;
             if sink.output_partitioning().partition_count() != 1 {
                 return Err(DataFusionError::Internal(format!(
-                    "partition sink {index} yields {} partitions instead of one",
+                    "the target for partition {index} yields {} partitions instead of one",
                     sink.output_partitioning().partition_count()
                 )));
             }
             if sink.schema().fields() != count_schema.fields() {
                 return Err(DataFusionError::Internal(format!(
-                    "partition sink {index} yields {} instead of the count schema",
+                    "the target for partition {index} yields {} instead of the count schema",
                     sink.schema()
                 )));
             }
+            partition_sinks.push(sink);
         }
-        let cache = PlanProperties::new(
-            EquivalenceProperties::new(count_schema),
-            Partitioning::UnknownPartitioning(count),
+        Ok(Self {
+            cache: Arc::new(Self::properties(&input)),
+            input,
+            partition_sinks,
+            ordering,
+        })
+    }
+
+    /// The properties of a sink over `input`: the count schema, and one output partition per input
+    /// partition as `input` reports them now.
+    fn properties(input: &Arc<dyn ExecutionPlan>) -> PlanProperties {
+        PlanProperties::new(
+            EquivalenceProperties::new(count_schema()),
+            Partitioning::UnknownPartitioning(input.output_partitioning().partition_count()),
             input.pipeline_behavior(),
             input.boundedness(),
         )
         .with_scheduling_type(SchedulingType::Cooperative)
-        .with_evaluation_type(EvaluationType::Eager);
-        Ok(Self {
-            input,
-            partition_sinks,
-            ordering,
-            cache: Arc::new(cache),
-        })
+        .with_evaluation_type(EvaluationType::Eager)
     }
 
     /// The ordering required of every input partition.
@@ -405,17 +419,16 @@ impl ExecutionPlan for PartitionedSinkExec {
             .iter()
             .enumerate()
             .map(|(index, sink)| {
-                Arc::clone(sink).replace_children(
-                    vec![Self::input_partition(Arc::clone(&input), index)],
-                    options,
-                )
+                Arc::clone(sink)
+                    .replace_children(vec![input_partition(Arc::clone(&input), index)], options)
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Arc::new(Self::try_new(
+        Ok(Arc::new(Self {
+            cache: Arc::new(Self::properties(&input)),
             input,
             partition_sinks,
-            self.ordering.clone(),
-        )?))
+            ordering: self.ordering.clone(),
+        }))
     }
 
     fn with_new_children(
@@ -480,6 +493,45 @@ fn count_schema() -> SchemaRef {
         DataType::UInt64,
         false,
     )]))
+}
+
+/// The rows written, summed over the count batches a sink plan yields: one from a single-file
+/// sink, one per partition from a partitioned sink.
+///
+/// # Errors
+///
+/// Returns an error if `batches` is empty or holds anything other than the count schema.
+pub fn rows_written(batches: &[RecordBatch]) -> Result<u64> {
+    let malformed = || {
+        DataFusionError::Internal(format!(
+            "expected batches of one non-null count: UInt64 column from the sink, got {batches:?}"
+        ))
+    };
+    if batches.is_empty() {
+        return Err(malformed());
+    }
+    let mut total = 0_u64;
+    for batch in batches {
+        if batch.num_columns() != 1 {
+            return Err(malformed());
+        }
+        let counts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .filter(|counts| counts.null_count() == 0)
+            .ok_or_else(malformed)?;
+        for count in counts.values() {
+            total = total.checked_add(*count).ok_or_else(malformed)?;
+        }
+    }
+    Ok(total)
+}
+
+/// The single-partition plan yielding partition `index` of `input`, for a partition sink to read as
+/// its only input partition.
+fn input_partition(input: Arc<dyn ExecutionPlan>, index: usize) -> Arc<dyn ExecutionPlan> {
+    Arc::new(InputPartitionExec::new(input, index))
 }
 
 /// Partition `index` of `input` as a plan's only partition, for a single-partition sink to read.
