@@ -19,24 +19,21 @@
 
 use super::{
     FORMATS, FixtureDataset, REPRESENTATIONS, assert_filter_reaches_every_scan, assert_merge_tree,
-    dataset, displayed, expected_groups, formulations, hostile_config, nodes_of, operators,
-    ordering, sink_plan,
+    collected_batches, dataset, displayed, expected_groups, formulations, hostile_config, nodes_of,
+    operators, planned, sink_plan,
 };
 use crate::fixture::{self, FixtureFormat, SAMPLES, SampleRow, block_on};
 use crate::formulation::Formulation;
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
-use crate::pipeline::{self, PipelineOptions};
-use crate::sink;
+use crate::ordered_frame::OrderedFrame;
 
 use datafusion::{
     arrow::record_batch::RecordBatch,
     datasource::source::DataSourceExec,
-    error::Result,
     logical_expr::Expr,
     physical_plan::{
         ExecutionPlan, filter::FilterExec, repartition::RepartitionExec, union::UnionExec,
     },
-    prelude::{DataFrame, SessionContext},
 };
 
 use std::{ops::Range, sync::Arc};
@@ -214,11 +211,11 @@ fn assert_selects_files_and_returns_rows(restriction: LocusRestriction) {
             for formulation in &formulations() {
                 let context =
                     format!("{format:?} {representation:?} {formulation:?} {restriction:?}");
-                let (plan, batches) = run_filtered(
-                    formulation,
-                    dataset(format, representation),
-                    restriction.filter(representation),
-                );
+                let filter = restriction.filter(representation);
+                let (plan, batches) =
+                    collected_batches(formulation, dataset(format, representation), move |frame| {
+                        frame.filter(filter)
+                    });
                 assert_filter_stays_inside_the_scans(
                     &plan,
                     &expected_groups(formulation, SAMPLES.len()),
@@ -276,21 +273,6 @@ fn assert_selects_files_and_returns_rows(restriction: LocusRestriction) {
     }
 }
 
-/// Builds `formulation` over `dataset` and applies `filter` above it, as a caller would, before
-/// the run's sink.
-async fn plan_filtered(
-    ctx: &SessionContext,
-    formulation: &Formulation,
-    dataset: &FixtureDataset,
-    filter: Expr,
-) -> Result<DataFrame> {
-    dataset.fixture.register(ctx);
-    formulation
-        .plan(ctx, &dataset.dataset)
-        .await?
-        .filter(filter)
-}
-
 /// Plans `formulation` under `filter` on a hostile session, through a sink, without executing it.
 fn filtered_physical_plan(
     formulation: &Formulation,
@@ -298,37 +280,21 @@ fn filtered_physical_plan(
     filter: Expr,
 ) -> Arc<dyn ExecutionPlan> {
     block_on(async {
-        let ctx = SessionContext::new_with_config(hostile_config(8));
-        let frame = plan_filtered(&ctx, formulation, dataset, filter)
+        let (_, ordered) = planned(formulation, dataset, hostile_config(8))
             .await
             .unwrap();
-        sink_plan(formulation, frame, dataset).await.unwrap()
+        let OrderedFrame {
+            frame,
+            ordering,
+            layout,
+        } = ordered;
+        let ordered = OrderedFrame {
+            frame: frame.filter(filter).unwrap(),
+            ordering,
+            layout,
+        };
+        sink_plan(ordered).await.unwrap()
     })
-}
-
-/// Plans `formulation` under `filter` on a hostile session and executes it through the pipeline
-/// runner into a collecting sink, returning the plan alongside the rows the sink received.
-fn run_filtered(
-    formulation: &Formulation,
-    dataset: FixtureDataset,
-    filter: Expr,
-) -> (Arc<dyn ExecutionPlan>, Vec<RecordBatch>) {
-    let formulation = formulation.clone();
-    pipeline::run(
-        move |_| async move {
-            let ctx = SessionContext::new_with_config(hostile_config(8));
-            let frame = plan_filtered(&ctx, &formulation, &dataset, filter).await?;
-            let (frame, collected) = sink::collect(frame, &ordering(&formulation, &dataset))?;
-            let plan = frame.create_physical_plan().await?;
-            datafusion::physical_plan::collect(Arc::clone(&plan), ctx.task_ctx()).await?;
-            Ok((plan, collected.take()))
-        },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
-    )
-    .unwrap()
 }
 
 /// The filter changed nothing between the scans and the merges: no filter operator, the merge

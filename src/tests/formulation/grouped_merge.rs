@@ -5,18 +5,15 @@
 //! groups under a hostile session, with and without a filter.
 
 use super::{
-    FORMATS, FixtureDataset, REPRESENTATIONS, assert_merge_tree, dataset, displayed,
-    file_sink_plan, hostile_config, nodes_of, operators, ordering, sink_plan,
+    FORMATS, REPRESENTATIONS, assert_merge_tree, collected_batches, dataset, displayed,
+    drained_plan, file_sink_plan, hostile_config, nodes_of, operators,
 };
-use crate::fixture::{self, FixtureFormat, SAMPLES, block_on};
+use crate::fixture::{self, FixtureFormat, SAMPLES};
 use crate::formulation::Formulation;
 use crate::locus::LocusRepresentation;
-use crate::pipeline::{self, PipelineOptions};
-use crate::sink;
-
 use datafusion::{
     arrow::record_batch::RecordBatch,
-    physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec, prelude::SessionContext,
+    physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec,
 };
 
 use std::num::NonZeroUsize;
@@ -27,12 +24,10 @@ fn displays_as_grouped_merge() {
 }
 
 #[test]
-fn requires_the_reference_combiners_layout() {
+fn requires_the_reference_combiners_ordering() {
     assert_eq!(
-        grouped_merge(3).required_layout().locus_ordering,
-        Formulation::CombineRefsUnion
-            .required_layout()
-            .locus_ordering
+        grouped_merge(3).required_ordering(),
+        Formulation::CombineRefsUnion.required_ordering()
     );
 }
 
@@ -81,18 +76,9 @@ fn a_row_limit_becomes_a_fetch_on_every_merge() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
-            let drained = block_on(async {
-                let ctx = SessionContext::new_with_config(hostile_config(8));
-                dataset.fixture.register(&ctx);
-                let frame = grouped_merge(2)
-                    .plan(&ctx, &dataset.dataset)
-                    .await
-                    .unwrap()
-                    .limit(0, Some(LIMIT))
-                    .unwrap();
-                sink_plan(&grouped_merge(2), frame, &dataset).await.unwrap()
-            });
-            let written = file_sink_plan(&grouped_merge(2), &dataset, Some(LIMIT));
+            let drained = drained_plan(&grouped_merge(2), &dataset, hostile_config(8), Some(LIMIT));
+            let (written, _) =
+                file_sink_plan(&grouped_merge(2), &dataset, hostile_config(8), Some(LIMIT));
 
             for (sink, plan) in [("draining", drained), ("file", written)] {
                 assert_merge_tree(&plan, &[2, 2]);
@@ -117,7 +103,7 @@ fn a_row_limit_becomes_a_fetch_on_every_merge() {
 fn returns_the_union_formulations_rows_in_locus_order() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let union = rows(Formulation::CombineRefsUnion, format, representation);
+            let union = rows(&Formulation::CombineRefsUnion, format, representation);
             assert_eq!(
                 union.len(),
                 fixture::sample_rows()
@@ -127,7 +113,7 @@ fn returns_the_union_formulations_rows_in_locus_order() {
             );
             for groups in [2, 3] {
                 let context = format!("{format:?} {representation:?} {groups} groups");
-                let grouped = rows(grouped_merge(groups), format, representation);
+                let grouped = rows(&grouped_merge(groups), format, representation);
                 let loci = |rows: &[Row]| {
                     rows.iter()
                         .map(|(contig, position, _, _)| (contig.clone(), *position))
@@ -158,31 +144,12 @@ type Row = (String, i32, String, String);
 /// group merges have another thread to run on, into a collecting sink, and returns the rows the
 /// sink received in order.
 fn rows(
-    formulation: Formulation,
+    formulation: &Formulation,
     format: FixtureFormat,
     representation: LocusRepresentation,
 ) -> Vec<Row> {
     let dataset = dataset(format, representation);
-    let batches = pipeline::run(
-        move |_| async move {
-            let ctx = SessionContext::new_with_config(hostile_config(8));
-            let FixtureDataset {
-                fixture,
-                dataset: inner,
-                ..
-            } = &dataset;
-            fixture.register(&ctx);
-            let frame = formulation.plan(&ctx, inner).await?;
-            let (frame, collected) = sink::collect(frame, &ordering(&formulation, &dataset))?;
-            frame.collect().await?;
-            Ok(collected.take())
-        },
-        PipelineOptions {
-            threads: 2,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let (_, batches) = collected_batches(formulation, dataset, Ok);
     batches
         .iter()
         .flat_map(|batch: &RecordBatch| {

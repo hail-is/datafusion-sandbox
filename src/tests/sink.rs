@@ -2,9 +2,10 @@
 
 use crate::fixture::{self, DatasetFixture, FixtureFormat, SAMPLES, block_on};
 use crate::{
-    dataset::{Dataset, ScanShape},
+    dataset::Dataset,
     formulation::Formulation,
-    locus::{LocusRepresentation, StoredOrdering},
+    locus::LocusRepresentation,
+    ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
     sink::{self, CollectingSink, PartitionedSinkExec, SinkTarget},
 };
@@ -20,7 +21,7 @@ use datafusion::{
         coalesce_partitions::CoalescePartitionsExec,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
     },
-    prelude::{DataFrame, SessionContext},
+    prelude::SessionContext,
 };
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -33,8 +34,8 @@ fn the_drained_frame_returns_the_row_count() {
     let fixture = fixture_of(FixtureFormat::Vortex);
     let batches = pipeline::run(
         move |_| async move {
-            let (_ctx, frame, ordering) = flat_read(fixture).await;
-            sink::drain(frame, &ordering)?.collect().await
+            let (_ctx, frame) = flat_read(fixture).await;
+            sink::drain(frame)?.collect().await
         },
         one_thread(),
     )
@@ -58,8 +59,8 @@ fn the_collecting_sink_keeps_the_rows_in_the_required_order() {
         let fixture = fixture_of(format);
         let (count, batches) = pipeline::run(
             move |_| async move {
-                let (_ctx, frame, ordering) = flat_read(fixture).await;
-                let (frame, collected) = sink::collect(frame, &ordering)?;
+                let (_ctx, frame) = flat_read(fixture).await;
+                let (frame, collected) = sink::collect(frame)?;
                 let count = frame.collect().await?;
                 Ok((count, collected.take()))
             },
@@ -82,8 +83,8 @@ fn taking_the_collected_batches_empties_the_sink() {
     let fixture = fixture_of(FixtureFormat::Vortex);
     let (first, second) = pipeline::run(
         move |_| async move {
-            let (_ctx, frame, ordering) = flat_read(fixture).await;
-            let (frame, collected) = sink::collect(frame, &ordering)?;
+            let (_ctx, frame) = flat_read(fixture).await;
+            let (frame, collected) = sink::collect(frame)?;
             frame.collect().await?;
             Ok((collected.take(), collected.take()))
         },
@@ -102,8 +103,8 @@ fn the_sink_requires_the_ordering_and_the_optimizer_merges_to_meet_it() {
     for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
         let fixture = fixture_of(format);
         let plan = block_on(async {
-            let (_ctx, frame, ordering) = flat_read(fixture).await;
-            sink::drain(frame, &ordering)
+            let (_ctx, frame) = flat_read(fixture).await;
+            sink::drain(frame)
                 .unwrap()
                 .create_physical_plan()
                 .await
@@ -149,13 +150,18 @@ fn the_sink_requires_the_ordering_and_the_optimizer_merges_to_meet_it() {
 fn each_sink_displays_its_own_name() {
     let fixture = fixture_of(FixtureFormat::Vortex);
     let (drained, collected) = block_on(async {
-        let (_ctx, frame, ordering) = flat_read(fixture).await;
-        let drained = sink::drain(frame.clone(), &ordering)
+        let (_ctx, frame) = flat_read(fixture).await;
+        let collected_frame = OrderedFrame {
+            frame: frame.frame.clone(),
+            ordering: frame.ordering.clone(),
+            layout: frame.layout,
+        };
+        let drained = sink::drain(frame)
             .unwrap()
             .create_physical_plan()
             .await
             .unwrap();
-        let (frame, _) = sink::collect(frame, &ordering).unwrap();
+        let (frame, _) = sink::collect(collected_frame).unwrap();
         let collected = frame.create_physical_plan().await.unwrap();
         (drained, collected)
     });
@@ -184,8 +190,8 @@ fn the_partitioned_sink_writes_each_partition_to_its_own_sink() {
             let target = Arc::clone(&target);
             pipeline::run(
                 move |_| async move {
-                    let (_ctx, frame, ordering) = flat_read(fixture).await;
-                    sink::run_into(frame, "partitions", Some(&ordering), target)?
+                    let (_ctx, frame) = flat_read(fixture).await;
+                    sink::run_into(frame.frame, "partitions", Some(&frame.ordering), target)?
                         .collect()
                         .await
                 },
@@ -237,11 +243,11 @@ fn the_partitioned_sink_writes_each_partition_to_its_own_sink() {
 fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partitions() {
     let fixture = fixture_of(FixtureFormat::Vortex);
     let plan = block_on(async {
-        let (_ctx, frame, ordering) = flat_read(fixture).await;
+        let (_ctx, frame) = flat_read(fixture).await;
         sink::run_into(
-            frame,
+            frame.frame,
             "partitions",
-            Some(&ordering),
+            Some(&frame.ordering),
             Arc::new(CollectingPartitions::default()),
         )
         .unwrap()
@@ -305,8 +311,8 @@ fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partit
 fn the_partitioned_sink_rejects_sinks_that_do_not_match_its_partitions() {
     let fixture = fixture_of(FixtureFormat::Vortex);
     let input = block_on(async {
-        let (_ctx, frame, _) = flat_read(fixture).await;
-        frame.create_physical_plan().await.unwrap()
+        let (_ctx, frame) = flat_read(fixture).await;
+        frame.frame.create_physical_plan().await.unwrap()
     });
     let schema = input.schema();
     let sink = |input: Arc<dyn ExecutionPlan>| -> Arc<dyn ExecutionPlan> {
@@ -434,22 +440,25 @@ fn fixture_of(format: FixtureFormat) -> &'static Arc<DatasetFixture> {
 
 /// The flat union of the fixture's samples with no sort above it, and the reference combiner's
 /// ordering over that dataset.
-async fn flat_read(fixture: &DatasetFixture) -> (SessionContext, DataFrame, StoredOrdering) {
+async fn flat_read(fixture: &DatasetFixture) -> (SessionContext, OrderedFrame) {
     let ctx = SessionContext::new_with_config(pipeline::session_config());
     fixture.register(&ctx);
-    let layout = Formulation::CombineRefsUnion.required_layout();
+    let required_ordering = Formulation::CombineRefsUnion.required_ordering();
     let dataset = Dataset::discover(
         &ctx,
         fixture.table_path().clone(),
         fixture.input_format(),
-        layout.clone(),
+        required_ordering.clone(),
         None,
     )
     .await
     .unwrap();
-    let ordering = dataset.query_ordering(&layout.locus_ordering).unwrap();
-    let frame = dataset.read(&ctx, &ScanShape::Flat).await.unwrap();
-    (ctx, frame, ordering)
+    let frame = OrderedFrame {
+        frame: dataset.read(&ctx).await.unwrap(),
+        ordering: dataset.query_ordering(&required_ordering).unwrap(),
+        layout: OutputLayout::SingleFile,
+    };
+    (ctx, frame)
 }
 
 fn one_thread() -> PipelineOptions {

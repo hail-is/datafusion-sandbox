@@ -5,15 +5,15 @@
 
 use super::{
     FORMATS, FixtureDataset, REPRESENTATIONS, assert_filter_reaches_every_scan, assert_flat_merge,
-    assert_merge_tree, dataset, displayed, file_sink_plan, file_sink_plan_with_config,
-    hostile_config, nodes_of, ordering, output_format, output_path, sink_plan,
+    assert_merge_tree, collected_batches, dataset, displayed, drained_plan, file_sink_plan,
+    hostile_config, nodes_of, output_format, output_path, planned,
 };
-use crate::fixture::{self, FixtureFormat, SAMPLES, block_on};
-use crate::format::OutputLayout;
+use crate::fixture::{self, FixtureFormat, SAMPLES};
 use crate::formulation::Formulation;
 use crate::locus::{LocusRepresentation, SplitPoints};
+use crate::ordered_frame::OutputLayout;
 use crate::pipeline::{self, PipelineOptions};
-use crate::sink::{self, PartitionedSinkExec};
+use crate::sink::PartitionedSinkExec;
 
 use datafusion::{
     arrow::record_batch::RecordBatch,
@@ -27,7 +27,6 @@ use datafusion::{
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
         union::UnionExec,
     },
-    prelude::SessionContext,
 };
 use futures::TryStreamExt;
 use object_store::path::Path;
@@ -53,13 +52,11 @@ fn displays_as_interval_merge() {
 }
 
 #[test]
-fn requires_the_reference_combiners_layout_and_writes_a_file_per_partition() {
+fn requires_the_reference_combiners_ordering_and_writes_a_file_per_partition() {
     let formulation = interval_merge(THREE_INTERVALS);
     assert_eq!(
-        formulation.required_layout().locus_ordering,
-        Formulation::CombineRefsUnion
-            .required_layout()
-            .locus_ordering
+        formulation.required_ordering(),
+        Formulation::CombineRefsUnion.required_ordering()
     );
     assert_eq!(formulation.output_layout(), OutputLayout::FilePerPartition);
     for single_file in [
@@ -87,12 +84,8 @@ fn writes_through_a_partitioned_sink_over_one_merge_per_interval() {
                 } else {
                     pipeline::session_config()
                 };
-                let plan = file_sink_plan_with_config(
-                    &interval_merge(THREE_INTERVALS),
-                    &dataset,
-                    None,
-                    config,
-                );
+                let (plan, ordering) =
+                    file_sink_plan(&interval_merge(THREE_INTERVALS), &dataset, config, None);
 
                 let sink_exec = plan
                     .downcast_ref::<PartitionedSinkExec>()
@@ -124,11 +117,7 @@ fn writes_through_a_partitioned_sink_over_one_merge_per_interval() {
                             .map_or("<not a column>", Column::name)
                     })
                     .collect();
-                assert_eq!(
-                    required,
-                    ordering(&interval_merge(THREE_INTERVALS), &dataset).column_names(),
-                    "{context}"
-                );
+                assert_eq!(required, ordering.column_names(), "{context}");
                 assert_one_merge_per_interval(&plan, 3, representation, &context);
                 assert!(
                     plan.children()[0].downcast_ref::<UnionExec>().is_some(),
@@ -154,18 +143,12 @@ fn a_single_partition_sink_merges_the_interval_merges() {
             let dataset = dataset(format, representation);
             for hostile in [false, true] {
                 let context = format!("{format:?} {representation:?} hostile={hostile}");
-                let plan = block_on(async {
-                    let config = if hostile {
-                        hostile_config(8)
-                    } else {
-                        pipeline::session_config()
-                    };
-                    let ctx = SessionContext::new_with_config(config);
-                    dataset.fixture.register(&ctx);
-                    let formulation = interval_merge(THREE_INTERVALS);
-                    let frame = formulation.plan(&ctx, &dataset.dataset).await.unwrap();
-                    sink_plan(&formulation, frame, &dataset).await.unwrap()
-                });
+                let config = if hostile {
+                    hostile_config(8)
+                } else {
+                    pipeline::session_config()
+                };
+                let plan = drained_plan(&interval_merge(THREE_INTERVALS), &dataset, config, None);
 
                 assert_merge_tree(&plan, &[SAMPLES.len(); 3]);
                 assert_one_merge_per_interval(&plan, 3, representation, &context);
@@ -181,7 +164,12 @@ fn a_row_limit_collapses_the_write_to_one_file() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
-            let plan = file_sink_plan(&interval_merge(THREE_INTERVALS), &dataset, Some(3));
+            let (plan, _) = file_sink_plan(
+                &interval_merge(THREE_INTERVALS),
+                &dataset,
+                hostile_config(8),
+                Some(3),
+            );
             let sink_exec = plan
                 .downcast_ref::<PartitionedSinkExec>()
                 .unwrap_or_else(|| panic!("{format:?} {representation:?}:\n{}", displayed(&plan)));
@@ -204,7 +192,8 @@ fn one_split_point_gives_two_intervals_and_none_gives_one() {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
 
-            let two = file_sink_plan(&interval_merge("1:3"), &dataset, None);
+            let (two, _) =
+                file_sink_plan(&interval_merge("1:3"), &dataset, hostile_config(8), None);
             assert_eq!(
                 two.output_partitioning().partition_count(),
                 2,
@@ -218,7 +207,7 @@ fn one_split_point_gives_two_intervals_and_none_gives_one() {
                 &format!("{format:?} {representation:?}"),
             );
 
-            let one = file_sink_plan(&interval_merge(""), &dataset, None);
+            let (one, _) = file_sink_plan(&interval_merge(""), &dataset, hostile_config(8), None);
             assert!(
                 one.downcast_ref::<PartitionedSinkExec>().is_some(),
                 "{format:?} {representation:?}:\n{}",
@@ -281,13 +270,9 @@ fn writes_one_file_per_interval_holding_the_union_formulations_rows() {
                 let context = format!("{format:?} {representation:?} split points {split_points}");
                 let formulation = interval_merge(split_points);
                 let dataset = dataset(format, representation);
-                let directory = format!(
-                    "{}-{}",
-                    output_path(&formulation, &dataset),
-                    split_points.replace([':', ','], "-")
-                );
+                let suffix = format!("-{}", split_points.replace([':', ','], "-"));
                 let (rows_written, files) =
-                    write_partitioned(&formulation, dataset, &directory, intervals, None);
+                    write_partitioned(&formulation, dataset, &suffix, intervals, None);
 
                 assert_eq!(
                     rows_written,
@@ -330,9 +315,8 @@ fn a_limited_write_puts_one_file_in_the_directory() {
             let union = collected_rows(&Formulation::CombineRefsUnion, format, representation);
             let formulation = interval_merge(THREE_INTERVALS);
             let dataset = dataset(format, representation);
-            let directory = format!("{}-limited", output_path(&formulation, &dataset));
             let (rows_written, files) =
-                write_partitioned(&formulation, dataset, &directory, 1, Some(LIMIT));
+                write_partitioned(&formulation, dataset, "-limited", 1, Some(LIMIT));
 
             assert_eq!(rows_written, u64::try_from(LIMIT).unwrap(), "{context}");
             let (path, batches) = files.first().unwrap();
@@ -474,57 +458,37 @@ fn collected_rows(
     representation: LocusRepresentation,
 ) -> Vec<Row> {
     let dataset = dataset(format, representation);
-    let formulation = formulation.clone();
-    let batches = pipeline::run(
-        move |_| async move {
-            let ctx = SessionContext::new_with_config(hostile_config(8));
-            dataset.fixture.register(&ctx);
-            let frame = formulation.plan(&ctx, &dataset.dataset).await?;
-            let (frame, collected) = sink::collect(frame, &ordering(&formulation, &dataset))?;
-            frame.collect().await?;
-            Ok(collected.take())
-        },
-        two_threads(),
-    )
-    .unwrap();
+    let (_, batches) = collected_batches(formulation, dataset, Ok);
     batches
         .iter()
         .flat_map(|batch| rows(batch, representation))
         .collect()
 }
 
-/// Writes `formulation` over `dataset`, under a row limit of `limit` if given, to `directory` on
-/// the fixture's in-memory store on a hostile session and two threads, and reads the `file_count`
-/// files back in index order. Returns the row count the write reported and each file's path with
-/// its batches. Fails if the directory holds any other number of files.
+/// Writes `formulation` over `dataset`, under a row limit of `limit` if given, to the output path
+/// plus `suffix` on the fixture's in-memory store under a hostile session and two threads. Reads
+/// the `file_count` files back in index order and returns the reported row count with each file's
+/// path and batches. Fails if the directory holds any other number of files.
 fn write_partitioned(
     formulation: &Formulation,
     dataset: FixtureDataset,
-    directory: &str,
+    suffix: &str,
     file_count: usize,
     limit: Option<usize>,
 ) -> (u64, Vec<(String, Vec<RecordBatch>)>) {
     let formulation = formulation.clone();
-    let directory = directory.to_string();
+    let suffix = suffix.to_string();
     let output_format = output_format(dataset.format);
     pipeline::run(
         move |_| async move {
-            let ctx = SessionContext::new_with_config(hostile_config(8));
-            dataset.fixture.register(&ctx);
-            let frame = formulation.plan(&ctx, &dataset.dataset).await?;
-            let frame = match limit {
-                Some(limit) => frame.limit(0, Some(limit))?,
-                None => frame,
+            let (ctx, ordered) = planned(&formulation, &dataset, hostile_config(8)).await?;
+            let ordered = match limit {
+                Some(limit) => ordered.limit(limit)?,
+                None => ordered,
             };
-            let schema = Arc::clone(frame.schema().inner());
-            let rows_written = output_format
-                .write(
-                    frame,
-                    &directory,
-                    Some(&ordering(&formulation, &dataset)),
-                    formulation.output_layout(),
-                )
-                .await?;
+            let schema = Arc::clone(ordered.frame.schema().inner());
+            let directory = format!("{}{suffix}", output_path(&ordered, &dataset));
+            let rows_written = output_format.write(ordered, &directory).await?;
 
             let store = dataset.fixture.store();
             let listed: Vec<Path> = store

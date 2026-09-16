@@ -1,5 +1,7 @@
 # Hold the merge tree with the sink's ordering requirement
 
+> Superseded in part by [issue #151](https://github.com/hail-is/datafusion-sandbox/issues/151). `Formulation::plan` returns an ordered frame rather than a plain frame, and the sink still belongs to the run. The rest of this ADR stands.
+
 The grouped-merge formulation of the reference combiner needs the physical plan
 `SortPreservingMergeExec(UnionExec(SortPreservingMergeExec(UnionExec(group 1 scans)), ...))`: one
 merge per sample group beneath a final merge of the groups, with no sort anywhere. Its plan builder

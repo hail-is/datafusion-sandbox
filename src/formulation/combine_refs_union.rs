@@ -1,5 +1,5 @@
-use crate::dataset::{Dataset, ScanShape};
-use crate::locus::LocusOrdering;
+use crate::dataset::Dataset;
+use crate::locus::{LocusOrdering, StoredOrdering};
 
 use datafusion::{error::Result, prelude::*};
 
@@ -12,10 +12,8 @@ pub fn required_ordering() -> LocusOrdering {
 ///
 /// Many `DataSourceExec`s feed a `UnionExec`, which feeds a
 /// `SortPreservingMergeExec` with one partition per input sample.
-pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
-    let query_ordering = dataset.query_ordering(&required_ordering())?;
-    dataset
-        .read(ctx, &ScanShape::Flat)
-        .await?
-        .sort(query_ordering.sort_expressions())
+pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<(DataFrame, StoredOrdering)> {
+    let ordering = dataset.query_ordering(&required_ordering())?;
+    let frame = dataset.read(ctx).await?.sort(ordering.sort_expressions())?;
+    Ok((frame, ordering))
 }

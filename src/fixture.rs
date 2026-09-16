@@ -55,7 +55,7 @@ mod memory_store;
 
 pub use memory_store::MemoryStore;
 
-use crate::format::{InputFormat, OutputFormat, OutputLayout};
+use crate::format::{InputFormat, OutputFormat};
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::pipeline::{self, PipelineOptions};
 use datafusion::{
@@ -333,9 +333,7 @@ fn build_in_memory_fixture_without_alleles(name: &'static str) -> Arc<DatasetFix
             async move {
                 let path = format!("{root}/s=sample-a/a.vortex");
                 let df = ctx.read_batch(batch)?;
-                OutputFormat::VORTEX
-                    .write(df, &path, None, OutputLayout::SingleFile)
-                    .await?;
+                OutputFormat::VORTEX.write_unordered(df, &path).await?;
                 Ok(())
             }
         },
@@ -434,11 +432,7 @@ fn build_sample_tables(
                         output_format.extension()
                     );
                     let df = ctx.read_batch(sample_batch(rows, representation))?;
-                    writes.push(async move {
-                        output_format
-                            .write(df, &path, None, OutputLayout::SingleFile)
-                            .await
-                    });
+                    writes.push(async move { output_format.write_unordered(df, &path).await });
                 }
             }
             join_all(writes)

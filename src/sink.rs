@@ -11,7 +11,7 @@
 //! whose partitions are the locus intervals writes one file per interval from one plan. See
 //! [ADR 0015](../docs/adr/0015-write-one-file-per-partition-through-a-partitioned-sink.md).
 
-use crate::locus::StoredOrdering;
+use crate::{locus::StoredOrdering, ordered_frame::OrderedFrame};
 
 use datafusion::{
     arrow::{
@@ -101,13 +101,12 @@ pub fn run_into(
 /// # Errors
 ///
 /// Returns an error if the sink plan cannot be built.
-pub fn collect(
-    df: DataFrame,
-    ordering: &StoredOrdering,
-) -> Result<(DataFrame, Arc<CollectingSink>)> {
-    let sink = Arc::new(CollectingSink::new(Arc::clone(df.schema().inner())));
+pub fn collect(ordered: OrderedFrame) -> Result<(DataFrame, Arc<CollectingSink>)> {
+    let sink = Arc::new(CollectingSink::new(Arc::clone(
+        ordered.frame.schema().inner(),
+    )));
     let target = Arc::new(DataSinkTarget(sink.clone()));
-    let frame = run_into(df, "collect", Some(ordering), target)?;
+    let frame = run_into(ordered.frame, "collect", Some(&ordered.ordering), target)?;
     Ok((frame, sink))
 }
 
@@ -116,11 +115,16 @@ pub fn collect(
 /// # Errors
 ///
 /// Returns an error if the sink plan cannot be built.
-pub fn drain(df: DataFrame, ordering: &StoredOrdering) -> Result<DataFrame> {
+pub fn drain(ordered: OrderedFrame) -> Result<DataFrame> {
     let sink = Arc::new(DrainingSink {
-        schema: Arc::clone(df.schema().inner()),
+        schema: Arc::clone(ordered.frame.schema().inner()),
     });
-    run_into(df, "drain", Some(ordering), Arc::new(DataSinkTarget(sink)))
+    run_into(
+        ordered.frame,
+        "drain",
+        Some(&ordered.ordering),
+        Arc::new(DataSinkTarget(sink)),
+    )
 }
 
 /// A sink that keeps the batches written to it.

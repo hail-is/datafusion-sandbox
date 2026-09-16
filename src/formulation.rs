@@ -5,10 +5,13 @@ mod combine_refs_grouped_merge;
 mod combine_refs_interval_merge;
 mod combine_refs_union;
 
+#[cfg(test)]
+mod tests;
+
 use crate::{
-    dataset::{Dataset, DatasetLayout},
-    format::OutputLayout,
-    locus::SplitPoints,
+    dataset::Dataset,
+    locus::{LocusOrdering, SplitPoints},
+    ordered_frame::{OrderedFrame, OutputLayout},
 };
 
 use datafusion::{error::Result, prelude::*};
@@ -42,14 +45,13 @@ impl fmt::Display for Formulation {
 
 impl Formulation {
     #[must_use]
-    pub fn required_layout(&self) -> DatasetLayout {
-        let locus_ordering = match self {
+    pub fn required_ordering(&self) -> LocusOrdering {
+        match self {
             Self::CombineAllelesUnion => combine_alleles::required_ordering(),
             Self::CombineRefsUnion
             | Self::CombineRefsGroupedMerge { .. }
             | Self::CombineRefsIntervalMerge { .. } => combine_refs_union::required_ordering(),
-        };
-        DatasetLayout { locus_ordering }
+        }
     }
 
     /// How a write of this formulation's rows lays them out: one file, or one file per partition
@@ -70,8 +72,8 @@ impl Formulation {
     ///
     /// Returns an error if the dataset cannot satisfy the formulation's required ordering or if
     /// `DataFusion` cannot build the plan.
-    pub async fn plan(&self, ctx: &SessionContext, dataset: &Dataset) -> Result<DataFrame> {
-        match self {
+    pub async fn plan(&self, ctx: &SessionContext, dataset: &Dataset) -> Result<OrderedFrame> {
+        let (frame, ordering) = match self {
             Self::CombineAllelesUnion => combine_alleles::plan(ctx, dataset).await,
             Self::CombineRefsUnion => combine_refs_union::plan(ctx, dataset).await,
             Self::CombineRefsGroupedMerge { groups } => {
@@ -80,6 +82,11 @@ impl Formulation {
             Self::CombineRefsIntervalMerge { split_points } => {
                 combine_refs_interval_merge::plan(ctx, dataset, split_points).await
             }
-        }
+        }?;
+        Ok(OrderedFrame {
+            frame,
+            ordering,
+            layout: self.output_layout(),
+        })
     }
 }

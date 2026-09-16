@@ -1,4 +1,4 @@
-//! Stored datasets and their shared layouts.
+//! Stored datasets and their declared locus orderings.
 
 use crate::{
     format::InputFormat,
@@ -18,54 +18,14 @@ use datafusion::{
     prelude::*,
 };
 use futures_util::{StreamExt, TryStreamExt};
-use std::{collections::BTreeSet, num::NonZeroUsize, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc};
 
-/// How [`Dataset::read`] arranges the per-sample scans beneath the frame it returns.
-///
-/// The formulation chooses the shape; the dataset knows nothing about why.
+/// A directory of per-sample tables, its format, declared locus ordering, and sample set.
 #[derive(Clone, Debug)]
-pub enum ScanShape {
-    /// The union of every sample's scan, or the one scan of a single sample.
-    Flat,
-    /// The sample set split into `groups` sample groups by [`Dataset::sample_groups`], each
-    /// group's scans unioned and sorted by `ordering`, and the groups unioned. A group of one
-    /// sample is its scan, and one group is the flat shape.
-    SampleGroups {
-        groups: NonZeroUsize,
-        ordering: StoredOrdering,
-    },
-}
-
-/// How a dataset's rows and files are arranged on disk.
-#[derive(Clone, Debug)]
-pub struct DatasetLayout {
-    pub locus_ordering: LocusOrdering,
-}
-
-impl DatasetLayout {
-    fn stored_ordering(
-        &self,
-        representation: LocusRepresentation,
-        schema: &SchemaRef,
-    ) -> Result<StoredOrdering> {
-        let stored_ordering = self.locus_ordering.expand(representation);
-        for column in stored_ordering.column_names() {
-            if schema.field_with_name(column).is_err() {
-                return Err(DataFusionError::Plan(format!(
-                    "locus ordering column '{column}' is missing from the dataset schema"
-                )));
-            }
-        }
-        Ok(stored_ordering)
-    }
-}
-
-/// A directory of per-sample tables, its format, layout, and discovered sample set.
-#[derive(Debug)]
 pub struct Dataset {
     table_path: ListingTableUrl,
     input_format: InputFormat,
-    layout: DatasetLayout,
+    locus_ordering: LocusOrdering,
     schema: SchemaRef,
     sample_set: Vec<String>,
     locus_representation: LocusRepresentation,
@@ -81,7 +41,7 @@ impl Dataset {
     pub fn new(
         table_path: ListingTableUrl,
         input_format: InputFormat,
-        layout: DatasetLayout,
+        locus_ordering: LocusOrdering,
         schema: SchemaRef,
         sample_set: Vec<String>,
     ) -> Result<Self> {
@@ -93,16 +53,16 @@ impl Dataset {
             )));
         }
         let locus_representation = LocusRepresentation::detect(&schema)?;
-        layout.stored_ordering(locus_representation, &schema)?;
-
-        Ok(Self {
+        let dataset = Self {
             table_path,
             input_format,
-            layout,
+            locus_ordering,
             schema,
             sample_set,
             locus_representation,
-        })
+        };
+        dataset.stored_ordering()?;
+        Ok(dataset)
     }
 
     /// Discovers the sample directories immediately below `table_path` with one
@@ -116,7 +76,7 @@ impl Dataset {
         ctx: &SessionContext,
         table_path: ListingTableUrl,
         input_format: InputFormat,
-        layout: DatasetLayout,
+        locus_ordering: LocusOrdering,
         schema: Option<SchemaRef>,
     ) -> Result<Self> {
         let table_path = normalize_table_path(table_path)?;
@@ -163,7 +123,7 @@ impl Dataset {
             };
             format.infer_schema(&state, &store, &[input_file]).await?
         };
-        Self::new(table_path, input_format, layout, schema, sample_set)
+        Self::new(table_path, input_format, locus_ordering, schema, sample_set)
     }
 
     #[must_use]
@@ -182,7 +142,7 @@ impl Dataset {
         self.locus_representation
     }
 
-    /// Expands the required query ordering after checking it against the layout.
+    /// Expands the required query ordering after checking it against the dataset's locus ordering.
     ///
     /// # Errors
     ///
@@ -192,61 +152,19 @@ impl Dataset {
         Ok(required.expand(self.locus_representation))
     }
 
-    /// Splits the sample set into at most `groups` sample groups: contiguous slices of the
-    /// sorted sample set whose sizes differ by at most one, larger groups first. A group count
-    /// above the sample count clamps to one sample per group.
-    #[must_use]
-    pub fn sample_groups(&self, groups: NonZeroUsize) -> Vec<&[String]> {
-        // A nonempty sample set keeps the clamped count nonzero, so the divisions cannot fail.
-        let groups = groups.get().min(self.sample_set.len());
-        let quotient = self.sample_set.len().checked_div(groups).unwrap_or(0);
-        let remainder = self.sample_set.len().checked_rem(groups).unwrap_or(0);
-        let mut rest = self.sample_set.as_slice();
-        (0..groups)
-            .map(|index| {
-                let size = quotient.saturating_add(usize::from(index < remainder));
-                let (group, tail) = rest.split_at(size);
-                rest = tail;
-                group
-            })
-            .collect()
-    }
-
-    /// Reads the dataset's whole sample set into one frame arranged as `shape`.
+    /// Reads the dataset's whole sample set into one flat frame: the union of its per-sample
+    /// scans, or the one scan of a single-sample dataset.
     ///
     /// # Errors
     ///
     /// Returns an error if a sample cannot be read or the sample plans cannot be combined.
-    pub async fn read(&self, ctx: &SessionContext, shape: &ScanShape) -> Result<DataFrame> {
-        let (sample_groups, ordering) = match shape {
-            ScanShape::Flat => return self.read_sample_group(ctx, &self.sample_set).await,
-            ScanShape::SampleGroups { groups, ordering } => (self.sample_groups(*groups), ordering),
-        };
-        if sample_groups.len() == 1 {
-            return self.read_sample_group(ctx, &self.sample_set).await;
-        }
-        let mut plans = Vec::with_capacity(sample_groups.len());
-        for group in sample_groups {
-            let frame = self.read_sample_group(ctx, group).await?;
-            let frame = if group.len() > 1 {
-                frame.sort(ordering.sort_expressions())?
-            } else {
-                frame
-            };
-            plans.push(frame.into_unoptimized_plan());
-        }
-        union_plans(ctx, plans)
-    }
-
-    /// Reads a nonempty group of samples into one frame: the union of their scans, or the one
-    /// scan of a single sample.
-    async fn read_sample_group(&self, ctx: &SessionContext, group: &[String]) -> Result<DataFrame> {
-        let mut plans = Vec::with_capacity(group.len());
-        for sample in group {
+    pub async fn read(&self, ctx: &SessionContext) -> Result<DataFrame> {
+        let mut plans = Vec::with_capacity(self.sample_set.len());
+        for sample in &self.sample_set {
             let frame = self.read_sample(ctx, sample).await?;
             plans.push(frame.into_unoptimized_plan());
         }
-        union_plans(ctx, plans)
+        union_or_single(ctx, plans)
     }
 
     /// Reads one sample directory as a sorted table and attaches its sample id.
@@ -268,9 +186,7 @@ impl Dataset {
             format,
             files,
             Arc::clone(&self.schema),
-            self.layout
-                .stored_ordering(self.locus_representation, &self.schema)?
-                .sort_expressions(),
+            self.stored_ordering()?.sort_expressions(),
             Some(AttachedScalar {
                 field: Arc::new(Field::new("s", DataType::Utf8, false)),
                 value: ScalarValue::Utf8(Some(sample.to_string())),
@@ -279,15 +195,27 @@ impl Dataset {
         ctx.read_table(Arc::new(table))
     }
 
+    fn stored_ordering(&self) -> Result<StoredOrdering> {
+        let stored_ordering = self.locus_ordering.expand(self.locus_representation);
+        for column in stored_ordering.column_names() {
+            if self.schema.field_with_name(column).is_err() {
+                return Err(DataFusionError::Plan(format!(
+                    "locus ordering column '{column}' is missing from the dataset schema"
+                )));
+            }
+        }
+        Ok(stored_ordering)
+    }
+
     /// Checks that the dataset's locus ordering starts with the required ordering.
     fn check_ordering(&self, required: &LocusOrdering) -> Result<()> {
-        if required.is_prefix_of(&self.layout.locus_ordering) {
+        if required.is_prefix_of(&self.locus_ordering) {
             return Ok(());
         }
 
         Err(DataFusionError::Plan(format!(
             "dataset locus ordering {:?} does not satisfy required ordering {:?}",
-            self.layout.locus_ordering, required
+            self.locus_ordering, required
         )))
     }
 
@@ -297,7 +225,7 @@ impl Dataset {
     /// # Errors
     ///
     /// Returns an error if `requested_sample_set` is empty or contains an unknown sample.
-    pub fn restrict_to(mut self, requested_sample_set: &[String]) -> Result<Self> {
+    pub fn restrict_to(&self, requested_sample_set: &[String]) -> Result<Self> {
         if requested_sample_set.is_empty() {
             return Err(DataFusionError::Plan(
                 "requested sample set contains no samples".to_string(),
@@ -324,14 +252,20 @@ impl Dataset {
             .iter()
             .map(String::as_str)
             .collect::<BTreeSet<_>>();
-        self.sample_set
+        let mut restricted = self.clone();
+        restricted
+            .sample_set
             .retain(|sample| requested_sample_set.contains(sample.as_str()));
-        Ok(self)
+        Ok(restricted)
     }
 }
 
 /// The union of nonempty `plans`, or the one plan itself.
-fn union_plans(ctx: &SessionContext, mut plans: Vec<LogicalPlan>) -> Result<DataFrame> {
+///
+/// # Errors
+///
+/// Returns an error if `plans` is empty or `DataFusion` cannot construct the union.
+pub fn union_or_single(ctx: &SessionContext, mut plans: Vec<LogicalPlan>) -> Result<DataFrame> {
     let plan = if plans.len() == 1 {
         plans.pop().ok_or_else(|| {
             DataFusionError::Internal("a non-empty sample group produced no plans".to_string())

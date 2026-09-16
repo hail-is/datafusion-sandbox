@@ -1,5 +1,7 @@
 # Storage properties belong to datasets
 
+> Superseded in part by [issue #151](https://github.com/hail-is/datafusion-sandbox/issues/151). The `DatasetLayout` type is gone, and a dataset takes its locus ordering directly. The rest of this ADR stands.
+
 A dataset carries a `DatasetLayout` that declares its locus ordering and optional schema. `Dataset` owns reading because it has the path, input format, layout, and discovered sample set needed to list each sample's files and construct its sorted table. `OutputFormat` owns writing because it has the writer factory and format options. This keeps storage declarations out of formulations and prevents separate call sites from describing the same files differently.
 
 The split is between a type and an instance. A layout describes how one kind of dataset distributes rows across files, while a dataset identifies one stored instance and the samples found there. The input format stays on the dataset because it describes each file's encoding, not the arrangement of files. The sample set also stays on the dataset because it is discovered data rather than part of the representation.

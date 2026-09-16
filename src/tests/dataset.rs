@@ -6,8 +6,8 @@
 use crate::fixture::{self, block_on};
 
 use crate::{
-    dataset::{Dataset, DatasetLayout, ScanShape},
-    format::{InputFormat, OutputFormat, OutputLayout},
+    dataset::Dataset,
+    format::{InputFormat, OutputFormat},
     locus::{LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
 };
@@ -22,16 +22,12 @@ use datafusion::{
     datasource::{listing::ListingTableUrl, source::DataSourceExec},
     error::Result,
     execution::object_store::ObjectStoreUrl,
-    physical_plan::{
-        ExecutionPlan, ExecutionPlanProperties, displayable,
-        sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
-        union::UnionExec,
-    },
+    physical_plan::{ExecutionPlan, ExecutionPlanProperties, displayable, union::UnionExec},
     prelude::{SessionContext, col, lit},
 };
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
-use std::{num::NonZeroUsize, sync::Arc};
+use std::sync::Arc;
 
 #[test]
 fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
@@ -54,12 +50,12 @@ fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
                             &ctx,
                             fixture.table_path().clone(),
                             fixture.input_format(),
-                            allele_layout(),
+                            LocusOrdering::locus_then_alleles(),
                             None,
                         )
                         .await?
                         .restrict_to(std::slice::from_ref(&sample_id))?;
-                        let df = dataset.read(&ctx, &ScanShape::Flat).await?;
+                        let df = dataset.read(&ctx).await?;
                         let columns = match representation {
                             LocusRepresentation::ContigPosition => {
                                 vec!["contig", "position", "alleles", "s"]
@@ -141,13 +137,13 @@ fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
                     &ctx,
                     fixture.table_path().clone(),
                     fixture.input_format(),
-                    allele_layout(),
+                    LocusOrdering::locus_then_alleles(),
                     None,
                 )
                 .await
                 .unwrap();
                 let plan = dataset
-                    .read(&ctx, &ScanShape::Flat)
+                    .read(&ctx)
                     .await
                     .unwrap()
                     .create_physical_plan()
@@ -158,143 +154,6 @@ fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
             });
         }
     }
-}
-
-#[test]
-fn splits_the_sample_set_into_contiguous_count_balanced_sample_groups() {
-    let dataset = dataset_from_data(&["a", "b", "c", "d", "e"]);
-
-    assert_eq!(
-        dataset.sample_groups(groups(1)),
-        [&["a", "b", "c", "d", "e"][..]]
-    );
-    assert_eq!(
-        dataset.sample_groups(groups(2)),
-        [&["a", "b", "c"][..], &["d", "e"][..]]
-    );
-    assert_eq!(
-        dataset.sample_groups(groups(3)),
-        [&["a", "b"][..], &["c", "d"][..], &["e"][..]]
-    );
-    assert_eq!(
-        dataset.sample_groups(groups(8)),
-        [&["a"][..], &["b"][..], &["c"][..], &["d"][..], &["e"][..]]
-    );
-}
-
-/// Each sample group's scans are unioned and merged; the groups are unioned above that. The
-/// merge over a group is the only operator between its union and the union of groups, and no
-/// sort appears anywhere.
-#[test]
-fn reading_sample_groups_merges_each_group_beneath_a_union_of_groups() {
-    for format in [
-        fixture::FixtureFormat::Parquet,
-        fixture::FixtureFormat::Vortex,
-    ] {
-        for representation in [
-            LocusRepresentation::ContigPosition,
-            LocusRepresentation::Packed,
-        ] {
-            let fixture = fixture::dataset_fixture(format, representation);
-
-            block_on(async {
-                let ctx = SessionContext::new();
-                fixture.register(&ctx);
-                let dataset = Dataset::discover(
-                    &ctx,
-                    fixture.table_path().clone(),
-                    fixture.input_format(),
-                    allele_layout(),
-                    None,
-                )
-                .await
-                .unwrap();
-                let shape = ScanShape::SampleGroups {
-                    groups: groups(2),
-                    ordering: dataset.query_ordering(&LocusOrdering::locus()).unwrap(),
-                };
-                let plan = dataset
-                    .read(&ctx, &shape)
-                    .await
-                    .unwrap()
-                    .create_physical_plan()
-                    .await
-                    .unwrap();
-
-                let unions = nodes_of::<UnionExec>(&plan);
-                assert_eq!(unions.len(), 3, "{}", displayed(&plan));
-                let groups = unions[0].children();
-                assert_eq!(groups.len(), 2, "{}", displayed(&plan));
-                for group in groups {
-                    assert!(
-                        group.downcast_ref::<SortPreservingMergeExec>().is_some(),
-                        "{}",
-                        displayed(&plan)
-                    );
-                    assert_eq!(group.output_partitioning().partition_count(), 1);
-                    assert_unions_one_partition_per_sample(group, 2);
-                }
-                assert!(
-                    nodes_of::<SortExec>(&plan).is_empty(),
-                    "{}",
-                    displayed(&plan)
-                );
-            });
-        }
-    }
-}
-
-/// One group, or one sample per group, is the flat scan: nothing is merged beneath the union.
-#[test]
-fn reading_one_sample_per_group_or_one_group_is_the_flat_scan() {
-    let fixture = fixture::dataset_fixture(
-        fixture::FixtureFormat::Vortex,
-        LocusRepresentation::ContigPosition,
-    );
-
-    block_on(async {
-        let ctx = SessionContext::new();
-        fixture.register(&ctx);
-        let dataset = Dataset::discover(
-            &ctx,
-            fixture.table_path().clone(),
-            fixture.input_format(),
-            allele_layout(),
-            None,
-        )
-        .await
-        .unwrap();
-        let ordering = dataset.query_ordering(&LocusOrdering::locus()).unwrap();
-        for group_count in [1, fixture::SAMPLES.len(), 8] {
-            let shape = ScanShape::SampleGroups {
-                groups: groups(group_count),
-                ordering: ordering.clone(),
-            };
-            let plan = dataset
-                .read(&ctx, &shape)
-                .await
-                .unwrap()
-                .create_physical_plan()
-                .await
-                .unwrap();
-
-            assert_unions_one_partition_per_sample(&plan, fixture::SAMPLES.len());
-            assert!(
-                nodes_of::<SortPreservingMergeExec>(&plan).is_empty(),
-                "{group_count} groups:\n{}",
-                displayed(&plan)
-            );
-            assert!(
-                nodes_of::<SortExec>(&plan).is_empty(),
-                "{group_count} groups:\n{}",
-                displayed(&plan)
-            );
-        }
-    });
-}
-
-fn groups(count: usize) -> NonZeroUsize {
-    NonZeroUsize::new(count).unwrap()
 }
 
 /// Exactly one union in `plan`, with one single-partition input per sample.
@@ -332,7 +191,7 @@ fn filtering_the_attached_sample_column_composes_with_the_dataset_sample_set() {
                             &ctx,
                             fixture.table_path().clone(),
                             fixture.input_format(),
-                            allele_layout(),
+                            LocusOrdering::locus_then_alleles(),
                             None,
                         )
                         .await?
@@ -347,7 +206,7 @@ fn filtering_the_attached_sample_column_composes_with_the_dataset_sample_set() {
                             (fixture::SAMPLES[2], 0, 0),
                         ] {
                             let df = dataset
-                                .read(&ctx, &ScanShape::Flat)
+                                .read(&ctx)
                                 .await?
                                 .filter(col("s").eq(lit(sample)))?
                                 .select_columns(&["s"])?;
@@ -397,7 +256,7 @@ fn rejects_an_inferred_schema_missing_a_required_ordering_column() {
             &ctx,
             fixture.table_path().clone(),
             fixture.input_format(),
-            allele_layout(),
+            LocusOrdering::locus_then_alleles(),
             None,
         )
         .await
@@ -416,7 +275,7 @@ fn rejects_a_resolved_schema_missing_a_required_ordering_column() {
     let error = Dataset::new(
         ListingTableUrl::parse("memory:///samples").unwrap(),
         InputFormat::VORTEX,
-        allele_layout(),
+        LocusOrdering::locus_then_alleles(),
         contig_position_schema(false),
         vec!["sample-a".to_string()],
     )
@@ -451,15 +310,18 @@ fn infers_the_schema_from_one_input_file() {
                 for (name, batch) in [("a.vortex", int_batch), ("b.vortex", string_batch)] {
                     let path = format!("{root}/s=sample-a/{name}");
                     let df = ctx.read_batch(batch)?;
-                    OutputFormat::VORTEX
-                        .write(df, &path, None, OutputLayout::SingleFile)
-                        .await?;
+                    OutputFormat::VORTEX.write_unordered(df, &path).await?;
                 }
 
-                let dataset =
-                    Dataset::discover(&ctx, table_path, InputFormat::VORTEX, locus_layout(), None)
-                        .await
-                        .expect("incompatible schemas in later files must not be merged");
+                let dataset = Dataset::discover(
+                    &ctx,
+                    table_path,
+                    InputFormat::VORTEX,
+                    LocusOrdering::locus(),
+                    None,
+                )
+                .await
+                .expect("incompatible schemas in later files must not be merged");
 
                 dataset
                     .schema()
@@ -496,7 +358,7 @@ fn uses_a_pinned_schema_without_inference() {
             &ctx,
             ListingTableUrl::parse("memory:///samples").unwrap(),
             InputFormat::VORTEX,
-            locus_layout(),
+            LocusOrdering::locus(),
             Some(Arc::clone(&schema)),
         )
         .await
@@ -580,7 +442,7 @@ fn dataset_from_data(sample_set: &[&str]) -> Dataset {
     Dataset::new(
         ListingTableUrl::parse("memory:///samples").unwrap(),
         InputFormat::VORTEX,
-        allele_layout(),
+        LocusOrdering::locus_then_alleles(),
         contig_position_schema(true),
         sample_set.iter().map(ToString::to_string).collect(),
     )
@@ -608,7 +470,7 @@ async fn discover_in_memory_with_schema(sample_set: &[&str], schema: SchemaRef) 
         &ctx,
         ListingTableUrl::parse("memory:///samples")?,
         InputFormat::VORTEX,
-        locus_layout(),
+        LocusOrdering::locus(),
         Some(schema),
     )
     .await
@@ -623,18 +485,6 @@ fn contig_position_schema(include_alleles: bool) -> SchemaRef {
         fields.push(Field::new("alleles", DataType::Utf8, false));
     }
     Arc::new(Schema::new(fields))
-}
-
-fn locus_layout() -> DatasetLayout {
-    DatasetLayout {
-        locus_ordering: LocusOrdering::locus(),
-    }
-}
-
-fn allele_layout() -> DatasetLayout {
-    DatasetLayout {
-        locus_ordering: LocusOrdering::locus_then_alleles(),
-    }
 }
 
 fn displayed(plan: &Arc<dyn ExecutionPlan>) -> String {

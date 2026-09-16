@@ -11,9 +11,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use datafusion::error::{DataFusionError, Result};
 
 use datafusion_sandbox::combiner_run::{Action, CombinerRun, WriteTarget};
-use datafusion_sandbox::format::{InputFormat, OutputFormat, OutputLayout};
+use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::formulation::Formulation;
 use datafusion_sandbox::locus::SplitPoints;
+use datafusion_sandbox::ordered_frame::OutputLayout;
 use std::{num::NonZeroUsize, path::Path, thread::available_parallelism};
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
