@@ -274,15 +274,6 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
     } = args;
     let cli_action = CliAction::try_from(action)?;
     let input_format = formats.input_format.format();
-    let output_layout = formulation.output_layout();
-    if limit.is_some() && output_layout == OutputLayout::FilePerPartition {
-        // A limit above the union of intervals forces one partition, and so one file, which
-        // would silently undo the formulation's parallelism.
-        return Err(DataFusionError::Configuration(format!(
-            "--limit cannot be combined with the {formulation} formulation, which writes one file \
-             per locus interval"
-        )));
-    }
     let limit = cli_action.row_limit(limit);
     let write_target = |output_path: String| -> Result<WriteTarget> {
         let output_format = formats.output_format().format();
@@ -725,11 +716,11 @@ mod tests {
         }
     }
 
-    /// A limit above the union of intervals would collapse the write to one file. The twenty-row
-    /// default of `--show` is not a `--limit` and stays.
+    /// `--limit` is accepted with every formulation, a file-per-interval one included, and under
+    /// every action. No promise is made about the plan shape it leaves.
     #[test]
-    fn a_limit_is_rejected_with_interval_merge() {
-        for (action, limit) in [("--write", "out"), ("--show", "")] {
+    fn a_limit_is_accepted_with_interval_merge() {
+        for (action, action_arg) in [("--write", "out"), ("--show", "")] {
             let args = [
                 "--formulation",
                 "interval-merge",
@@ -738,9 +729,9 @@ mod tests {
                 "--limit",
                 "5",
                 action,
-                limit,
+                action_arg,
             ];
-            let error = resolve(
+            let run = resolve(
                 Cli::try_parse_from(
                     ["datafusion-sandbox", "combine-refs", "input"]
                         .into_iter()
@@ -748,30 +739,10 @@ mod tests {
                 )
                 .unwrap(),
             )
-            .err()
             .unwrap();
-            let diagnostic = error.to_string();
 
-            assert!(
-                diagnostic.contains("--limit"),
-                "{action} diagnostic:\n{diagnostic}"
-            );
-            assert!(
-                diagnostic.contains("interval-merge"),
-                "{action} diagnostic:\n{diagnostic}"
-            );
+            assert_eq!(run.row_limit, Some(5), "{action}");
         }
-
-        let run = resolve(parse_combiner([
-            "--formulation",
-            "interval-merge",
-            "--split-points",
-            "22:1000",
-            "--show",
-        ]))
-        .unwrap();
-        assert!(matches!(run.action, Action::Collect));
-        assert_eq!(run.row_limit, Some(20));
     }
 
     #[test]
@@ -846,6 +817,8 @@ mod tests {
         assert!(diagnostic.contains("vortex"), "diagnostic:\n{diagnostic}");
     }
 
+    /// The twenty-row default of `--show` is the row limit the CLI supplies when none is given.
+    /// It does not depend on the formulation.
     #[test]
     fn show_resolves_to_collecting_twenty_rows() {
         let run = resolve(parse_combiner(["--show"])).unwrap();
