@@ -1,13 +1,8 @@
 use super::combine_refs_union;
-use crate::dataset::Dataset;
-use crate::locus::SplitPoints;
+use crate::dataset::{Dataset, union_or_single};
+use crate::locus::{SplitPoints, StoredOrdering};
 
-use datafusion::{
-    error::{DataFusionError, Result},
-    logical_expr::{LogicalPlan, logical_plan::Union},
-    prelude::*,
-};
-use std::sync::Arc;
+use datafusion::{error::Result, prelude::*};
 
 /// Builds the interval-merge formulation: merge every sample within each locus interval.
 ///
@@ -28,8 +23,8 @@ pub async fn plan(
     ctx: &SessionContext,
     dataset: &Dataset,
     split_points: &SplitPoints,
-) -> Result<DataFrame> {
-    let union = combine_refs_union::plan(ctx, dataset).await?;
+) -> Result<(DataFrame, StoredOrdering)> {
+    let (union, ordering) = combine_refs_union::plan(ctx, dataset).await?;
     let representation = dataset.locus_representation();
     let mut branches = Vec::new();
     for interval in split_points.intervals() {
@@ -39,14 +34,5 @@ pub async fn plan(
         };
         branches.push(branch.into_unoptimized_plan());
     }
-    let plan = if branches.len() == 1 {
-        branches.pop().ok_or_else(|| {
-            DataFusionError::Internal("split points defined no locus interval".to_string())
-        })?
-    } else {
-        LogicalPlan::Union(Union::try_new(
-            branches.into_iter().map(Arc::new).collect(),
-        )?)
-    };
-    Ok(DataFrame::new(ctx.state(), plan))
+    Ok((union_or_single(ctx, branches)?, ordering))
 }

@@ -1,5 +1,6 @@
 use crate::{
     locus::StoredOrdering,
+    ordered_frame::{OrderedFrame, OutputLayout},
     sink::{self, PartitionedSinkExec, SinkTarget},
 };
 
@@ -30,10 +31,10 @@ use std::{collections::HashMap, fmt, sync::Arc};
 use vortex::{VortexSessionDefault, session::VortexSession};
 use vortex_datafusion::{VortexFormat, VortexFormatFactory};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct InputFormat(InputRepr);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum InputRepr {
     Parquet,
     Vortex,
@@ -51,17 +52,6 @@ impl InputFormat {
             InputRepr::Vortex => Arc::new(VortexFormat::new(VortexSession::default())),
         }
     }
-}
-
-/// How a write lays its rows out at the output path.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OutputLayout {
-    /// One file at the path, its rows in the sink's required order.
-    SingleFile,
-    /// A directory at the path holding one file per partition of the written frame, named by
-    /// the partition's zero-padded index with the format's extension, each file's rows in the
-    /// sink's required order. An empty partition writes an empty file.
-    FilePerPartition,
 }
 
 #[derive(Debug)]
@@ -116,38 +106,48 @@ impl OutputFormat {
         }
     }
 
-    /// Writes all rows in `df` to `path` in `layout`, returning the number of rows written.
-    /// `ordering` is the order the rows must arrive at the file sink in, which the sink requires
-    /// of its input; `None` places no requirement.
+    /// Writes an ordered frame to `path`, returning the number of rows written.
     ///
     /// # Errors
     ///
     /// Returns an error if the write plan cannot be built or executed, or if the execution result
     /// does not contain the expected row counts.
-    pub async fn write(
-        &self,
-        df: DataFrame,
-        path: &str,
-        ordering: Option<&StoredOrdering>,
-        layout: OutputLayout,
-    ) -> Result<u64> {
+    pub async fn write(&self, ordered: OrderedFrame, path: &str) -> Result<u64> {
+        let batches = self.sink_frame(ordered, path)?.collect().await?;
+        decode_row_count(&batches)
+    }
+
+    /// Writes one file of unordered rows to `path`, returning the number of rows written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write plan cannot be built or executed, or if the execution result
+    /// does not contain the expected row counts.
+    pub async fn write_unordered(&self, frame: DataFrame, path: &str) -> Result<u64> {
         let batches = self
-            .sink_frame(df, path, ordering, layout)?
+            .sink_frame_with(frame, path, None, OutputLayout::SingleFile)?
             .collect()
             .await?;
         decode_row_count(&batches)
     }
 
-    /// The frame that writes all rows in `df` to `path` in `layout` when executed: `df` under
-    /// this format's file sink, which requires `ordering` of its input, or under a partitioned
-    /// sink of this format's file sinks, one per partition of `df`, each requiring `ordering`.
+    /// The frame that writes `ordered` to `path` when executed.
     ///
     /// # Errors
     ///
     /// Returns an error if the write plan cannot be built.
-    pub fn sink_frame(
+    pub fn sink_frame(&self, ordered: OrderedFrame, path: &str) -> Result<DataFrame> {
+        let OrderedFrame {
+            frame,
+            ordering,
+            layout,
+        } = ordered;
+        self.sink_frame_with(frame, path, Some(&ordering), layout)
+    }
+
+    fn sink_frame_with(
         &self,
-        df: DataFrame,
+        frame: DataFrame,
         path: &str,
         ordering: Option<&StoredOrdering>,
         layout: OutputLayout,
@@ -162,7 +162,7 @@ impl OutputFormat {
                 directory: path.to_string(),
             }),
         };
-        sink::run_into(df, path, ordering, target)
+        sink::run_into(frame, path, ordering, target)
     }
 
     /// The path of the file holding partition `index` of `count` when this format writes a

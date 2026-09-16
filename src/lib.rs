@@ -9,6 +9,7 @@
 //! - [`formulation`] builds the alternative combiner plans under comparison.
 //! - [`locus`] describes the supported stored locus representations, split points, and locus
 //!   intervals.
+//! - [`ordered_frame`] carries a formulation's deferred rows, ordering, and output layout.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
 //! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of
 //!   every partition.
@@ -44,6 +45,7 @@ pub mod format;
 pub mod formulation;
 pub mod generated;
 pub mod locus;
+pub mod ordered_frame;
 pub mod pipeline;
 pub mod sink;
 pub mod sorted_table;

@@ -2,9 +2,9 @@
 
 use crate::{
     dataset::Dataset,
-    format::{InputFormat, OutputFormat, OutputLayout},
+    format::{InputFormat, OutputFormat},
     formulation::Formulation,
-    locus::StoredOrdering,
+    ordered_frame::OrderedFrame,
     pipeline::{self, PipelineOptions},
     sink,
 };
@@ -95,39 +95,39 @@ impl CombinerRun {
         pipeline::run(
             move |ctx| async move {
                 let table_path = ListingTableUrl::parse(input_path)?;
-                let layout = formulation.required_layout();
-                let required_ordering = layout.locus_ordering.clone();
-                let dataset =
-                    Dataset::discover(&ctx, table_path, input_format, layout, None).await?;
+                let dataset = Dataset::discover(
+                    &ctx,
+                    table_path,
+                    input_format,
+                    formulation.required_ordering(),
+                    None,
+                )
+                .await?;
                 let dataset = match sample_set {
                     Some(sample_set) => dataset.restrict_to(&sample_set)?,
                     None => dataset,
                 };
-                let ordering = dataset.query_ordering(&required_ordering)?;
-                let layout = formulation.output_layout();
-                let df = formulation.plan(&ctx, &dataset).await?;
-                let df = match row_limit {
-                    Some(limit) => df.limit(0, Some(limit))?,
-                    None => df,
+                let ordered = formulation.plan(&ctx, &dataset).await?;
+                let ordered = match row_limit {
+                    Some(limit) => ordered.limit(limit)?,
+                    None => ordered,
                 };
 
                 match action {
                     Action::Write(target) => Ok(Outcome::RowsWritten(
                         target
                             .output_format
-                            .write(df, &target.output_path, Some(&ordering), layout)
+                            .write(ordered, &target.output_path)
                             .await?,
                     )),
                     Action::Collect => {
-                        let (frame, sink) = sink::collect(df, &ordering)?;
+                        let (frame, sink) = sink::collect(ordered)?;
                         frame.collect().await?;
                         Ok(Outcome::Batches(sink.take()))
                     }
-                    Action::Explain { write } => {
-                        explain(sink_frame(df, write, &ordering, layout)?, false).await
-                    }
+                    Action::Explain { write } => explain(sink_frame(ordered, write)?, false).await,
                     Action::ExplainAnalyze { write } => {
-                        explain(sink_frame(df, write, &ordering, layout)?, true).await
+                        explain(sink_frame(ordered, write)?, true).await
                     }
                 }
             },
@@ -136,21 +136,14 @@ impl CombinerRun {
     }
 }
 
-/// The frame an explain renders: the write's file-sink frame in the formulation's `layout`, or a
-/// draining run without a write.
-fn sink_frame(
-    df: DataFrame,
-    write: Option<WriteTarget>,
-    ordering: &StoredOrdering,
-    layout: OutputLayout,
-) -> Result<DataFrame> {
+/// The frame an explain renders: the write's file-sink frame in the formulation's output layout,
+/// or a draining run without a write.
+fn sink_frame(ordered: OrderedFrame, write: Option<WriteTarget>) -> Result<DataFrame> {
     match write {
-        Some(target) => {
-            target
-                .output_format
-                .sink_frame(df, &target.output_path, Some(ordering), layout)
-        }
-        None => sink::drain(df, ordering),
+        Some(target) => target
+            .output_format
+            .sink_frame(ordered, &target.output_path),
+        None => sink::drain(ordered),
     }
 }
 

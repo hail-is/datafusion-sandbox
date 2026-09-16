@@ -49,9 +49,21 @@ and differ in plan shape; comparing them is the point of the repo.
 _Avoid_: variant, strategy, combiner (a formulation is not itself a combiner)
 
 **Plan builder**:
-The part of a formulation that constructs its DataFrame over a dataset and stops. It does no
+The part of a formulation that constructs its ordered frame over a dataset and stops. It does no
 runtime setup, writing, or execution.
 _Avoid_: query builder, factory
+
+**Ordered frame**:
+What a plan builder returns: the combiner's rows as deferred work, paired with the stored ordering
+a sink must require of them and the output layout a write gives them. A run sinks an ordered frame,
+never a bare frame.
+_Avoid_: frame (unqualified), sorted frame (a sort is one way to satisfy the ordering; a merge tree
+is another), combined table
+
+**Output layout**:
+How a write lays a formulation's rows out at the output path: one file, or one file per partition of
+its frame. The formulation chooses it; the action does not.
+_Avoid_: layout (unqualified), partitioning, write mode
 
 **Session**:
 The DataFusion configuration and state a plan is built against.
@@ -92,7 +104,7 @@ increasing in the locus ordering, define `j` locus intervals.
 _Avoid_: boundary, breakpoint, cut point, partition key
 
 **Locus interval**:
-A contiguous stretch of loci in the layout's locus ordering, half-open: it includes its start and
+A contiguous stretch of loci in the dataset's locus ordering, half-open: it includes its start and
 excludes its end. The locus intervals of a run partition the whole ordering, so every row falls in
 exactly one; a plan that merges by locus interval merges every sample within each interval and
 writes each interval's rows to its own file.
@@ -105,14 +117,10 @@ groups again afterwards.
 _Avoid_: batch, shard, horizontal partition
 
 **Dataset**:
-One stored instance of a dataset layout: its path, the format of each file, and the sample set
-found there. A dataset without a layout does not exist.
-_Avoid_: input, table (a dataset holds many per-sample tables), corpus
-
-**Dataset layout**:
-How the rows of datasets of one kind are arranged across files: their locus ordering. Separate
-from how each file is encoded, which is the format.
-_Avoid_: format (the encoding of one file), listing options, storage config
+One stored collection of per-sample tables under a declared locus ordering, identified by its path,
+the format of each file, and the sample set found there. A dataset without a declared locus
+ordering does not exist.
+_Avoid_: input, table (a dataset holds many per-sample tables), corpus, dataset layout (retired)
 
 **Generated table**:
 A table whose rows a generator produces on demand rather than reading them from storage. It has no
@@ -192,9 +200,9 @@ _Avoid_: ref blocks, non-variant data
 
 **Format**:
 The encoding of one file, together with how to read or write it, its extension, and the compression
-modes it accepts. It does not describe how a dataset distributes rows across files; that belongs to
-the dataset layout.
-_Avoid_: dataset layout, codec, encoding
+modes it accepts. It does not describe how a dataset arranges rows across files; that is the
+dataset's locus ordering and its output layout.
+_Avoid_: locus ordering, output layout, codec, encoding
 
 ### Benchmark settings
 

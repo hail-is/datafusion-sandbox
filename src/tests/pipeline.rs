@@ -3,7 +3,7 @@
     reason = "the cast supplies the error branch's otherwise unconstrained result type"
 )]
 
-use crate::format::{OutputFormat, OutputLayout};
+use crate::format::OutputFormat;
 use crate::generated::make_range_table;
 use crate::pipeline::{self, PipelineOptions};
 use datafusion::arrow::util::pretty::pretty_format_batches;
@@ -63,9 +63,7 @@ fn runs_a_pipeline_that_writes_output() {
     let rows_written = pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            OutputFormat::VORTEX
-                .write(df, &output_path, None, OutputLayout::SingleFile)
-                .await
+            OutputFormat::VORTEX.write_unordered(df, &output_path).await
         },
         PipelineOptions::default(),
     )
@@ -86,7 +84,7 @@ fn runs_a_pipeline_that_writes_parquet_output() {
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
             OutputFormat::PARQUET
-                .write(df, &output_path, None, OutputLayout::SingleFile)
+                .write_unordered(df, &output_path)
                 .await
         },
         PipelineOptions::default(),
@@ -123,9 +121,7 @@ fn surfaces_errors_from_plans_that_fail_at_execution() {
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?
                 .select(vec![(lit(1) / (col("idx") - lit(1))).alias("boom")])?;
-            OutputFormat::VORTEX
-                .write(df, &output_path, None, OutputLayout::SingleFile)
-                .await
+            OutputFormat::VORTEX.write_unordered(df, &output_path).await
         },
         PipelineOptions::default(),
     )
@@ -190,9 +186,7 @@ fn runs_with_one_thread() {
     pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            OutputFormat::VORTEX
-                .write(df, &output_path, None, OutputLayout::SingleFile)
-                .await
+            OutputFormat::VORTEX.write_unordered(df, &output_path).await
         },
         PipelineOptions {
             threads: 1,

@@ -174,7 +174,7 @@ impl fmt::Display for LocusRepresentation {
 
 /// A locus named by its contig ordinal and position, as a caller writes it: `contig:position`.
 ///
-/// Orders by contig, then position, which is the layout's locus ordering under both
+/// Orders by contig, then position, which is the dataset's locus ordering under both
 /// representations. The packed representation stores it as `ordinal << 32 | position`; the
 /// contig-position representation names the contig `chr{ordinal}`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]

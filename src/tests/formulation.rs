@@ -25,13 +25,16 @@ mod interval_merge;
 use crate::fixture;
 
 use crate::{
-    dataset::{Dataset, DatasetLayout},
-    format::{OutputFormat, OutputLayout},
+    dataset::Dataset,
+    format::OutputFormat,
     formulation::Formulation,
     locus::{LocusOrdering, LocusRepresentation, StoredOrdering},
-    pipeline, sink,
+    ordered_frame::{OrderedFrame, OutputLayout},
+    pipeline::{self, PipelineOptions},
+    sink,
 };
 use datafusion::{
+    arrow::record_batch::RecordBatch,
     common::DataFusionError,
     datasource::{sink::DataSinkExec, source::DataSourceExec},
     error::Result,
@@ -69,12 +72,10 @@ const REPRESENTATIONS: [LocusRepresentation; 2] = [
 
 #[test]
 fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
-    let dataset = dataset_with_layout(
+    let dataset = dataset_with_ordering(
         FixtureFormat::Vortex,
         LocusRepresentation::ContigPosition,
-        DatasetLayout {
-            locus_ordering: LocusOrdering::locus(),
-        },
+        LocusOrdering::locus(),
     );
     let ctx = SessionContext::new();
     dataset.fixture.register(&ctx);
@@ -107,7 +108,8 @@ fn formulations_keep_their_plan_shape_through_the_file_sink() {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
             for formulation in &formulations() {
-                let plan = file_sink_plan(formulation, &dataset, None);
+                let (plan, ordering) =
+                    file_sink_plan(formulation, &dataset, hostile_config(8), None);
                 assert_merge_tree(&plan, &expected_groups(formulation, SAMPLES.len()));
                 let sink_exec = plan.downcast_ref::<DataSinkExec>().unwrap_or_else(|| {
                     panic!(
@@ -128,7 +130,7 @@ fn formulations_keep_their_plan_shape_through_the_file_sink() {
                     .collect();
                 assert_eq!(
                     required,
-                    ordering(formulation, &dataset).column_names(),
+                    ordering.column_names(),
                     "{format:?} {representation:?} {formulation:?}"
                 );
             }
@@ -247,17 +249,17 @@ struct FixtureDataset {
 }
 
 fn dataset(format: FixtureFormat, representation: LocusRepresentation) -> FixtureDataset {
-    dataset_with_layout(
+    dataset_with_ordering(
         format,
         representation,
-        Formulation::CombineAllelesUnion.required_layout(),
+        Formulation::CombineAllelesUnion.required_ordering(),
     )
 }
 
-fn dataset_with_layout(
+fn dataset_with_ordering(
     format: FixtureFormat,
     representation: LocusRepresentation,
-    layout: DatasetLayout,
+    ordering: LocusOrdering,
 ) -> FixtureDataset {
     let fixture = fixture::dataset_fixture(format, representation);
     let ctx = SessionContext::new();
@@ -266,7 +268,7 @@ fn dataset_with_layout(
         &ctx,
         fixture.table_path().clone(),
         fixture.input_format(),
-        layout,
+        ordering,
         None,
     ))
     .unwrap();
@@ -281,7 +283,7 @@ fn dataset_with_layout(
 /// The sorted table must keep one partition per sample even when the optimizer
 /// is allowed to split files of any size.
 fn physical_plan(formulation: &Formulation, dataset: &FixtureDataset) -> Arc<dyn ExecutionPlan> {
-    physical_plan_with_target(formulation, dataset, 8)
+    drained_plan(formulation, dataset, hostile_config(8), None)
 }
 
 /// The shared session settings, plus permission to split a file scan of any size across
@@ -297,20 +299,12 @@ fn physical_plan_with_target(
     dataset: &FixtureDataset,
     target_partitions: usize,
 ) -> Arc<dyn ExecutionPlan> {
-    block_on(async {
-        let ctx = SessionContext::new_with_config(hostile_config(target_partitions));
-        dataset.fixture.register(&ctx);
-        let frame = formulation.plan(&ctx, &dataset.dataset).await.unwrap();
-        sink_plan(formulation, frame, dataset).await.unwrap()
-    })
-}
-
-/// The ordering a run's sink requires of `formulation` over `dataset`.
-fn ordering(formulation: &Formulation, dataset: &FixtureDataset) -> StoredOrdering {
-    dataset
-        .dataset
-        .query_ordering(&formulation.required_layout().locus_ordering)
-        .unwrap()
+    drained_plan(
+        formulation,
+        dataset,
+        hostile_config(target_partitions),
+        None,
+    )
 }
 
 /// The fixture format as an output format, so a plan writes what it read.
@@ -323,9 +317,9 @@ const fn output_format(format: FixtureFormat) -> OutputFormat {
 
 /// The in-memory path a write of `formulation` over `dataset` goes to: a file named with the
 /// output format's extension, or a directory for a formulation writing one file per partition.
-fn output_path(formulation: &Formulation, dataset: &FixtureDataset) -> String {
+fn output_path(ordered: &OrderedFrame, dataset: &FixtureDataset) -> String {
     let root = dataset.fixture.table_path().as_str().trim_end_matches('/');
-    match formulation.output_layout() {
+    match ordered.layout {
         OutputLayout::SingleFile => format!(
             "{root}/combined.{}",
             output_format(dataset.format).extension()
@@ -334,56 +328,101 @@ fn output_path(formulation: &Formulation, dataset: &FixtureDataset) -> String {
     }
 }
 
-/// The physical plan of `formulation` over `dataset` under the hostile session, with a row limit
-/// of `limit` if given, run into the fixture format's file sink in the formulation's output
-/// layout at an in-memory path. Planned, not executed.
+/// The physical plan of `formulation` over `dataset` under `config`, with a row limit of `limit`
+/// if given, run into the fixture format's file sink at an in-memory path. Planned, not executed.
+/// Returns the ordering carried by the frame so the sink requirement can be checked against it.
 fn file_sink_plan(
     formulation: &Formulation,
     dataset: &FixtureDataset,
-    limit: Option<usize>,
-) -> Arc<dyn ExecutionPlan> {
-    file_sink_plan_with_config(formulation, dataset, limit, hostile_config(8))
-}
-
-/// [`file_sink_plan`] under the session settings `config`.
-fn file_sink_plan_with_config(
-    formulation: &Formulation,
-    dataset: &FixtureDataset,
-    limit: Option<usize>,
     config: SessionConfig,
-) -> Arc<dyn ExecutionPlan> {
+    limit: Option<usize>,
+) -> (Arc<dyn ExecutionPlan>, StoredOrdering) {
     block_on(async {
-        let ctx = SessionContext::new_with_config(config);
-        dataset.fixture.register(&ctx);
-        let frame = formulation.plan(&ctx, &dataset.dataset).await.unwrap();
-        let frame = match limit {
-            Some(limit) => frame.limit(0, Some(limit)).unwrap(),
-            None => frame,
+        let (_, ordered) = planned(formulation, dataset, config).await.unwrap();
+        let ordered = match limit {
+            Some(limit) => ordered.limit(limit).unwrap(),
+            None => ordered,
         };
-        output_format(dataset.format)
-            .sink_frame(
-                frame,
-                &output_path(formulation, dataset),
-                Some(&ordering(formulation, dataset)),
-                formulation.output_layout(),
-            )
+        let ordering = ordered.ordering.clone();
+        let path = output_path(&ordered, dataset);
+        let plan = output_format(dataset.format)
+            .sink_frame(ordered, &path)
             .unwrap()
             .create_physical_plan()
             .await
-            .unwrap()
+            .unwrap();
+        (plan, ordering)
     })
 }
 
-/// The physical plan of `frame` run into a draining sink, which is the plan an action executes
-/// up to the sink's name.
-async fn sink_plan(
+/// The physical plan of `formulation` over `dataset` under `config`, run into a draining sink.
+fn drained_plan(
     formulation: &Formulation,
-    frame: DataFrame,
     dataset: &FixtureDataset,
-) -> Result<Arc<dyn ExecutionPlan>> {
-    sink::drain(frame, &ordering(formulation, dataset))?
-        .create_physical_plan()
-        .await
+    config: SessionConfig,
+    limit: Option<usize>,
+) -> Arc<dyn ExecutionPlan> {
+    block_on(async {
+        let (_, ordered) = planned(formulation, dataset, config).await.unwrap();
+        let ordered = match limit {
+            Some(limit) => ordered.limit(limit).unwrap(),
+            None => ordered,
+        };
+        sink_plan(ordered).await.unwrap()
+    })
+}
+
+/// Plans `formulation` over `dataset` under `config`, returning its session with the ordered frame.
+async fn planned(
+    formulation: &Formulation,
+    dataset: &FixtureDataset,
+    config: SessionConfig,
+) -> Result<(SessionContext, OrderedFrame)> {
+    let ctx = SessionContext::new_with_config(config);
+    dataset.fixture.register(&ctx);
+    let ordered = formulation.plan(&ctx, &dataset.dataset).await?;
+    Ok((ctx, ordered))
+}
+
+/// The physical plan of `ordered` run into a draining sink.
+async fn sink_plan(ordered: OrderedFrame) -> Result<Arc<dyn ExecutionPlan>> {
+    sink::drain(ordered)?.create_physical_plan().await
+}
+
+/// Runs `formulation` through the collecting sink after applying `adjust` only to its frame.
+fn collected_batches<Adjust>(
+    formulation: &Formulation,
+    dataset: FixtureDataset,
+    adjust: Adjust,
+) -> (Arc<dyn ExecutionPlan>, Vec<RecordBatch>)
+where
+    Adjust: FnOnce(DataFrame) -> Result<DataFrame> + Send + 'static,
+{
+    let formulation = formulation.clone();
+    pipeline::run(
+        move |_| async move {
+            let (ctx, ordered) = planned(&formulation, &dataset, hostile_config(8)).await?;
+            let OrderedFrame {
+                frame,
+                ordering,
+                layout,
+            } = ordered;
+            let ordered = OrderedFrame {
+                frame: adjust(frame)?,
+                ordering,
+                layout,
+            };
+            let (frame, collected) = sink::collect(ordered)?;
+            let plan = frame.create_physical_plan().await?;
+            datafusion::physical_plan::collect(Arc::clone(&plan), ctx.task_ctx()).await?;
+            Ok((plan, collected.take()))
+        },
+        PipelineOptions {
+            threads: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 
 /// A sort-preserving merge over one input partition per sample, with no
