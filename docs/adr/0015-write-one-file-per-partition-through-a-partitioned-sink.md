@@ -63,6 +63,12 @@ mechanism of [ADR 0014](0014-hold-the-merge-tree-with-the-sinks-ordering-require
   which would silently undo the parallelism; the library run keeps that defined one-file behavior.
   An empty interval writes an empty file, so the directory always holds one file per interval.
 
+  > The `--limit` rejection is superseded by
+  > [issue #156](https://github.com/hail-is/datafusion-sandbox/issues/156). A row limit exists so a
+  > person can inspect a bit of output, and no limited plan is measured, so `--limit` is accepted
+  > with every formulation and no promise is made about a limited plan's shape. A limited
+  > file-per-partition write puts one file in the output directory. The rest of this ADR stands.
+
 ## What the prototype confirmed
 
 A stub exec with these properties over the interval-merge frame, in both formats, both locus

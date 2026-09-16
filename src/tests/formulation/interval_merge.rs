@@ -174,8 +174,8 @@ fn a_single_partition_sink_merges_the_interval_merges() {
     }
 }
 
-/// The library keeps a defined behavior under a row limit, which the CLI rejects: the limit above
-/// the union of intervals forces one partition, so the partitioned sink writes one file.
+/// A row limit promises one file, not a plan shape: the limit above the union of intervals forces
+/// one partition, so the partitioned sink holds one partition sink and writes one file.
 #[test]
 fn a_row_limit_collapses_the_write_to_one_file() {
     for format in FORMATS {
@@ -287,7 +287,7 @@ fn writes_one_file_per_interval_holding_the_union_formulations_rows() {
                     split_points.replace([':', ','], "-")
                 );
                 let (rows_written, files) =
-                    write_partitioned(&formulation, dataset, &directory, intervals);
+                    write_partitioned(&formulation, dataset, &directory, intervals, None);
 
                 assert_eq!(
                     rows_written,
@@ -313,6 +313,42 @@ fn writes_one_file_per_interval_holding_the_union_formulations_rows() {
                 let mut union = union.clone();
                 union.sort();
                 assert_eq!(written, union, "{context}");
+            }
+        }
+    }
+}
+
+/// A limited write puts one file in the directory, holding the union formulation's first rows in
+/// locus order: the limit above the union of intervals forces one partition, and the partitioned
+/// sink writes a file per partition.
+#[test]
+fn a_limited_write_puts_one_file_in_the_directory() {
+    const LIMIT: usize = 5;
+    for format in FORMATS {
+        for representation in REPRESENTATIONS {
+            let context = format!("{format:?} {representation:?}");
+            let union = collected_rows(&Formulation::CombineRefsUnion, format, representation);
+            let formulation = interval_merge(THREE_INTERVALS);
+            let dataset = dataset(format, representation);
+            let directory = format!("{}-limited", output_path(&formulation, &dataset));
+            let (rows_written, files) =
+                write_partitioned(&formulation, dataset, &directory, 1, Some(LIMIT));
+
+            assert_eq!(rows_written, u64::try_from(LIMIT).unwrap(), "{context}");
+            let (path, batches) = files.first().unwrap();
+            let rows: Vec<Row> = batches
+                .iter()
+                .flat_map(|batch| rows(batch, representation))
+                .collect();
+            assert_eq!(rows.len(), LIMIT, "{context}: {path}: {rows:?}");
+            // A limit can cut between rows sharing a locus, among which sample order is
+            // unconstrained, so the rows are pinned by locus and by membership, not one by one.
+            assert_eq!(loci(&rows), loci(&union[..LIMIT]), "{context}: {path}");
+            for row in &rows {
+                assert!(
+                    union.contains(row),
+                    "{context}: {path}: {row:?} is not a combined row"
+                );
             }
         }
     }
@@ -457,14 +493,16 @@ fn collected_rows(
         .collect()
 }
 
-/// Writes `formulation` over `dataset` to `directory` on the fixture's in-memory store on a
-/// hostile session and two threads, and reads the `intervals` files back in index order. Returns
-/// the row count the write reported and each file's path with its batches.
+/// Writes `formulation` over `dataset`, under a row limit of `limit` if given, to `directory` on
+/// the fixture's in-memory store on a hostile session and two threads, and reads the `file_count`
+/// files back in index order. Returns the row count the write reported and each file's path with
+/// its batches. Fails if the directory holds any other number of files.
 fn write_partitioned(
     formulation: &Formulation,
     dataset: FixtureDataset,
     directory: &str,
-    intervals: usize,
+    file_count: usize,
+    limit: Option<usize>,
 ) -> (u64, Vec<(String, Vec<RecordBatch>)>) {
     let formulation = formulation.clone();
     let directory = directory.to_string();
@@ -474,6 +512,10 @@ fn write_partitioned(
             let ctx = SessionContext::new_with_config(hostile_config(8));
             dataset.fixture.register(&ctx);
             let frame = formulation.plan(&ctx, &dataset.dataset).await?;
+            let frame = match limit {
+                Some(limit) => frame.limit(0, Some(limit))?,
+                None => frame,
+            };
             let schema = Arc::clone(frame.schema().inner());
             let rows_written = output_format
                 .write(
@@ -492,9 +534,9 @@ fn write_partitioned(
                 .map_ok(|meta| meta.location)
                 .try_collect()
                 .await?;
-            let mut files = Vec::with_capacity(intervals);
-            for index in 0..intervals {
-                let path = output_format.partition_file_path(&directory, index, intervals);
+            let mut files = Vec::with_capacity(file_count);
+            for index in 0..file_count {
+                let path = output_format.partition_file_path(&directory, index, file_count);
                 let batches = fixture::read_file(
                     &ctx,
                     &path,
@@ -506,8 +548,8 @@ fn write_partitioned(
             }
             assert_eq!(
                 listed.len(),
-                intervals,
-                "expected one file per interval in {directory}, found {listed:?}"
+                file_count,
+                "expected {file_count} files in {directory}, found {listed:?}"
             );
             Ok((rows_written, files))
         },

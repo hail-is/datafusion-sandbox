@@ -71,7 +71,8 @@ and writes one file per interval, so the merges run on several cores and the wri
 `--split-points` names the loci that cut the ordering into intervals, as comma-separated
 `contig:position` with the contig ordinal, strictly increasing, and is required. Its `--write`
 path names a directory, which gets one file per interval named by index, `0.vortex`, `1.vortex`,
-and so on; a path with an extension is rejected, as is `--limit`. `--explain` and
+and so on; a path with an extension is rejected. A `--limit` makes no promise about the plan's
+shape, and a limited write of this formulation puts one file in the directory. `--explain` and
 `--explain-analyze` may be combined with `--write` to render or analyze the plan of the write
 itself.
 ```

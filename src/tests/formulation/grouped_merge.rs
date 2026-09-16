@@ -71,6 +71,10 @@ fn one_group_or_one_sample_per_group_plans_as_the_union_formulation() {
 
 /// A row limit above the union of groups becomes a fetch on every merge, the group merges
 /// included, and leaves the merge tree as it is, under the draining sink and the file sink alike.
+///
+/// This is a canary for how `DataFusion` treats a limit above a merge tree, not a requirement: no
+/// promise is made about the shape of a limited plan. If it fails, delete it rather than restore
+/// the shape.
 #[test]
 fn a_row_limit_becomes_a_fetch_on_every_merge() {
     const LIMIT: usize = 3;
