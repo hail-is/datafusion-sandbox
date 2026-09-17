@@ -2,13 +2,16 @@
 //! remains, and the reads planning and execution make.
 
 use super::{
-    column_statistics, displayed_file_paths, file, file_with_rows, file_with_statistics,
+    column_statistics, file, file_with_rows, file_with_statistics,
     metadata_collection::MeteredFormat, multi_column_table, sample_table, sample_table_with_format,
     scalar_table, table,
 };
 use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
-use crate::pipeline::{self, PipelineOptions};
+use crate::{
+    pipeline::{self, PipelineOptions},
+    tests::{plan_shape::PlanShape, support::hostile_config},
+};
 
 use async_trait::async_trait;
 use datafusion::{
@@ -17,7 +20,9 @@ use datafusion::{
     common::{ColumnStatistics, ScalarValue, stats::Precision},
     datasource::file_format::FileFormat,
     logical_expr::Expr,
-    physical_plan::{ExecutionPlan, ExecutionPlanProperties, Partitioning, displayable},
+    physical_plan::{
+        ExecutionPlan, ExecutionPlanProperties, Partitioning, repartition::RepartitionExec,
+    },
     prelude::{SessionContext, col, lit},
 };
 use futures::stream::BoxStream;
@@ -44,40 +49,18 @@ async fn filtered_plan(
     df.create_physical_plan().await.unwrap()
 }
 
-/// The shared session, plus permission to split or re-sort a scan wherever the table lets it.
-fn hostile_session(fixture: &DatasetFixture) -> SessionContext {
-    let mut config = pipeline::session_config().with_target_partitions(8);
-    config.options_mut().optimizer.repartition_file_min_size = 0;
-    let ctx = SessionContext::new_with_config(config);
-    fixture.register(&ctx);
-    ctx
-}
-
-/// The file stems of `paths`, in order.
-fn stems(paths: &[String]) -> Vec<&str> {
-    paths
-        .iter()
-        .map(|path| {
-            path.rsplit('/')
-                .next()
-                .and_then(|name| name.split_once('.'))
-                .map(|(stem, _)| stem)
-                .unwrap()
-        })
-        .collect()
-}
-
 #[test]
 fn a_contig_filter_prunes_files_constant_on_another_contig_in_both_formats() {
     for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
         let fixture = fixture::dataset_fixture(format, LocusRepresentation::ContigPosition);
         let paths = block_on(async {
-            let ctx = hostile_session(fixture);
+            let ctx = SessionContext::new_with_config(hostile_config(8));
+            fixture.register(&ctx);
             let plan = filtered_plan(&ctx, fixture, Some(col("contig").eq(lit("chr02")))).await;
-            displayed_file_paths(plan.as_ref())
+            PlanShape::of(&plan).files_in_only_scan()
         });
         // d and c are constant on chr01; b spans the contig boundary and a is constant on chr02.
-        assert_eq!(stems(&paths), ["b", "a"], "{format:?}");
+        assert_eq!(fixture::file_stems(&paths), ["b", "a"], "{format:?}");
     }
 }
 
@@ -93,7 +76,8 @@ fn a_locus_interval_filter_prunes_files_outside_it_and_keeps_the_scan_ordered() 
             let fixture = Arc::clone(fixture::dataset_fixture(format, representation));
             let (paths, batches) = pipeline::run(
                 move |_| async move {
-                    let ctx = hostile_session(&fixture);
+                    let ctx = SessionContext::new_with_config(hostile_config(8));
+                    fixture.register(&ctx);
                     let interval = LocusInterval::new(
                         Some(Locus::new(1, 3).unwrap()),
                         Some(Locus::new(1, 5).unwrap()),
@@ -105,10 +89,13 @@ fn a_locus_interval_filter_prunes_files_outside_it_and_keeps_the_scan_ordered() 
                         plan.output_partitioning(),
                         Partitioning::UnknownPartitioning(1)
                     ));
-                    let text = displayable(plan.as_ref()).indent(true).to_string();
-                    assert!(!text.contains("SortExec"), "{text}");
-                    assert!(!text.contains("RepartitionExec"), "{text}");
-                    let paths = displayed_file_paths(plan.as_ref());
+                    let shape = PlanShape::of(&plan);
+                    shape.assert_no_sorts();
+                    assert!(
+                        shape.nodes_of::<RepartitionExec>().is_empty(),
+                        "expected no repartition:\n{shape}"
+                    );
+                    let paths = shape.files_in_only_scan();
                     let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx()).await?;
                     Ok((paths, batches))
                 },
@@ -116,7 +103,11 @@ fn a_locus_interval_filter_prunes_files_outside_it_and_keeps_the_scan_ordered() 
             )
             .unwrap();
             // d ends at chr01:2 and a starts at chr02:2; c holds chr01:3 and b starts at chr01:4.
-            assert_eq!(stems(&paths), ["c", "b"], "{format:?} {representation:?}");
+            assert_eq!(
+                fixture::file_stems(&paths),
+                ["c", "b"],
+                "{format:?} {representation:?}"
+            );
             let loci: Vec<_> = batches
                 .iter()
                 .flat_map(|batch| fixture::decode_loci(batch, representation))
@@ -140,17 +131,18 @@ fn a_filter_excluding_every_file_returns_an_empty_result_with_the_projected_sche
         ));
         pipeline::run(
             move |_| async move {
-                let ctx = hostile_session(&fixture);
+                let ctx = SessionContext::new_with_config(hostile_config(8));
+                fixture.register(&ctx);
                 let table = sample_table(&ctx, &fixture, fixture::SAMPLES[0]).await;
                 let df = ctx
                     .read_table(Arc::new(table))?
                     .filter(col("contig").eq(lit("chr03")))?
                     .select(vec![col("position")])?;
                 let plan = df.create_physical_plan().await?;
-                let text = displayable(plan.as_ref()).indent(true).to_string();
-                assert!(text.contains("file_groups={1 group: [[]]}"), "{text}");
-                assert!(!text.contains("SortExec"), "{text}");
-                assert_eq!(plan.schema().fields().len(), 1, "{text}");
+                let shape = PlanShape::of(&plan);
+                assert_eq!(shape.files_in_only_scan(), Vec::<Path>::new(), "{shape}");
+                shape.assert_no_sorts();
+                assert_eq!(plan.schema().fields().len(), 1, "{shape}");
                 assert_eq!(plan.schema().field(0).name(), "position");
                 let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx()).await?;
                 assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
@@ -169,7 +161,8 @@ fn retained_files_keep_their_recovered_order_and_the_scan_statistics_describe_th
     let fixture =
         fixture::dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::ContigPosition);
     block_on(async {
-        let ctx = hostile_session(fixture);
+        let ctx = SessionContext::new_with_config(hostile_config(8));
+        fixture.register(&ctx);
         let unfiltered = filtered_plan(&ctx, fixture, None).await;
         let filtered = filtered_plan(
             &ctx,
@@ -181,10 +174,10 @@ fn retained_files_keep_their_recovered_order_and_the_scan_statistics_describe_th
             ),
         )
         .await;
-        let all = displayed_file_paths(unfiltered.as_ref());
-        let kept = displayed_file_paths(filtered.as_ref());
+        let all = PlanShape::of(&unfiltered).files_in_only_scan();
+        let kept = PlanShape::of(&filtered).files_in_only_scan();
         // d, c, and b all reach chr01:2 or later on chr01; a is constant on chr02.
-        assert_eq!(stems(&kept), ["d", "c", "b"]);
+        assert_eq!(fixture::file_stems(&kept), ["d", "c", "b"]);
         let mut expected = all.iter().filter(|path| kept.contains(path));
         assert!(kept.iter().all(|path| expected.next() == Some(path)));
         // The pushed contig filter makes contig a constant, so the filtered scan may state its
@@ -249,17 +242,28 @@ async fn absent_and_inexact_bounds_keep_a_file_and_exact_bounds_that_exclude_the
     for (filter, expected) in [
         (
             col("minor").gt(lit(10)),
-            vec!["inexact.parquet", "absent.parquet"],
+            vec![Path::from("inexact.parquet"), Path::from("absent.parquet")],
         ),
         (
             col("minor").lt_eq(lit(3)),
-            vec!["proven.parquet", "inexact.parquet", "absent.parquet"],
+            vec![
+                Path::from("proven.parquet"),
+                Path::from("inexact.parquet"),
+                Path::from("absent.parquet"),
+            ],
         ),
-        (col("major").gt_eq(lit(4)), vec!["absent.parquet"]),
+        (
+            col("major").gt_eq(lit(4)),
+            vec![Path::from("absent.parquet")],
+        ),
         // An expression the pruner cannot rewrite keeps every file.
         (
             (col("major") % lit(2)).eq(lit(0)),
-            vec!["proven.parquet", "inexact.parquet", "absent.parquet"],
+            vec![
+                Path::from("proven.parquet"),
+                Path::from("inexact.parquet"),
+                Path::from("absent.parquet"),
+            ],
         ),
     ] {
         let table = multi_column_table(&store, files());
@@ -267,7 +271,11 @@ async fn absent_and_inexact_bounds_keep_a_file_and_exact_bounds_that_exclude_the
             .scan(&ctx.state(), None, std::slice::from_ref(&filter), None)
             .await
             .unwrap();
-        assert_eq!(displayed_file_paths(plan.as_ref()), expected, "{filter}");
+        assert_eq!(
+            PlanShape::of(&plan).files_in_only_scan(),
+            expected,
+            "{filter}"
+        );
     }
 }
 
@@ -312,7 +320,10 @@ async fn a_filter_rescues_a_scan_by_removing_a_file_with_unusable_ordering_bound
         .scan(&ctx.state(), None, &[col("major").eq(lit(1))], None)
         .await
         .unwrap();
-    assert_eq!(displayed_file_paths(plan.as_ref()), ["usable.parquet"]);
+    assert_eq!(
+        PlanShape::of(&plan).files_in_only_scan(),
+        [Path::from("usable.parquet")]
+    );
 }
 
 /// A file with exactly zero rows is dropped even when its bounds satisfy the filter, so the
@@ -336,7 +347,10 @@ async fn zero_row_files_are_still_dropped_under_a_filter_their_bounds_satisfy() 
     .scan(&ctx.state(), None, &[col("position").gt(lit(0))], None)
     .await
     .unwrap();
-    assert_eq!(displayed_file_paths(plan.as_ref()), ["rows.parquet"]);
+    assert_eq!(
+        PlanShape::of(&plan).files_in_only_scan(),
+        [Path::from("rows.parquet")]
+    );
 }
 
 /// The attached scalar is folded into the pruning predicate, so a filter mixing it with a
@@ -356,15 +370,15 @@ async fn filters_mixing_the_attached_scalar_with_stored_columns_prune_by_the_sca
     for (filter, expected) in [
         (
             source_is("sample-1").and(col("position").gt(lit(15))),
-            vec!["later.parquet"],
+            vec![Path::from("later.parquet")],
         ),
         (
             source_is("sample-2").or(col("position").gt(lit(15))),
-            vec!["later.parquet"],
+            vec![Path::from("later.parquet")],
         ),
         (
             source_is("sample-1").or(col("position").gt(lit(15))),
-            vec!["earlier.parquet", "later.parquet"],
+            vec![Path::from("earlier.parquet"), Path::from("later.parquet")],
         ),
         (
             source_is("sample-2").and(col("position").gt(lit(15))),
@@ -377,14 +391,11 @@ async fn filters_mixing_the_attached_scalar_with_stored_columns_prune_by_the_sca
             .await
             .unwrap();
         assert!(plan.output_ordering().is_some(), "{filter}");
-        let text = displayable(plan.as_ref()).indent(true).to_string();
-        let paths = if expected.is_empty() {
-            assert!(text.contains("file_groups={1 group: [[]]}"), "{text}");
-            vec![]
-        } else {
-            displayed_file_paths(plan.as_ref())
-        };
-        assert_eq!(paths, expected, "{filter}");
+        assert_eq!(
+            PlanShape::of(&plan).files_in_only_scan(),
+            expected,
+            "{filter}"
+        );
     }
 }
 
@@ -397,10 +408,11 @@ fn an_unsupported_pruning_expression_keeps_every_file_and_filters_the_rows() {
     ));
     let (paths, loci) = pipeline::run(
         move |_| async move {
-            let ctx = hostile_session(&fixture);
+            let ctx = SessionContext::new_with_config(hostile_config(8));
+            fixture.register(&ctx);
             let plan =
                 filtered_plan(&ctx, &fixture, Some((col("position") % lit(2)).eq(lit(1)))).await;
-            let paths = displayed_file_paths(plan.as_ref());
+            let paths = PlanShape::of(&plan).files_in_only_scan();
             let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx()).await?;
             let loci: Vec<_> = batches
                 .iter()
@@ -411,7 +423,7 @@ fn an_unsupported_pruning_expression_keeps_every_file_and_filters_the_rows() {
         PipelineOptions::single_threaded(),
     )
     .unwrap();
-    assert_eq!(stems(&paths), ["d", "c", "b", "a"]);
+    assert_eq!(fixture::file_stems(&paths), ["d", "c", "b", "a"]);
     let expected = [
         Locus::new(1, 1).unwrap(),
         Locus::new(1, 3).unwrap(),
@@ -425,7 +437,7 @@ fn an_unsupported_pruning_expression_keeps_every_file_and_filters_the_rows() {
 #[derive(Debug)]
 struct RecordingStore {
     inner: Arc<dyn ObjectStore>,
-    reads: Mutex<Vec<String>>,
+    reads: Mutex<Vec<Path>>,
 }
 
 impl RecordingStore {
@@ -439,7 +451,10 @@ impl RecordingStore {
     /// The distinct file stems read so far, then forgets them.
     fn take_read_stems(&self) -> BTreeSet<String> {
         let reads = std::mem::take(&mut *self.reads.lock().unwrap());
-        stems(&reads).into_iter().map(ToString::to_string).collect()
+        fixture::file_stems(&reads)
+            .into_iter()
+            .map(ToString::to_string)
+            .collect()
     }
 }
 
@@ -473,7 +488,7 @@ impl ObjectStore for RecordingStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        self.reads.lock().unwrap().push(location.to_string());
+        self.reads.lock().unwrap().push(location.clone());
         self.inner.get_opts(location, options).await
     }
 
@@ -546,7 +561,8 @@ fn planning_reads_every_footer_once_and_execution_opens_only_retained_files() {
                 inferred.sort();
                 assert_eq!(inferred.len(), 4, "{format:?}: {inferred:?}");
                 assert_eq!(store.take_read_stems(), all, "{format:?}");
-                assert_eq!(stems(&displayed_file_paths(plan.as_ref())), ["b", "a"]);
+                let scanned = PlanShape::of(&plan).files_in_only_scan();
+                assert_eq!(fixture::file_stems(&scanned), ["b", "a"]);
 
                 let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx()).await?;
                 let opened = store.take_read_stems();
@@ -579,7 +595,8 @@ fn planning_reads_every_footer_once_and_execution_opens_only_retained_files() {
                     .filter(col("contig").eq(lit("chr02")))?
                     .create_physical_plan()
                     .await?;
-                assert_eq!(stems(&displayed_file_paths(plan.as_ref())), ["b", "a"]);
+                let scanned = PlanShape::of(&plan).files_in_only_scan();
+                assert_eq!(fixture::file_stems(&scanned), ["b", "a"]);
                 assert!(store.take_read_stems().is_empty(), "{format:?}");
                 assert_eq!(metered.started().len(), 4, "{format:?}");
                 Ok(())

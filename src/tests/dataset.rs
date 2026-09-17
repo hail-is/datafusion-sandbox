@@ -3,6 +3,7 @@
     reason = "the test controls the concrete array types erased behind ArrayRef"
 )]
 
+use super::plan_shape::PlanShape;
 use crate::fixture::{self, block_on};
 
 use crate::{
@@ -22,7 +23,6 @@ use datafusion::{
     datasource::{listing::ListingTableUrl, source::DataSourceExec},
     error::Result,
     execution::object_store::ObjectStoreUrl,
-    physical_plan::{ExecutionPlan, ExecutionPlanProperties, displayable, union::UnionExec},
     prelude::{SessionContext, col, lit},
 };
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
@@ -136,25 +136,11 @@ fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
                     .await
                     .unwrap();
 
-                assert_unions_one_partition_per_sample(&plan, fixture::SAMPLES.len());
+                PlanShape::of(&plan)
+                    .assert_one_ordered_partition_per_sample(fixture::SAMPLES.len());
             });
         }
     }
-}
-
-/// Exactly one union in `plan`, with one single-partition input per sample.
-fn assert_unions_one_partition_per_sample(plan: &Arc<dyn ExecutionPlan>, n_samples: usize) {
-    let unions = nodes_of::<UnionExec>(plan);
-    assert_eq!(unions.len(), 1, "{}", displayed(plan));
-    assert_eq!(unions[0].children().len(), n_samples, "{}", displayed(plan));
-    assert!(
-        unions[0]
-            .children()
-            .iter()
-            .all(|input| input.output_partitioning().partition_count() == 1),
-        "{}",
-        displayed(plan)
-    );
 }
 
 #[test]
@@ -211,11 +197,11 @@ fn filtering_the_attached_sample_column_composes_with_the_dataset_sample_set() {
                         }
 
                         for (sample, expected_scans, plan) in plans {
+                            let shape = PlanShape::of(&plan);
                             assert_eq!(
-                                nodes_of::<DataSourceExec>(&plan).len(),
+                                shape.nodes_of::<DataSourceExec>().len(),
                                 expected_scans,
-                                "filtering s = {sample} must remove irrelevant per-sample file scans:\n{}",
-                                displayable(plan.as_ref()).indent(true),
+                                "filtering s = {sample} must remove irrelevant per-sample file scans:\n{shape}",
                             );
                         }
                         Ok(())
@@ -501,19 +487,4 @@ fn contig_position_schema(include_alleles: bool) -> SchemaRef {
         fields.push(Field::new("alleles", DataType::Utf8, false));
     }
     Arc::new(Schema::new(fields))
-}
-
-fn displayed(plan: &Arc<dyn ExecutionPlan>) -> String {
-    displayable(plan.as_ref()).indent(true).to_string()
-}
-
-fn nodes_of<T: ExecutionPlan>(plan: &Arc<dyn ExecutionPlan>) -> Vec<Arc<dyn ExecutionPlan>> {
-    let mut found = Vec::new();
-    if plan.downcast_ref::<T>().is_some() {
-        found.push(Arc::clone(plan));
-    }
-    for child in plan.children() {
-        found.extend(nodes_of::<T>(child));
-    }
-    found
 }

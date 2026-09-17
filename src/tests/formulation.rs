@@ -32,18 +32,14 @@ use crate::{
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
     sink,
+    tests::{plan_shape::PlanShape, support::hostile_config},
 };
 use datafusion::{
     arrow::record_batch::RecordBatch,
     common::DataFusionError,
-    datasource::{sink::DataSinkExec, source::DataSourceExec},
+    datasource::sink::DataSinkExec,
     error::Result,
-    physical_expr::expressions::Column,
-    physical_plan::{
-        ExecutionPlan, ExecutionPlanProperties,
-        sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
-        union::UnionExec,
-    },
+    physical_plan::ExecutionPlan,
     prelude::{DataFrame, SessionConfig, SessionContext},
 };
 
@@ -94,7 +90,8 @@ fn formulations_keep_their_plan_shape_under_a_hostile_session() {
             let dataset = dataset(format, representation);
             for formulation in &formulations() {
                 let plan = physical_plan(formulation, &dataset);
-                assert_merge_tree(&plan, &expected_groups(formulation, SAMPLES.len()));
+                PlanShape::of(&plan)
+                    .assert_merge_tree(&expected_groups(formulation, SAMPLES.len()));
             }
         }
     }
@@ -110,29 +107,10 @@ fn formulations_keep_their_plan_shape_through_the_file_sink() {
             for formulation in &formulations() {
                 let (plan, ordering) =
                     file_sink_plan(formulation, &dataset, hostile_config(8), None);
-                assert_merge_tree(&plan, &expected_groups(formulation, SAMPLES.len()));
-                let sink_exec = plan.downcast_ref::<DataSinkExec>().unwrap_or_else(|| {
-                    panic!(
-                        "expected the plan to end in the file sink:\n{}",
-                        displayed(&plan)
-                    )
-                });
-                let required: Vec<&str> = sink_exec
-                    .sort_order()
-                    .as_ref()
-                    .unwrap_or_else(|| panic!("expected a requirement:\n{}", displayed(&plan)))
-                    .iter()
-                    .map(|sort| {
-                        sort.expr
-                            .downcast_ref::<Column>()
-                            .map_or("<not a column>", Column::name)
-                    })
-                    .collect();
-                assert_eq!(
-                    required,
-                    ordering.column_names(),
-                    "{format:?} {representation:?} {formulation:?}"
-                );
+                let shape = PlanShape::of(&plan);
+                assert!(plan.is::<DataSinkExec>(), "{shape}");
+                shape.assert_merge_tree(&expected_groups(formulation, SAMPLES.len()));
+                shape.assert_ends_in_sink_requiring(&ordering);
             }
         }
     }
@@ -146,8 +124,8 @@ fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
             for formulation in &formulations() {
                 let single_target = physical_plan_with_target(formulation, &dataset, 1);
                 let eight_targets = physical_plan_with_target(formulation, &dataset, 8);
-                assert_has_no_sorts(&single_target);
-                assert_has_no_sorts(&eight_targets);
+                PlanShape::of(&single_target).assert_no_sorts();
+                PlanShape::of(&eight_targets).assert_no_sorts();
             }
         }
     }
@@ -163,7 +141,7 @@ fn combine_refs_union_parquet_merges_one_partition_per_sample_without_re_sorting
             &Formulation::CombineRefsUnion,
             &dataset(FixtureFormat::Parquet, representation),
         );
-        assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+        PlanShape::of(&plan).assert_merge_tree(&[SAMPLES.len()]);
     }
 }
 
@@ -176,7 +154,7 @@ fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting(
             &Formulation::CombineRefsUnion,
             &dataset(FixtureFormat::Vortex, representation),
         );
-        assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+        PlanShape::of(&plan).assert_merge_tree(&[SAMPLES.len()]);
     }
 }
 
@@ -190,7 +168,7 @@ fn combine_alleles_union_parquet_merges_one_partition_per_sample_without_re_sort
             &Formulation::CombineAllelesUnion,
             &dataset(FixtureFormat::Parquet, representation),
         );
-        assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+        PlanShape::of(&plan).assert_merge_tree(&[SAMPLES.len()]);
     }
 }
 
@@ -203,7 +181,7 @@ fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorti
             &Formulation::CombineAllelesUnion,
             &dataset(FixtureFormat::Vortex, representation),
         );
-        assert_merges_one_partition_per_sample(&plan, SAMPLES.len());
+        PlanShape::of(&plan).assert_merge_tree(&[SAMPLES.len()]);
     }
 }
 
@@ -219,7 +197,8 @@ fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
             dataset.dataset = dataset.dataset.restrict_to(&requested).unwrap();
             for formulation in &formulations() {
                 let plan = physical_plan(formulation, &dataset);
-                assert_merge_tree(&plan, &expected_groups(formulation, requested.len()));
+                PlanShape::of(&plan)
+                    .assert_merge_tree(&expected_groups(formulation, requested.len()));
             }
         }
     }
@@ -284,14 +263,6 @@ fn dataset_with_ordering(
 /// is allowed to split files of any size.
 fn physical_plan(formulation: &Formulation, dataset: &FixtureDataset) -> Arc<dyn ExecutionPlan> {
     drained_plan(formulation, dataset, hostile_config(8), None)
-}
-
-/// The shared session settings, plus permission to split a file scan of any size across
-/// `target_partitions` partitions wherever the plan lets the optimizer do so.
-fn hostile_config(target_partitions: usize) -> SessionConfig {
-    let mut config = pipeline::session_config().with_target_partitions(target_partitions);
-    config.options_mut().optimizer.repartition_file_min_size = 0;
-    config
 }
 
 fn physical_plan_with_target(
@@ -420,178 +391,4 @@ where
         PipelineOptions::new(NonZeroUsize::new(2).unwrap()),
     )
     .unwrap()
-}
-
-/// A sort-preserving merge over one input partition per sample, with no
-/// re-sort. A formulation may merge again after parallel operators.
-fn assert_merges_one_partition_per_sample(plan: &Arc<dyn ExecutionPlan>, n_samples: usize) {
-    assert_merge_tree(plan, &[n_samples]);
-}
-
-/// The merge tree over `groups`, given as the size of each sample group in sample order.
-///
-/// One group is the flat shape: one union with a single-partition input per sample under one
-/// sort-preserving merge. Several groups nest: the outermost union has one single-partition
-/// input per group, and each group of more than one sample is its own flat shape beneath it,
-/// while a group of one sample is that sample's scan. No sort appears anywhere. A formulation
-/// may merge again after parallel operators above the outermost union.
-fn assert_merge_tree(plan: &Arc<dyn ExecutionPlan>, groups: &[usize]) {
-    let n_groups = groups.len();
-    if let [n_samples] = groups {
-        assert_flat_merge(plan, *n_samples);
-        return;
-    }
-    let unions = nodes_of::<UnionExec>(plan);
-    let Some(outer) = unions.first() else {
-        panic!(
-            "expected a union of {n_groups} sample groups:\n{}",
-            displayed(plan)
-        );
-    };
-    let inputs = outer.children();
-    assert_eq!(
-        inputs.len(),
-        n_groups,
-        "expected one union input per sample group:\n{}",
-        displayed(plan),
-    );
-    for (input, &n_samples) in inputs.iter().zip(groups) {
-        assert_eq!(
-            input.output_partitioning().partition_count(),
-            1,
-            "expected one partition per sample group input:\n{}",
-            displayed(plan),
-        );
-        if n_samples == 1 {
-            assert!(
-                nodes_of::<UnionExec>(input).is_empty()
-                    && nodes_of::<SortPreservingMergeExec>(input).is_empty(),
-                "expected a group of one sample to be its scan:\n{}",
-                displayed(plan),
-            );
-        } else {
-            assert_flat_merge(input, n_samples);
-        }
-    }
-    let merged_groups = groups.iter().filter(|&&n_samples| n_samples > 1).count();
-    assert_eq!(
-        unions.len(),
-        merged_groups.checked_add(1).unwrap(),
-        "expected one UnionExec per merged sample group plus the union of groups:\n{}",
-        displayed(plan),
-    );
-    let merges = nodes_of::<SortPreservingMergeExec>(plan);
-    assert_eq!(
-        merges.len(),
-        merged_groups.checked_add(1).unwrap(),
-        "expected one SortPreservingMergeExec per merged sample group plus the final merge:\n{}",
-        displayed(plan),
-    );
-    assert_has_no_sorts(plan);
-}
-
-/// One union with `n_samples` single-partition inputs under one sort-preserving merge, and no
-/// sort, anywhere in `plan`.
-fn assert_flat_merge(plan: &Arc<dyn ExecutionPlan>, n_samples: usize) {
-    let unions = nodes_of::<UnionExec>(plan);
-    assert_eq!(
-        unions.len(),
-        1,
-        "expected exactly one UnionExec, got {}:\n{}",
-        unions.len(),
-        displayed(plan),
-    );
-    assert_eq!(
-        unions[0].children().len(),
-        n_samples,
-        "expected one union input per sample:\n{}",
-        displayed(plan),
-    );
-    assert!(
-        unions[0]
-            .children()
-            .iter()
-            .all(|input| input.output_partitioning().partition_count() == 1),
-        "expected one partition per sample input:\n{}",
-        displayed(plan),
-    );
-
-    let merges = nodes_of::<SortPreservingMergeExec>(plan);
-    assert_eq!(
-        merges.len(),
-        1,
-        "expected exactly one SortPreservingMergeExec, got {}:\n{}",
-        merges.len(),
-        displayed(plan),
-    );
-    assert_has_no_sorts(plan);
-}
-
-/// Every one of the `n_scans` scans displays a predicate over the representation's locus column.
-/// `EXPLAIN` is the public observation of a pushed filter, and each format names it differently.
-/// That the predicate is the whole filter is shown by the results: with no filter operator
-/// anywhere in the plan, only the scans could have narrowed the rows.
-fn assert_filter_reaches_every_scan(
-    plan: &Arc<dyn ExecutionPlan>,
-    n_scans: usize,
-    representation: LocusRepresentation,
-) {
-    let locus_column = LocusOrdering::locus()
-        .expand(representation)
-        .column_names()
-        .into_iter()
-        .next()
-        .expect("a locus ordering has a stored field");
-    let scans = nodes_of::<DataSourceExec>(plan);
-    assert_eq!(scans.len(), n_scans, "{}", displayed(plan));
-    for scan in &scans {
-        let text = displayed(scan);
-        let predicate = text
-            .split_once("predicate=")
-            .or_else(|| text.split_once("predicate:"))
-            .map(|(_, predicate)| predicate);
-        assert!(
-            predicate.is_some_and(|predicate| predicate.contains(&locus_column)),
-            "expected a filter on {locus_column} to reach the scan: {text}"
-        );
-    }
-}
-
-fn assert_has_no_sorts(plan: &Arc<dyn ExecutionPlan>) {
-    assert!(
-        nodes_of::<SortExec>(plan).is_empty(),
-        "expected no re-sort, but the plan contains a SortExec:\n{}",
-        displayed(plan),
-    );
-}
-
-/// Every node of type `T` in the plan, root first.
-fn nodes_of<T: ExecutionPlan>(plan: &Arc<dyn ExecutionPlan>) -> Vec<Arc<dyn ExecutionPlan>> {
-    let mut found = Vec::new();
-    if plan.downcast_ref::<T>().is_some() {
-        found.push(Arc::clone(plan));
-    }
-    for child in plan.children() {
-        found.extend(nodes_of::<T>(child));
-    }
-    found
-}
-
-fn displayed(plan: &Arc<dyn ExecutionPlan>) -> String {
-    datafusion::physical_plan::displayable(plan.as_ref())
-        .indent(true)
-        .to_string()
-}
-
-/// The operator on each line of the plan's display, root first and indented as displayed, without
-/// the operator's details.
-fn operators(plan: &Arc<dyn ExecutionPlan>) -> Vec<String> {
-    displayed(plan)
-        .lines()
-        .map(|line| {
-            line.split_once(':')
-                .map_or(line, |(operator, _)| operator)
-                .to_string()
-        })
-        .collect()
 }

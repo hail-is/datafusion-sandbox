@@ -7,5 +7,7 @@ mod format;
 mod formulation;
 mod locus;
 mod pipeline;
+mod plan_shape;
 mod sink;
 mod sorted_table;
+mod support;

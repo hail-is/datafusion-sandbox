@@ -37,6 +37,8 @@
 //! - `contig_filter`, a whole-contig restriction written in a representation.
 //!   Interval restrictions are `LocusInterval::filter` in the library.
 //! - `decode_loci` and `string_column`, the locus or one string field of each row a plan returned.
+//! - `decode_rows`, the locus, alleles, and sample of each row a plan returned.
+//! - `file_stems`, the documented fixture stems named by scanned object-store paths.
 //! - `read_file`, the rows of one file a test wrote, on any registered store.
 
 #![expect(
@@ -96,6 +98,10 @@ pub const SAMPLES: &[&str] = &["HG00308", "HG00592", "HG02230", "NA18534"];
 
 /// One fixture row as a locus and alleles.
 pub type SampleRow = (Locus, &'static str);
+
+/// A decoded combined row: locus, alleles, and sample.
+#[cfg(test)]
+pub(crate) type Row = (Locus, String, String);
 
 /// Files and their rows in locus-then-alleles order, shared by memory and disk.
 static SAMPLE_FILES: LazyLock<[(&str, [SampleRow; 2]); 4]> = LazyLock::new(|| {
@@ -526,6 +532,47 @@ pub fn decode_loci(batch: &RecordBatch, representation: LocusRepresentation) -> 
     representation
         .loci(batch)
         .expect("a fixture result has valid locus fields")
+}
+
+/// Decodes each row in `batch` as its locus, alleles, and sample.
+///
+/// # Panics
+///
+/// Panics if `batch` does not hold valid locus fields for `representation`, or has no non-null
+/// string `alleles` or `s` column.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn decode_rows(batch: &RecordBatch, representation: LocusRepresentation) -> Vec<Row> {
+    decode_loci(batch, representation)
+        .into_iter()
+        .zip(string_column(batch, "alleles"))
+        .zip(string_column(batch, "s"))
+        .map(|((locus, alleles), sample)| (locus, alleles, sample))
+        .collect()
+}
+
+/// The documented fixture file stems named by `paths`, in order.
+///
+/// # Panics
+///
+/// Panics if a path has no extension or its stem is not documented by this fixture.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn file_stems(paths: &[object_store::path::Path]) -> Vec<&'static str> {
+    paths
+        .iter()
+        .map(|path| {
+            let stem = path
+                .filename()
+                .and_then(|filename| filename.rsplit_once('.'))
+                .map_or_else(|| panic!("{path} is not a fixture file"), |(stem, _)| stem);
+            SAMPLE_FILES
+                .iter()
+                .map(|(known, _)| *known)
+                .find(|known| *known == stem)
+                .unwrap_or_else(|| panic!("{path} is not a documented fixture file"))
+        })
+        .collect()
 }
 
 /// Renders `locus` as the cells `DataFusion` displays for `representation`.

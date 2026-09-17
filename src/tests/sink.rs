@@ -1,5 +1,6 @@
 //! The sinks an action runs its frame into, and the ordering requirement they put on the plan.
 
+use super::plan_shape::PlanShape;
 use crate::fixture::{self, DatasetFixture, FixtureFormat, SAMPLES, block_on};
 use crate::{
     dataset::Dataset,
@@ -15,7 +16,7 @@ use datafusion::{
     catalog::Session,
     datasource::sink::DataSinkExec,
     error::{DataFusionError, Result},
-    physical_expr::{LexRequirement, expressions::Column},
+    physical_expr::LexRequirement,
     physical_plan::{
         ChildrenPropertiesMode, Distribution, ExecutionPlan, ExecutionPlanProperties,
         ReplaceChildrenOptions,
@@ -107,47 +108,21 @@ fn taking_the_collected_batches_empties_the_sink() {
 fn the_sink_requires_the_ordering_and_the_optimizer_merges_to_meet_it() {
     for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
         let fixture = fixture_of(format);
-        let plan = block_on(async {
+        let (plan, ordering) = block_on(async {
             let (_ctx, frame) = flat_read(fixture).await;
-            sink::drain(frame)
+            let ordering = frame.ordering.clone();
+            let plan = sink::drain(frame)
                 .unwrap()
                 .create_physical_plan()
                 .await
-                .unwrap()
+                .unwrap();
+            (plan, ordering)
         });
 
-        let sink_exec = plan
-            .downcast_ref::<DataSinkExec>()
-            .unwrap_or_else(|| panic!("{format:?}: expected the plan to end in a sink"));
-        let requirement = sink_exec
-            .sort_order()
-            .as_ref()
-            .unwrap_or_else(|| panic!("{format:?}: expected the sink to require an ordering"));
-        let required: Vec<&str> = requirement
-            .iter()
-            .map(|sort| {
-                sort.expr
-                    .downcast_ref::<Column>()
-                    .map_or("<not a column>", Column::name)
-            })
-            .collect();
-        assert_eq!(required, ["contig", "position"], "{format:?}");
-
-        let merges = nodes_of::<SortPreservingMergeExec>(&plan);
-        assert_eq!(merges.len(), 1, "{format:?}:\n{}", displayed(&plan));
-        assert_eq!(
-            merges[0].children()[0]
-                .output_partitioning()
-                .partition_count(),
-            SAMPLES.len(),
-            "{format:?}:\n{}",
-            displayed(&plan)
-        );
-        assert!(
-            nodes_of::<SortExec>(&plan).is_empty(),
-            "{format:?}:\n{}",
-            displayed(&plan)
-        );
+        let shape = PlanShape::of(&plan);
+        assert!(plan.is::<DataSinkExec>(), "{format:?}:\n{shape}");
+        shape.assert_ends_in_sink_requiring(&ordering);
+        shape.assert_merge_tree(&[SAMPLES.len()]);
     }
 }
 
@@ -171,15 +146,19 @@ fn each_sink_displays_its_own_name() {
         (drained, collected)
     });
 
+    let drained = PlanShape::of(&drained);
     assert!(
-        displayed(&drained).starts_with("DataSinkExec: sink=DrainingSink"),
-        "{}",
-        displayed(&drained)
+        drained
+            .to_string()
+            .starts_with("DataSinkExec: sink=DrainingSink"),
+        "{drained}"
     );
+    let collected = PlanShape::of(&collected);
     assert!(
-        displayed(&collected).starts_with("DataSinkExec: sink=CollectingSink"),
-        "{}",
-        displayed(&collected)
+        collected
+            .to_string()
+            .starts_with("DataSinkExec: sink=CollectingSink"),
+        "{collected}"
     );
 }
 
@@ -247,9 +226,10 @@ fn the_partitioned_sink_writes_each_partition_to_its_own_sink() {
 #[test]
 fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partitions() {
     let fixture = fixture_of(FixtureFormat::Vortex);
-    let plan = block_on(async {
+    let (plan, ordering) = block_on(async {
         let (_ctx, frame) = flat_read(fixture).await;
-        sink::run_into(
+        let ordering = frame.ordering.clone();
+        let plan = sink::run_into(
             frame.frame,
             "partitions",
             Some(&frame.ordering),
@@ -258,24 +238,16 @@ fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partit
         .unwrap()
         .create_physical_plan()
         .await
-        .unwrap()
+        .unwrap();
+        (plan, ordering)
     });
 
+    let shape = PlanShape::of(&plan);
+    shape.assert_ends_in_sink_requiring(&ordering);
     let sink_exec = plan
         .downcast_ref::<PartitionedSinkExec>()
-        .unwrap_or_else(|| panic!("expected the partitioned sink:\n{}", displayed(&plan)));
+        .unwrap_or_else(|| panic!("expected the partitioned sink:\n{shape}"));
     assert_eq!(plan.output_partitioning().partition_count(), SAMPLES.len());
-    let required: Vec<&str> = sink_exec
-        .ordering()
-        .expect("a requirement")
-        .iter()
-        .map(|sort| {
-            sort.expr
-                .downcast_ref::<Column>()
-                .map_or("<not a column>", Column::name)
-        })
-        .collect();
-    assert_eq!(required, ["contig", "position"]);
     assert_eq!(plan.required_input_ordering().len(), 1);
     assert!(plan.required_input_ordering()[0].is_some());
     assert_eq!(plan.benefits_from_input_partitioning(), [false]);
@@ -287,11 +259,10 @@ fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partit
         [Distribution::UnspecifiedDistribution]
     ));
     assert!(
-        nodes_of::<SortPreservingMergeExec>(&plan).is_empty()
-            && nodes_of::<CoalescePartitionsExec>(&plan).is_empty()
-            && nodes_of::<SortExec>(&plan).is_empty(),
-        "{}",
-        displayed(&plan)
+        shape.nodes_of::<SortPreservingMergeExec>().is_empty()
+            && shape.nodes_of::<CoalescePartitionsExec>().is_empty()
+            && shape.nodes_of::<SortExec>().is_empty(),
+        "{shape}"
     );
     for (index, partition_sink) in sink_exec.partition_sinks().iter().enumerate() {
         let input_partition = &partition_sink.children()[0];
@@ -302,9 +273,10 @@ fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partit
         assert_eq!(input_partition.output_partitioning().partition_count(), 1);
     }
     assert!(
-        displayed(&plan).starts_with("PartitionedSinkExec: partitions=4, sink=CollectingSink"),
-        "{}",
-        displayed(&plan)
+        shape
+            .to_string()
+            .starts_with("PartitionedSinkExec: partitions=4, sink=CollectingSink"),
+        "{shape}"
     );
 }
 
@@ -492,21 +464,4 @@ async fn flat_read(fixture: &DatasetFixture) -> (SessionContext, OrderedFrame) {
         layout: OutputLayout::SingleFile,
     };
     (ctx, frame)
-}
-
-fn nodes_of<T: ExecutionPlan>(plan: &Arc<dyn ExecutionPlan>) -> Vec<Arc<dyn ExecutionPlan>> {
-    let mut found = Vec::new();
-    if plan.downcast_ref::<T>().is_some() {
-        found.push(Arc::clone(plan));
-    }
-    for child in plan.children() {
-        found.extend(nodes_of::<T>(child));
-    }
-    found
-}
-
-fn displayed(plan: &Arc<dyn ExecutionPlan>) -> String {
-    datafusion::physical_plan::displayable(plan.as_ref())
-        .indent(true)
-        .to_string()
 }
