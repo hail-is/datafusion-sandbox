@@ -15,6 +15,7 @@ use datafusion::{
     error::Result,
     prelude::DataFrame,
 };
+use std::num::NonZeroUsize;
 
 /// Where a write puts its rows.
 #[derive(Debug)]
@@ -44,9 +45,9 @@ pub enum Action {
 }
 
 impl Action {
-    /// The write this action performs or renders, if any.
+    /// The path the write this action performs or renders puts its rows at, if any.
     #[must_use]
-    pub const fn write_target(&self) -> Option<&WriteTarget> {
+    pub fn output_path(&self) -> Option<&str> {
         match self {
             Self::Write(target)
             | Self::Explain {
@@ -54,7 +55,7 @@ impl Action {
             }
             | Self::ExplainAnalyze {
                 write: Some(target),
-            } => Some(target),
+            } => Some(&target.output_path),
             Self::Collect
             | Self::Explain { write: None }
             | Self::ExplainAnalyze { write: None } => None,
@@ -70,7 +71,7 @@ pub struct CombinerRun {
     pub action: Action,
     pub sample_set: Option<Vec<String>>,
     pub row_limit: Option<usize>,
-    pub threads: usize,
+    pub threads: NonZeroUsize,
 }
 
 impl CombinerRun {
@@ -78,8 +79,9 @@ impl CombinerRun {
     ///
     /// # Errors
     ///
-    /// Returns an error if the input dataset cannot be resolved, the formulation cannot be
-    /// planned or executed, or the requested output cannot be written.
+    /// Returns an error if a path is on a store the pipeline cannot serve, the input dataset
+    /// cannot be resolved, the formulation cannot be planned or executed, or the requested output
+    /// cannot be written.
     pub fn execute(self) -> Result<Outcome> {
         let Self {
             formulation,
@@ -90,7 +92,12 @@ impl CombinerRun {
             row_limit,
             threads,
         } = self;
-        let options = options_for(&input_path, &action, threads);
+        let options = PipelineOptions::for_paths(
+            threads,
+            [Some(input_path.as_str()), action.output_path()]
+                .into_iter()
+                .flatten(),
+        )?;
 
         pipeline::run(
             move |ctx| async move {
@@ -174,95 +181,6 @@ impl Outcome {
             Self::RowsWritten(count) => Ok(count.to_string()),
             Self::Batches(batches) => Ok(pretty_format_batches(batches)?.to_string()),
             Self::Plan(plan) => Ok(plan.clone()),
-        }
-    }
-}
-
-/// Pipeline options for a run. Object stores follow from the paths the run reads and writes.
-fn options_for(input_path: &str, action: &Action, threads: usize) -> PipelineOptions {
-    let output_path = action
-        .write_target()
-        .map(|target| target.output_path.as_str());
-    let mut object_stores = [Some(input_path), output_path]
-        .into_iter()
-        .flatten()
-        .filter_map(object_store_base_url)
-        .collect::<Vec<_>>();
-    object_stores.dedup();
-    PipelineOptions {
-        threads,
-        object_stores,
-    }
-}
-
-/// The base URL of the object store `path` lives on, or `None` for a local path.
-fn object_store_base_url(path: &str) -> Option<String> {
-    let (scheme, rest) = path.split_once("://")?;
-    if scheme == "file" {
-        return None;
-    }
-    let authority = rest.split('/').next().unwrap_or("");
-    Some(format!("{scheme}://{authority}"))
-}
-
-#[cfg(test)]
-mod tests {
-    //! These tests need private access to path-to-object-store derivation until it moves behind `PipelineOptions`.
-
-    use super::*;
-
-    fn write_to(output_path: &str) -> WriteTarget {
-        WriteTarget {
-            output_path: output_path.to_string(),
-            output_format: OutputFormat::VORTEX,
-        }
-    }
-
-    #[test]
-    fn registers_the_object_stores_of_both_input_and_output() {
-        let action = Action::Write(write_to("gs://bucket-b/out.vortex"));
-        let options = options_for("gs://bucket-a/path", &action, 1);
-        assert_eq!(options.object_stores, ["gs://bucket-a", "gs://bucket-b"]);
-    }
-
-    #[test]
-    fn registers_the_output_store_of_an_explained_write() {
-        for action in [
-            Action::Explain {
-                write: Some(write_to("gs://bucket-b/out.vortex")),
-            },
-            Action::ExplainAnalyze {
-                write: Some(write_to("gs://bucket-b/out.vortex")),
-            },
-        ] {
-            let options = options_for("gs://bucket-a/path", &action, 1);
-            assert_eq!(options.object_stores, ["gs://bucket-a", "gs://bucket-b"]);
-        }
-    }
-
-    #[test]
-    fn registers_a_shared_object_store_once() {
-        let action = Action::Write(write_to("gs://bucket/out.vortex"));
-        let options = options_for("gs://bucket/path/", &action, 1);
-        assert_eq!(options.object_stores, ["gs://bucket"]);
-    }
-
-    #[test]
-    fn registers_no_object_stores_for_local_paths() {
-        let action = Action::Write(write_to("data/out.vortex"));
-        let options = options_for("data/samples", &action, 1);
-        assert_eq!(options.object_stores, Vec::<String>::new());
-    }
-
-    #[test]
-    fn registers_only_the_input_store_when_there_is_no_output() {
-        for action in [
-            Action::Collect,
-            Action::Explain { write: None },
-            Action::ExplainAnalyze { write: None },
-        ] {
-            let options = options_for("gs://bucket-a/path", &action, 1);
-            assert_eq!(options.object_stores, ["gs://bucket-a"]);
         }
     }
 }

@@ -9,12 +9,13 @@ use crate::pipeline::{self, PipelineOptions};
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::{DataFrame, col, lit};
+use std::num::NonZeroUsize;
 
 #[test]
 fn returns_the_pipeline_result_to_the_calling_thread() {
     let result = pipeline::run(
         |_ctx| async move { Ok::<_, DataFusionError>(42_u64) },
-        PipelineOptions::default(),
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 
@@ -29,7 +30,7 @@ fn returns_explain_output_without_writing() {
             let batches = df.explain(false, false)?.collect().await?;
             Ok::<_, DataFusionError>(pretty_format_batches(&batches)?.to_string())
         },
-        PipelineOptions::default(),
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 
@@ -46,7 +47,7 @@ fn invokes_the_pipeline_on_the_cpu_runtime() {
             let has_runtime = tokio::runtime::Handle::try_current().is_ok();
             async move { Ok::<_, DataFusionError>(has_runtime) }
         },
-        PipelineOptions::default(),
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 
@@ -65,7 +66,7 @@ fn runs_a_pipeline_that_writes_output() {
             let df = make_range_table(&ctx, 1000, 128)?;
             OutputFormat::VORTEX.write_unordered(df, &output_path).await
         },
-        PipelineOptions::default(),
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 
@@ -87,7 +88,7 @@ fn runs_a_pipeline_that_writes_parquet_output() {
                 .write_unordered(df, &output_path)
                 .await
         },
-        PipelineOptions::default(),
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 
@@ -102,7 +103,7 @@ fn runs_a_pipeline_that_writes_parquet_output() {
 fn surfaces_plan_builder_errors() {
     let err = pipeline::run(
         |_ctx| async move { Err(DataFusionError::Plan("boom".to_string())) as Result<DataFrame, _> },
-        PipelineOptions::default(),
+        PipelineOptions::single_threaded(),
     )
     .unwrap_err();
 
@@ -123,37 +124,71 @@ fn surfaces_errors_from_plans_that_fail_at_execution() {
                 .select(vec![(lit(1) / (col("idx") - lit(1))).alias("boom")])?;
             OutputFormat::VORTEX.write_unordered(df, &output_path).await
         },
-        PipelineOptions::default(),
+        PipelineOptions::single_threaded(),
     )
     .unwrap_err();
 
     assert!(err.to_string().contains("Divide by zero"), "got: {err}");
 }
 
-/// Object stores are registered from a declared list of base URLs; any scheme
-/// other than gs:// is a clear error.
+/// Local paths, bare or under `file://`, need no object store, so options built from them run
+/// on the session's built-in local store. Nothing here reads the paths.
 #[test]
-fn rejects_object_store_urls_with_unsupported_schemes() {
-    let err = pipeline::run(
-        move |ctx| async move { make_range_table(&ctx, 10, 8) },
-        PipelineOptions {
-            object_stores: vec!["s3://some-bucket".to_string()],
-            ..Default::default()
-        },
+fn builds_options_from_local_paths_without_registering_a_store() {
+    let options = PipelineOptions::for_paths(
+        NonZeroUsize::MIN,
+        ["data/samples", "file:///data/out.vortex"],
     )
-    .unwrap_err();
+    .unwrap();
 
-    let message = err.to_string();
-    assert!(message.contains("s3"), "got: {message}");
-    assert!(message.contains("gs://"), "got: {message}");
+    let result = pipeline::run(
+        |_ctx| async move { Ok::<_, DataFusionError>(42_u64) },
+        options,
+    )
+    .unwrap();
+
+    assert_eq!(result, 42);
+}
+
+/// A path on a store the pipeline cannot serve is rejected when the options are built, before
+/// any runtime exists, and the error names the path the caller gave. Every path is inspected,
+/// whichever position it holds.
+#[test]
+fn rejects_paths_with_unsupported_schemes_when_options_are_built() {
+    for paths in [
+        ["data/samples", "s3://some-bucket/out.vortex"],
+        ["s3://some-bucket/out.vortex", "data/samples"],
+    ] {
+        let err = PipelineOptions::for_paths(NonZeroUsize::MIN, paths).unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("s3://some-bucket/out.vortex"),
+            "{paths:?}: {message}"
+        );
+        assert!(message.contains("gs://"), "{paths:?}: {message}");
+    }
+}
+
+/// A `gs://` path without a bucket has no store to register, so it is rejected when the options
+/// are built rather than when the runtime tries to register it.
+#[test]
+fn rejects_a_gs_path_that_names_no_bucket_when_options_are_built() {
+    for path in ["gs://", "gs:///data/samples"] {
+        let err = PipelineOptions::for_paths(NonZeroUsize::MIN, [path]).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains(path), "{path}: {message}");
+        assert!(message.contains("bucket"), "{path}: {message}");
+    }
 }
 
 /// Thread count defaults to available parallelism.
 #[test]
 fn default_thread_count_is_available_parallelism() {
     assert_eq!(
-        PipelineOptions::default().threads,
-        std::thread::available_parallelism().unwrap().get(),
+        pipeline::default_thread_count(),
+        std::thread::available_parallelism().unwrap(),
     );
 }
 
@@ -166,10 +201,7 @@ fn one_thread_still_executes_on_a_multi_thread_runtime() {
         |_ctx| async move {
             Ok::<_, DataFusionError>(tokio::runtime::Handle::current().runtime_flavor())
         },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 
@@ -188,10 +220,7 @@ fn runs_with_one_thread() {
             let df = make_range_table(&ctx, 1000, 128)?;
             OutputFormat::VORTEX.write_unordered(df, &output_path).await
         },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 

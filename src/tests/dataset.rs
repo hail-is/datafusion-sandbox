@@ -97,10 +97,7 @@ fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
                         Ok(())
                     }
                 },
-                PipelineOptions {
-                    threads: 1,
-                    ..Default::default()
-                },
+                PipelineOptions::single_threaded(),
             )
             .unwrap();
         }
@@ -224,10 +221,7 @@ fn filtering_the_attached_sample_column_composes_with_the_dataset_sample_set() {
                         Ok(())
                     }
                 },
-                PipelineOptions {
-                    threads: 1,
-                    ..Default::default()
-                },
+                PipelineOptions::single_threaded(),
             )
             .unwrap();
         }
@@ -358,10 +352,7 @@ fn infers_the_schema_from_one_input_file() {
                 Ok(())
             }
         },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 }

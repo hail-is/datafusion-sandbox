@@ -42,7 +42,7 @@ fn the_drained_frame_returns_the_row_count() {
             let (_ctx, frame) = flat_read(fixture).await;
             sink::drain(frame)?.collect().await
         },
-        one_thread(),
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 
@@ -69,7 +69,7 @@ fn the_collecting_sink_keeps_the_rows_in_the_required_order() {
                 let count = frame.collect().await?;
                 Ok((count, collected.take()))
             },
-            one_thread(),
+            PipelineOptions::single_threaded(),
         )
         .unwrap();
 
@@ -93,7 +93,7 @@ fn taking_the_collected_batches_empties_the_sink() {
             frame.collect().await?;
             Ok((collected.take(), collected.take()))
         },
-        one_thread(),
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 
@@ -200,7 +200,7 @@ fn the_partitioned_sink_writes_each_partition_to_its_own_sink() {
                         .collect()
                         .await
                 },
-                one_thread(),
+                PipelineOptions::single_threaded(),
             )
             .unwrap()
         };
@@ -391,7 +391,7 @@ fn the_partitioned_sink_refuses_to_execute_when_its_input_partitions_change() {
 
     let executed = pipeline::run(
         move |ctx| async move { datafusion::physical_plan::collect(swapped, ctx.task_ctx()).await },
-        one_thread(),
+        PipelineOptions::single_threaded(),
     );
     assert_internal_error(executed, "was planned over");
 }
@@ -492,13 +492,6 @@ async fn flat_read(fixture: &DatasetFixture) -> (SessionContext, OrderedFrame) {
         layout: OutputLayout::SingleFile,
     };
     (ctx, frame)
-}
-
-fn one_thread() -> PipelineOptions {
-    PipelineOptions {
-        threads: 1,
-        ..Default::default()
-    }
 }
 
 fn nodes_of<T: ExecutionPlan>(plan: &Arc<dyn ExecutionPlan>) -> Vec<Arc<dyn ExecutionPlan>> {

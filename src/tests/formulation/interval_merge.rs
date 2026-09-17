@@ -31,7 +31,7 @@ use datafusion::{
 use futures::TryStreamExt;
 use object_store::path::Path;
 
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// Split points cutting the fixture's eight loci into three intervals: `..chr1:3`, holding
 /// chr1:1, chr1:2, and chr1:2; `chr1:3..chr2:2`, holding chr1:3, chr1:4, and chr2:1; and
@@ -521,8 +521,5 @@ fn write_partitioned(
 }
 
 fn two_threads() -> PipelineOptions {
-    PipelineOptions {
-        threads: 2,
-        ..Default::default()
-    }
+    PipelineOptions::new(NonZeroUsize::new(2).unwrap())
 }

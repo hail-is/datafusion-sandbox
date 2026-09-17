@@ -48,7 +48,10 @@ other test holds its dataset fixtures in an in-memory object store and creates
 no temporary directories. See
 [ADR 0010](docs/adr/0010-keep-tests-on-in-memory-object-stores.md) for why.
 
-The test: `tempdir`, `TempDir`, or a filesystem path appearing in a test outside
-those two files is a violation. The fix is to move the test or switch it to an
-in-memory store, not to argue that the speed difference per operation is small;
-the ADR already weighed that.
+The test: a test outside those two files that reads or writes the filesystem is
+a violation. `tempdir`, `TempDir`, or a filesystem path that is opened, listed,
+or written is the sign to look for. A path string that nothing dereferences,
+such as one handed to a constructor to check how it is classified, is not a
+violation. The fix is to move the test or switch it to an in-memory store, not
+to argue that the speed difference per operation is small; the ADR already
+weighed that.

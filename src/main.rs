@@ -15,7 +15,8 @@ use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::formulation::Formulation;
 use datafusion_sandbox::locus::SplitPoints;
 use datafusion_sandbox::ordered_frame::OutputLayout;
-use std::{num::NonZeroUsize, path::Path, thread::available_parallelism};
+use datafusion_sandbox::pipeline;
+use std::{num::NonZeroUsize, path::Path};
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
 
@@ -29,15 +30,16 @@ struct Cli {
     ///
     /// Defaults to available parallelism. Independent of the session's target-partition setting.
     #[arg(long, short = 'j', global = true, value_parser = parse_thread_count)]
-    threads: Option<usize>,
+    threads: Option<NonZeroUsize>,
 }
 
-/// Rejects 0, which `Builder::worker_threads` panics on, with a message rather than clap's
-/// generated `0 is not in 1..18446744073709551615`.
-fn parse_thread_count(value: &str) -> std::result::Result<usize, String> {
+/// Rejects 0 with a message rather than clap's generated
+/// `0 is not in 1..18446744073709551615`.
+fn parse_thread_count(value: &str) -> std::result::Result<NonZeroUsize, String> {
     match value.parse::<usize>() {
-        Ok(0) => Err("thread count must be at least 1".to_string()),
-        Ok(threads) => Ok(threads),
+        Ok(threads) => {
+            NonZeroUsize::new(threads).ok_or_else(|| "thread count must be at least 1".to_string())
+        }
         Err(e) => Err(e.to_string()),
     }
 }
@@ -85,7 +87,7 @@ impl CombineRefsFormulationArg {
         self,
         groups: Option<NonZeroUsize>,
         split_points: Option<SplitPoints>,
-        threads: usize,
+        threads: NonZeroUsize,
     ) -> Result<Formulation> {
         if groups.is_some() && self != Self::GroupedMerge {
             return Err(DataFusionError::Configuration(
@@ -100,8 +102,7 @@ impl CombineRefsFormulationArg {
         match self {
             Self::Union => Ok(Formulation::CombineRefsUnion),
             Self::GroupedMerge => Ok(Formulation::CombineRefsGroupedMerge {
-                groups: groups
-                    .unwrap_or_else(|| NonZeroUsize::new(threads).unwrap_or(NonZeroUsize::MIN)),
+                groups: groups.unwrap_or(threads),
             }),
             Self::IntervalMerge => split_points
                 .map(|split_points| Formulation::CombineRefsIntervalMerge { split_points })
@@ -256,7 +257,7 @@ impl TryFrom<ActionArgs> for CliAction {
 
 fn resolve(cli: Cli) -> Result<CombinerRun> {
     let Cli { command, threads } = cli;
-    let threads = threads.unwrap_or_else(|| available_parallelism().map_or(1, NonZeroUsize::get));
+    let threads = threads.unwrap_or_else(pipeline::default_thread_count);
     let (formulation, args) = match command {
         Command::CombineRefs(args) => (
             args.formulation
@@ -517,7 +518,7 @@ mod tests {
                 groups: NonZeroUsize::new(3).unwrap()
             }
         );
-        assert_eq!(run.threads, 3);
+        assert_eq!(run.threads, NonZeroUsize::new(3).unwrap());
     }
 
     #[test]
@@ -863,8 +864,8 @@ mod tests {
 
     #[test]
     fn rejects_a_thread_count_of_zero() {
-        assert_eq!(parse_thread_count("1"), Ok(1));
-        assert_eq!(parse_thread_count("8"), Ok(8));
+        assert_eq!(parse_thread_count("1"), Ok(NonZeroUsize::MIN));
+        assert_eq!(parse_thread_count("8"), Ok(NonZeroUsize::new(8).unwrap()));
 
         let err = parse_thread_count("0").unwrap_err();
         assert!(err.contains("at least 1"), "got: {err}");

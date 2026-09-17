@@ -290,10 +290,7 @@ fn false_and_null_scalar_filters_return_projected_empty_plans_without_opening_fi
             assert!(error.to_string().contains("missing.parquet"), "{error}");
             Ok(())
         },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 }
@@ -435,10 +432,7 @@ fn inexact_filters_keep_the_logical_residual_and_do_not_truncate_before_filterin
                         Ok(())
                     }
                 },
-                PipelineOptions {
-                    threads: 1,
-                    ..Default::default()
-                },
+                PipelineOptions::single_threaded(),
             )
             .unwrap();
         }
@@ -819,10 +813,7 @@ fn physical_filter_pushdown_after_projection_keeps_one_ordered_partition_in_both
                         datafusion::physical_plan::collect(filtered, ctx.task_ctx()).await
                     }
                 },
-                PipelineOptions {
-                    threads: 1,
-                    ..Default::default()
-                },
+                PipelineOptions::single_threaded(),
             )
             .unwrap();
             assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
@@ -1004,10 +995,7 @@ fn collected_rows_arrive_in_locus_order() {
                 ctx.read_table(Arc::new(table))?.collect().await
             }
         },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 
