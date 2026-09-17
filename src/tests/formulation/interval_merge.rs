@@ -4,28 +4,25 @@
 //! merging by locus interval returns, and writes, the union formulation's rows.
 
 use super::{
-    FORMATS, FixtureDataset, REPRESENTATIONS, assert_filter_reaches_every_scan, assert_flat_merge,
-    assert_merge_tree, collected_batches, dataset, displayed, drained_plan, file_sink_plan,
-    hostile_config, nodes_of, output_format, output_path, planned,
+    FORMATS, FixtureDataset, REPRESENTATIONS, collected_batches, dataset, drained_plan,
+    file_sink_plan, output_format, output_path, planned,
 };
-use crate::fixture::{self, FixtureFormat, SAMPLES};
+use crate::fixture::{self, FixtureFormat, Row, SAMPLES};
 use crate::formulation::Formulation;
-use crate::locus::{Locus, LocusRepresentation, SplitPoints};
+use crate::locus::LocusRepresentation;
 use crate::ordered_frame::OutputLayout;
 use crate::pipeline::{self, PipelineOptions};
 use crate::sink::PartitionedSinkExec;
+use crate::tests::{
+    plan_shape::PlanShape,
+    support::{hostile_config, interval_merge},
+};
 
 use datafusion::{
     arrow::record_batch::RecordBatch,
-    datasource::{listing::ListingTableUrl, source::DataSourceExec},
-    physical_expr::expressions::Column,
+    datasource::listing::ListingTableUrl,
     physical_plan::{
-        ExecutionPlan, ExecutionPlanProperties,
-        coalesce_partitions::CoalescePartitionsExec,
-        filter::FilterExec,
-        repartition::RepartitionExec,
-        sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
-        union::UnionExec,
+        ExecutionPlanProperties, coalesce_partitions::CoalescePartitionsExec, union::UnionExec,
     },
 };
 use futures::TryStreamExt;
@@ -86,48 +83,32 @@ fn writes_through_a_partitioned_sink_over_one_merge_per_interval() {
                 };
                 let (plan, ordering) =
                     file_sink_plan(&interval_merge(THREE_INTERVALS), &dataset, config, None);
+                let shape = PlanShape::of(&plan);
 
-                let sink_exec = plan
+                shape.assert_ends_in_sink_requiring(&ordering);
+                let sink_nodes = shape.nodes_of::<PartitionedSinkExec>();
+                assert_eq!(sink_nodes.len(), 1, "{context}:\n{shape}");
+                let sink_exec = sink_nodes[0]
                     .downcast_ref::<PartitionedSinkExec>()
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "{context}: expected the plan to end in the partitioned sink:\n{}",
-                            displayed(&plan)
-                        )
-                    });
+                    .expect("nodes_of returned a node of another type");
                 assert_eq!(
                     plan.output_partitioning().partition_count(),
                     3,
-                    "{context}:\n{}",
-                    displayed(&plan)
+                    "{context}:\n{shape}"
                 );
-                assert_eq!(
-                    sink_exec.partition_sinks().len(),
-                    3,
-                    "{context}:\n{}",
-                    displayed(&plan)
-                );
-                let required: Vec<&str> = sink_exec
-                    .ordering()
-                    .unwrap_or_else(|| panic!("{context}: expected a requirement"))
-                    .iter()
-                    .map(|sort| {
-                        sort.expr
-                            .downcast_ref::<Column>()
-                            .map_or("<not a column>", Column::name)
-                    })
-                    .collect();
-                assert_eq!(required, ordering.column_names(), "{context}");
-                assert_one_merge_per_interval(&plan, 3, representation, &context);
+                assert_eq!(sink_exec.partition_sinks().len(), 3, "{context}:\n{shape}");
+                shape.assert_one_merge_per_interval(3, SAMPLES.len(), representation);
+                let unions = shape.nodes_of::<UnionExec>();
+                let outer_union = unions
+                    .first()
+                    .expect("the interval plan contains a union of intervals");
                 assert!(
-                    plan.children()[0].downcast_ref::<UnionExec>().is_some(),
-                    "{context}: expected the union of intervals directly beneath the sink:\n{}",
-                    displayed(&plan)
+                    Arc::ptr_eq(plan.children()[0], outer_union),
+                    "{context}: expected the union of intervals directly beneath the sink:\n{shape}"
                 );
                 assert!(
-                    nodes_of::<CoalescePartitionsExec>(&plan).is_empty(),
-                    "{context}: expected no coalesce beneath the partitioned sink:\n{}",
-                    displayed(&plan)
+                    shape.nodes_of::<CoalescePartitionsExec>().is_empty(),
+                    "{context}: expected no coalesce beneath the partitioned sink:\n{shape}"
                 );
             }
         }
@@ -142,16 +123,16 @@ fn a_single_partition_sink_merges_the_interval_merges() {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
             for hostile in [false, true] {
-                let context = format!("{format:?} {representation:?} hostile={hostile}");
                 let config = if hostile {
                     hostile_config(8)
                 } else {
                     pipeline::session_config()
                 };
                 let plan = drained_plan(&interval_merge(THREE_INTERVALS), &dataset, config, None);
+                let shape = PlanShape::of(&plan);
 
-                assert_merge_tree(&plan, &[SAMPLES.len(); 3]);
-                assert_one_merge_per_interval(&plan, 3, representation, &context);
+                shape.assert_merge_tree(&[SAMPLES.len(); 3]);
+                shape.assert_one_merge_per_interval(3, SAMPLES.len(), representation);
             }
         }
     }
@@ -170,14 +151,24 @@ fn a_row_limit_collapses_the_write_to_one_file() {
                 hostile_config(8),
                 Some(3),
             );
-            let sink_exec = plan
+            let shape = PlanShape::of(&plan);
+            let sink_nodes = shape.nodes_of::<PartitionedSinkExec>();
+            assert_eq!(
+                sink_nodes.len(),
+                1,
+                "{format:?} {representation:?}:\n{shape}"
+            );
+            assert!(
+                Arc::ptr_eq(&sink_nodes[0], &plan),
+                "{format:?} {representation:?}: expected the partitioned sink at the plan root:\n{shape}"
+            );
+            let sink_exec = sink_nodes[0]
                 .downcast_ref::<PartitionedSinkExec>()
-                .unwrap_or_else(|| panic!("{format:?} {representation:?}:\n{}", displayed(&plan)));
+                .expect("nodes_of returned a node of another type");
             assert_eq!(
                 plan.output_partitioning().partition_count(),
                 1,
-                "{format:?} {representation:?}:\n{}",
-                displayed(&plan)
+                "{format:?} {representation:?}:\n{shape}"
             );
             assert_eq!(sink_exec.partition_sinks().len(), 1);
         }
@@ -194,32 +185,32 @@ fn one_split_point_gives_two_intervals_and_none_gives_one() {
 
             let (two, _) =
                 file_sink_plan(&interval_merge("1:3"), &dataset, hostile_config(8), None);
+            let two_shape = PlanShape::of(&two);
             assert_eq!(
                 two.output_partitioning().partition_count(),
                 2,
-                "{format:?} {representation:?}:\n{}",
-                displayed(&two)
+                "{format:?} {representation:?}:\n{two_shape}"
             );
-            assert_one_merge_per_interval(
-                &two,
-                2,
-                representation,
-                &format!("{format:?} {representation:?}"),
-            );
+            two_shape.assert_one_merge_per_interval(2, SAMPLES.len(), representation);
 
             let (one, _) = file_sink_plan(&interval_merge(""), &dataset, hostile_config(8), None);
+            let one_shape = PlanShape::of(&one);
+            let sink_nodes = one_shape.nodes_of::<PartitionedSinkExec>();
+            assert_eq!(
+                sink_nodes.len(),
+                1,
+                "{format:?} {representation:?}:\n{one_shape}"
+            );
             assert!(
-                one.downcast_ref::<PartitionedSinkExec>().is_some(),
-                "{format:?} {representation:?}:\n{}",
-                displayed(&one)
+                Arc::ptr_eq(&sink_nodes[0], &one),
+                "{format:?} {representation:?}: expected the partitioned sink at the plan root:\n{one_shape}"
             );
             assert_eq!(
                 one.output_partitioning().partition_count(),
                 1,
-                "{format:?} {representation:?}:\n{}",
-                displayed(&one)
+                "{format:?} {representation:?}:\n{one_shape}"
             );
-            assert_merge_tree(&one, &[SAMPLES.len()]);
+            one_shape.assert_one_merge_per_interval(1, SAMPLES.len(), representation);
         }
     }
 }
@@ -283,7 +274,7 @@ fn writes_one_file_per_interval_holding_the_union_formulations_rows() {
                 for (index, (path, batches)) in files.iter().enumerate() {
                     let rows: Vec<Row> = batches
                         .iter()
-                        .flat_map(|batch| rows(batch, representation))
+                        .flat_map(|batch| fixture::decode_rows(batch, representation))
                         .collect();
                     if empty_intervals.contains(&index) {
                         assert!(rows.is_empty(), "{context}: {path} holds {rows:?}");
@@ -322,7 +313,7 @@ fn a_limited_write_puts_one_file_in_the_directory() {
             let (path, batches) = files.first().unwrap();
             let rows: Vec<Row> = batches
                 .iter()
-                .flat_map(|batch| rows(batch, representation))
+                .flat_map(|batch| fixture::decode_rows(batch, representation))
                 .collect();
             assert_eq!(rows.len(), LIMIT, "{context}: {path}: {rows:?}");
             // A limit can cut between rows sharing a locus, among which sample order is
@@ -338,114 +329,8 @@ fn a_limited_write_puts_one_file_in_the_directory() {
     }
 }
 
-fn interval_merge(split_points: &str) -> Formulation {
-    let split_points = if split_points.is_empty() {
-        SplitPoints::new(Vec::new()).unwrap()
-    } else {
-        split_points.parse().unwrap()
-    };
-    Formulation::CombineRefsIntervalMerge { split_points }
-}
-
-/// The interval merges are `intervals` single-partition inputs of one union, each a merge over one
-/// scan per sample with the interval's predicate pushed into every scan, and nothing else stands
-/// between the scans and the sink: no filter, sort, or repartition operator anywhere. Above the
-/// union of intervals there is either nothing, under the partitioned sink, or the one merge a
-/// single-partition sink requires. One interval is the flat merge.
-fn assert_one_merge_per_interval(
-    plan: &Arc<dyn ExecutionPlan>,
-    intervals: usize,
-    representation: LocusRepresentation,
-    context: &str,
-) {
-    if intervals == 1 {
-        assert_flat_merge(plan, SAMPLES.len());
-    } else {
-        let unions = nodes_of::<UnionExec>(plan);
-        let outer = unions.first().unwrap_or_else(|| {
-            panic!(
-                "{context}: expected a union of intervals:\n{}",
-                displayed(plan)
-            )
-        });
-        assert_eq!(
-            outer.children().len(),
-            intervals,
-            "{context}: expected one union input per interval:\n{}",
-            displayed(plan)
-        );
-        for input in outer.children() {
-            assert_flat_merge(input, SAMPLES.len());
-        }
-        let merges = nodes_of::<SortPreservingMergeExec>(plan);
-        let final_merges = merges.len().checked_sub(intervals).unwrap_or_else(|| {
-            panic!(
-                "{context}: expected a merge per interval:\n{}",
-                displayed(plan)
-            )
-        });
-        assert!(
-            final_merges <= 1,
-            "{context}: expected at most one merge above the union of intervals:\n{}",
-            displayed(plan)
-        );
-        if final_merges == 1 {
-            assert!(
-                merges[0].children()[0]
-                    .downcast_ref::<UnionExec>()
-                    .is_some(),
-                "{context}: expected the final merge directly above the union of intervals:\n{}",
-                displayed(plan)
-            );
-        }
-    }
-    let n_scans = intervals.checked_mul(SAMPLES.len()).unwrap();
-    if intervals > 1 {
-        assert_filter_reaches_every_scan(plan, n_scans, representation);
-    } else {
-        assert_eq!(
-            nodes_of::<DataSourceExec>(plan).len(),
-            n_scans,
-            "{context}:\n{}",
-            displayed(plan)
-        );
-    }
-    for (name, found) in [
-        ("FilterExec", nodes_of::<FilterExec>(plan).len()),
-        ("SortExec", nodes_of::<SortExec>(plan).len()),
-        ("RepartitionExec", nodes_of::<RepartitionExec>(plan).len()),
-    ] {
-        assert_eq!(
-            found,
-            0,
-            "{context}: expected no {name}:\n{}",
-            displayed(plan)
-        );
-    }
-    let unions = nodes_of::<UnionExec>(plan);
-    assert!(
-        unions
-            .iter()
-            .all(|union| union.output_partitioning().partition_count() == union.children().len()),
-        "{context}: expected every union input to be one partition:\n{}",
-        displayed(plan)
-    );
-}
-
-/// A combined row: locus, alleles, and sample.
-type Row = (Locus, String, String);
-
-fn loci(rows: &[Row]) -> Vec<Locus> {
+fn loci(rows: &[Row]) -> Vec<crate::locus::Locus> {
     rows.iter().map(|(locus, _, _)| *locus).collect()
-}
-
-fn rows(batch: &RecordBatch, representation: LocusRepresentation) -> Vec<Row> {
-    fixture::decode_loci(batch, representation)
-        .into_iter()
-        .zip(fixture::string_column(batch, "alleles"))
-        .zip(fixture::string_column(batch, "s"))
-        .map(|((locus, alleles), sample)| (locus, alleles, sample))
-        .collect()
 }
 
 /// Runs `formulation` over the fixture on a hostile session and two threads into a collecting
@@ -459,7 +344,7 @@ fn collected_rows(
     let (_, batches) = collected_batches(formulation, dataset, Ok);
     batches
         .iter()
-        .flat_map(|batch| rows(batch, representation))
+        .flat_map(|batch| fixture::decode_rows(batch, representation))
         .collect()
 }
 

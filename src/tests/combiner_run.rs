@@ -6,6 +6,10 @@ use crate::{
     formulation::Formulation,
     locus::{Locus, LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
+    tests::{
+        plan_shape::exec_names,
+        support::{grouped_merge, interval_merge},
+    },
 };
 use datafusion::{
     arrow::{
@@ -395,7 +399,7 @@ fn explain_actions_return_plain_and_analyzed_plans() {
         panic!("expected a plan, got {outcome:?}");
     };
     assert!(plan.contains("physical_plan"), "plan:\n{plan}");
-    assert!(!plan.contains("LimitExec"), "plan:\n{plan}");
+    assert!(!exec_names(&plan).contains(&"LimitExec"), "plan:\n{plan}");
     assert!(
         plan.contains("DataSinkExec: sink=DrainingSink"),
         "plan:\n{plan}"
@@ -415,7 +419,7 @@ fn explain_actions_return_plain_and_analyzed_plans() {
     };
     assert!(plan.contains("Plan with Metrics"), "plan:\n{plan}");
     assert!(plan.contains("elapsed_compute"), "plan:\n{plan}");
-    assert!(!plan.contains("LimitExec"), "plan:\n{plan}");
+    assert!(!exec_names(&plan).contains(&"LimitExec"), "plan:\n{plan}");
     assert!(
         plan.contains("DataSinkExec: sink=DrainingSink"),
         "plan:\n{plan}"
@@ -485,7 +489,7 @@ fn explain_analyze_with_a_write_performs_the_write() {
         panic!("expected a plan, got {outcome:?}");
     };
     assert!(plan.contains("Plan with Metrics"), "plan:\n{plan}");
-    assert!(plan.contains("DataSinkExec"), "plan:\n{plan}");
+    assert!(exec_names(&plan).contains(&"DataSinkExec"), "plan:\n{plan}");
     let reader = SerializedFileReader::try_from(output_path.as_path()).unwrap();
     assert_eq!(reader.metadata().file_metadata().num_rows(), 32);
 }
@@ -545,32 +549,20 @@ fn grouped_merge_explains_a_merge_per_group_beneath_the_final_merge() {
             .unwrap(),
         );
 
+        let explained_names = exec_names(&explained);
         assert_eq!(
-            explained.matches("SortPreservingMergeExec").count(),
+            explained_names
+                .iter()
+                .filter(|&&name| name == "SortPreservingMergeExec")
+                .count(),
             3,
             "{context}:\n{explained}"
         );
-        assert!(!explained.contains("SortExec"), "{context}:\n{explained}");
-        assert_eq!(exec_names(&explained), exec_names(&analyzed), "{context}");
-    }
-}
-
-/// The execution plan node names in a rendered plan, in display order.
-fn exec_names(plan: &str) -> Vec<&str> {
-    plan.split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|word| word.ends_with("Exec"))
-        .collect()
-}
-
-fn grouped_merge(groups: usize) -> Formulation {
-    Formulation::CombineRefsGroupedMerge {
-        groups: NonZeroUsize::new(groups).unwrap(),
-    }
-}
-
-fn interval_merge(split_points: &str) -> Formulation {
-    Formulation::CombineRefsIntervalMerge {
-        split_points: split_points.parse().unwrap(),
+        assert!(
+            !explained_names.contains(&"SortExec"),
+            "{context}:\n{explained}"
+        );
+        assert_eq!(explained_names, exec_names(&analyzed), "{context}");
     }
 }
 
@@ -694,14 +686,18 @@ fn interval_merge_explains_the_partitioned_sink_and_analyze_performs_the_writes(
         explained.contains("PartitionedSinkExec: partitions=3, sink=VortexSink"),
         "plan:\n{explained}"
     );
+    let explained_names = exec_names(&explained);
     assert_eq!(
-        explained.matches("SortPreservingMergeExec").count(),
+        explained_names
+            .iter()
+            .filter(|&&name| name == "SortPreservingMergeExec")
+            .count(),
         3,
         "plan:\n{explained}"
     );
-    assert!(!explained.contains("SortExec"), "plan:\n{explained}");
+    assert!(!explained_names.contains(&"SortExec"), "plan:\n{explained}");
     assert!(
-        !explained.contains("CoalescePartitionsExec"),
+        !explained_names.contains(&"CoalescePartitionsExec"),
         "plan:\n{explained}"
     );
     assert!(!directory.exists(), "explain wrote {}", directory.display());
@@ -720,7 +716,7 @@ fn interval_merge_explains_the_partitioned_sink_and_analyze_performs_the_writes(
         .unwrap(),
     );
     assert!(analyzed.contains("Plan with Metrics"), "plan:\n{analyzed}");
-    assert_eq!(exec_names(&explained), exec_names(&analyzed));
+    assert_eq!(explained_names, exec_names(&analyzed));
     // The partitioned sink reports its partition sinks' metrics together, so the analyzed line
     // carries the Vortex sink's row counter.
     let sink_line = analyzed

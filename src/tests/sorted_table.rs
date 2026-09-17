@@ -8,6 +8,7 @@ use crate::{
     locus::{Locus, LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
     sorted_table::{AttachedScalar, SortedTable},
+    tests::{plan_shape::PlanShape, support::hostile_config},
 };
 use datafusion::{
     arrow::{
@@ -29,10 +30,11 @@ use datafusion::{
     },
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties, Partitioning, SortOrderPushdownResult,
-        StatisticsArgs, StatisticsContext, displayable,
+        StatisticsArgs, StatisticsContext, filter::FilterExec,
     },
-    prelude::{SessionConfig, SessionContext, col, lit},
+    prelude::{SessionContext, col, lit},
 };
+use object_store::path::Path;
 use std::sync::Arc;
 
 fn column_statistics(min: Option<i32>, max: Option<i32>) -> ColumnStatistics {
@@ -100,30 +102,20 @@ fn multi_column_table(store: &MemoryStore, files: Vec<PartitionedFile>) -> Sorte
 }
 
 /// Plans `table` on a fresh session that knows `store`, the store the table was built over.
-async fn file_group_paths(store: &MemoryStore, table: SortedTable) -> Vec<String> {
+async fn file_group_paths(store: &MemoryStore, table: SortedTable) -> Vec<Path> {
     let ctx = SessionContext::new();
     store.register(&ctx);
     file_group_paths_in(&ctx, table).await
 }
 
-async fn file_group_paths_in(ctx: &SessionContext, table: SortedTable) -> Vec<String> {
+async fn file_group_paths_in(ctx: &SessionContext, table: SortedTable) -> Vec<Path> {
     let plan = ctx
         .read_table(Arc::new(table))
         .unwrap()
         .create_physical_plan()
         .await
         .unwrap();
-    displayed_file_paths(plan.as_ref())
-}
-
-// EXPLAIN is a public observation of the file group, independent of the source's type.
-fn displayed_file_paths(plan: &dyn ExecutionPlan) -> Vec<String> {
-    let text = displayable(plan).indent(true).to_string();
-    let (_, group) = text
-        .split_once("file_groups={1 group: [[")
-        .unwrap_or_else(|| panic!("{text}"));
-    let (paths, _) = group.split_once("]]").unwrap();
-    paths.split(", ").map(ToString::to_string).collect()
+    PlanShape::of(&plan).files_in_only_scan()
 }
 
 fn file(path: &str, min: Option<i32>, max: Option<i32>) -> PartitionedFile {
@@ -330,8 +322,8 @@ async fn true_scalar_filters_leave_the_scan_unchanged_with_its_limit() {
     assert_eq!(plan.schema(), baseline.schema());
     assert_eq!(plan.output_ordering(), baseline.output_ordering());
     assert_eq!(
-        displayable(plan.as_ref()).indent(true).to_string(),
-        displayable(baseline.as_ref()).indent(true).to_string()
+        PlanShape::of(&plan).to_string(),
+        PlanShape::of(&baseline).to_string()
     );
 
     let inexact = table
@@ -347,11 +339,8 @@ async fn true_scalar_filters_leave_the_scan_unchanged_with_its_limit() {
         .create_physical_plan()
         .await
         .unwrap();
-    assert!(
-        plan.is::<DataSourceExec>(),
-        "{}",
-        displayable(plan.as_ref()).indent(true)
-    );
+    let shape = PlanShape::of(&plan);
+    assert!(plan.is::<DataSourceExec>(), "{shape}");
 }
 
 #[test]
@@ -401,15 +390,17 @@ fn inexact_filters_keep_the_logical_residual_and_do_not_truncate_before_filterin
                         })?;
                         assert_eq!((residuals, scans), (1, 1));
                         let plan = df.create_physical_plan().await?;
-                        let text = displayable(plan.as_ref()).indent(true).to_string();
+                        let shape = PlanShape::of(&plan);
+                        let text = shape.to_string();
                         assert!(
                             text.contains("predicate=") || text.contains("predicate:"),
                             "format-level pushdown must retain the predicate: {text}"
                         );
+                        let filters = shape.nodes_of::<FilterExec>();
                         if matches!(format, FixtureFormat::Parquet) && !decode_time_filtering {
-                            assert!(text.contains("FilterExec"), "{text}");
+                            assert_eq!(filters.len(), 1, "{shape}");
                         } else {
-                            assert!(!text.contains("FilterExec"), "{text}");
+                            assert!(filters.is_empty(), "{shape}");
                         }
                         let batches =
                             datafusion::physical_plan::collect(plan, ctx.task_ctx()).await?;
@@ -441,9 +432,7 @@ fn inexact_filters_keep_the_logical_residual_and_do_not_truncate_before_filterin
 
 #[tokio::test]
 async fn scan_orders_files_and_stays_one_partition_under_a_hostile_session() {
-    let mut config = SessionConfig::new().with_target_partitions(8);
-    config.options_mut().optimizer.repartition_file_min_size = 0;
-    let ctx = SessionContext::new_with_config(config);
+    let ctx = SessionContext::new_with_config(hostile_config(8));
     let store = MemoryStore::new("hostile-session");
     store.register(&ctx);
     let table = SortedTable::new(
@@ -480,8 +469,8 @@ async fn scan_orders_files_and_stays_one_partition_under_a_hostile_session() {
     );
 
     assert_eq!(
-        displayed_file_paths(plan.as_ref()),
-        ["zzz.parquet", "aaa.parquet"]
+        PlanShape::of(&plan).files_in_only_scan(),
+        [Path::from("zzz.parquet"), Path::from("aaa.parquet")]
     );
     assert_eq!(
         plan.schema().field_with_name("source").unwrap().data_type(),
@@ -516,7 +505,10 @@ async fn multi_column_ranges_are_compared_lexicographically() {
     )
     .await;
 
-    assert_eq!(paths, ["first.parquet", "next.parquet"]);
+    assert_eq!(
+        paths,
+        [Path::from("first.parquet"), Path::from("next.parquet")]
+    );
 }
 
 /// A Hail-style cut between the alleles of one locus: the earlier file is constant on the
@@ -548,7 +540,10 @@ async fn a_split_inside_a_leading_value_is_ordered_by_the_trailing_column() {
     )
     .await;
 
-    assert_eq!(paths, ["head.parquet", "tail.parquet"]);
+    assert_eq!(
+        paths,
+        [Path::from("head.parquet"), Path::from("tail.parquet")]
+    );
 }
 
 #[tokio::test]
@@ -613,8 +608,8 @@ async fn sort_pushdown_is_exact_for_the_declared_order_and_its_prefix() {
         };
         assert_eq!(inner.output_ordering(), Some(order));
         assert_eq!(
-            displayed_file_paths(inner.as_ref()),
-            ["head.parquet", "tail.parquet"]
+            PlanShape::of(&inner).files_in_only_scan(),
+            [Path::from("head.parquet"), Path::from("tail.parquet")]
         );
     }
     let other = vec![PhysicalSortExpr {
@@ -646,8 +641,8 @@ async fn touching_bounds_accept_two_files_sharing_a_locus_under_locus_only_order
         .unwrap();
     assert!(plan.output_ordering().is_some());
     assert_eq!(
-        displayed_file_paths(plan.as_ref()),
-        ["earlier.parquet", "later.parquet"]
+        PlanShape::of(&plan).files_in_only_scan(),
+        [Path::from("earlier.parquet"), Path::from("later.parquet")]
     );
 }
 
@@ -912,7 +907,7 @@ async fn zero_row_files_are_dropped_from_the_file_group() {
     )
     .await;
 
-    assert_eq!(paths, ["rows.parquet"]);
+    assert_eq!(paths, [Path::from("rows.parquet")]);
 }
 
 #[tokio::test]
@@ -972,10 +967,7 @@ fn inferred_statistics_order_the_files_against_path_order() {
         file_group_paths_in(&ctx, table).await
     });
 
-    let names: Vec<_> = paths
-        .iter()
-        .map(|path| path.rsplit('/').next().unwrap())
-        .collect();
+    let names: Vec<_> = paths.iter().map(|path| path.filename().unwrap()).collect();
     assert_eq!(names, ["d.parquet", "c.parquet", "b.parquet", "a.parquet"]);
 }
 

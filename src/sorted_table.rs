@@ -76,6 +76,16 @@ use datafusion::{
 use datafusion_datasource::compute_all_files_statistics;
 use std::sync::Arc;
 
+/// The file-scan configuration hidden by this table's ordering-preserving source wrapper.
+#[cfg(test)]
+pub(crate) fn file_scan_config(
+    source: &dyn datafusion::datasource::source::DataSource,
+) -> Option<&FileScanConfig> {
+    source
+        .downcast_ref::<OrderedSource>()
+        .and_then(OrderedSource::file_scan_config)
+}
+
 /// A scalar column appended to every row in a sorted table.
 #[derive(Clone, Debug)]
 pub struct AttachedScalar {

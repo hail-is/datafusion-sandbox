@@ -4,7 +4,7 @@
 //! - [`cpu_runtime`] builds the runtime used for plan execution.
 //! - [`dataset`] describes and reads stored datasets.
 //! - [`file_order`] recovers the order of a sorted table's files from their statistics.
-//! - [`fixture`] builds small stored datasets for tests and benchmarks.
+//! - [`fixture`] builds small stored datasets for tests.
 //! - [`format`] reads and writes supported file formats.
 //! - [`formulation`] builds the alternative combiner plans under comparison.
 //! - [`locus`] describes the supported stored locus representations, split points, and locus

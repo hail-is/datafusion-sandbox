@@ -4,19 +4,14 @@
 //! The shared loops in the parent module already hold grouped-merge to the merge tree over two
 //! groups under a hostile session, with and without a filter.
 
-use super::{
-    FORMATS, REPRESENTATIONS, assert_merge_tree, collected_batches, dataset, displayed,
-    drained_plan, file_sink_plan, hostile_config, nodes_of, operators,
-};
-use crate::fixture::{self, FixtureFormat, SAMPLES};
+use super::{FORMATS, REPRESENTATIONS, collected_batches, dataset, drained_plan, file_sink_plan};
+use crate::fixture::{self, Row, SAMPLES};
 use crate::formulation::Formulation;
-use crate::locus::{Locus, LocusRepresentation};
-use datafusion::{
-    arrow::record_batch::RecordBatch,
-    physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec,
+use crate::tests::{
+    plan_shape::PlanShape,
+    support::{grouped_merge, hostile_config},
 };
-
-use std::num::NonZeroUsize;
+use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 
 #[test]
 fn displays_as_grouped_merge() {
@@ -38,7 +33,7 @@ fn a_group_of_one_sample_feeds_the_final_merge_directly() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
             let plan = super::physical_plan(&grouped_merge(3), &dataset(format, representation));
-            assert_merge_tree(&plan, &[2, 1, 1]);
+            PlanShape::of(&plan).assert_merge_tree(&[2, 1, 1]);
         }
     }
 }
@@ -52,12 +47,12 @@ fn one_group_or_one_sample_per_group_plans_as_the_union_formulation() {
             let union = super::physical_plan(&Formulation::CombineRefsUnion, &dataset);
             for groups in [1, SAMPLES.len(), 8] {
                 let grouped = super::physical_plan(&grouped_merge(groups), &dataset);
+                let grouped_shape = PlanShape::of(&grouped);
+                let union_shape = PlanShape::of(&union);
                 assert_eq!(
-                    operators(&grouped),
-                    operators(&union),
-                    "{format:?} {representation:?} {groups} groups:\n{}\n{}",
-                    displayed(&grouped),
-                    displayed(&union),
+                    grouped_shape.operators(),
+                    union_shape.operators(),
+                    "{format:?} {representation:?} {groups} groups:\n{grouped_shape}\n{union_shape}",
                 );
             }
         }
@@ -81,15 +76,18 @@ fn a_row_limit_becomes_a_fetch_on_every_merge() {
                 file_sink_plan(&grouped_merge(2), &dataset, hostile_config(8), Some(LIMIT));
 
             for (sink, plan) in [("draining", drained), ("file", written)] {
-                assert_merge_tree(&plan, &[2, 2]);
-                let merges = nodes_of::<SortPreservingMergeExec>(&plan);
-                assert_eq!(merges.len(), 3, "{}", displayed(&plan));
-                for merge in &merges {
+                let shape = PlanShape::of(&plan);
+                shape.assert_merge_tree(&[2, 2]);
+                let merges = shape.nodes_of::<SortPreservingMergeExec>();
+                assert_eq!(merges.len(), 3, "{shape}");
+                for node in &merges {
+                    let merge = node
+                        .downcast_ref::<SortPreservingMergeExec>()
+                        .expect("nodes_of returned a node of another type");
                     assert_eq!(
                         merge.fetch(),
                         Some(LIMIT),
-                        "{format:?} {representation:?} {sink} sink:\n{}",
-                        displayed(&plan)
+                        "{format:?} {representation:?} {sink} sink:\n{shape}"
                     );
                 }
             }
@@ -103,7 +101,15 @@ fn a_row_limit_becomes_a_fetch_on_every_merge() {
 fn returns_the_union_formulations_rows_in_locus_order() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let union = rows(&Formulation::CombineRefsUnion, format, representation);
+            let rows = |formulation: &Formulation| {
+                let dataset = dataset(format, representation);
+                let (_, batches) = collected_batches(formulation, dataset, Ok);
+                batches
+                    .iter()
+                    .flat_map(|batch| fixture::decode_rows(batch, representation))
+                    .collect::<Vec<Row>>()
+            };
+            let union = rows(&Formulation::CombineRefsUnion);
             assert_eq!(
                 union.len(),
                 fixture::sample_rows()
@@ -113,7 +119,7 @@ fn returns_the_union_formulations_rows_in_locus_order() {
             );
             for groups in [2, 3] {
                 let context = format!("{format:?} {representation:?} {groups} groups");
-                let grouped = rows(&grouped_merge(groups), format, representation);
+                let grouped = rows(&grouped_merge(groups));
                 let loci =
                     |rows: &[Row]| rows.iter().map(|(locus, _, _)| *locus).collect::<Vec<_>>();
                 assert_eq!(loci(&grouped), loci(&union), "{context}");
@@ -126,35 +132,4 @@ fn returns_the_union_formulations_rows_in_locus_order() {
             }
         }
     }
-}
-
-fn grouped_merge(groups: usize) -> Formulation {
-    Formulation::CombineRefsGroupedMerge {
-        groups: NonZeroUsize::new(groups).unwrap(),
-    }
-}
-
-/// A combined row: locus, alleles, and sample.
-type Row = (Locus, String, String);
-
-/// Runs `formulation` over the fixture on a hostile session and two threads, so that the
-/// group merges have another thread to run on, into a collecting sink, and returns the rows the
-/// sink received in order.
-fn rows(
-    formulation: &Formulation,
-    format: FixtureFormat,
-    representation: LocusRepresentation,
-) -> Vec<Row> {
-    let dataset = dataset(format, representation);
-    let (_, batches) = collected_batches(formulation, dataset, Ok);
-    batches
-        .iter()
-        .flat_map(|batch: &RecordBatch| {
-            fixture::decode_loci(batch, representation)
-                .into_iter()
-                .zip(fixture::string_column(batch, "alleles"))
-                .zip(fixture::string_column(batch, "s"))
-                .map(|((locus, alleles), sample)| (locus, alleles, sample))
-        })
-        .collect()
 }

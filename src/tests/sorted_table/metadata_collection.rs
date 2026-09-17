@@ -5,6 +5,7 @@ use super::{column_statistics, file, ordering, sample_table_with_format, schema,
 use crate::fixture::{self, FixtureFormat, MemoryStore, block_on};
 use crate::locus::LocusRepresentation;
 use crate::sorted_table::SortedTable;
+use crate::tests::plan_shape::PlanShape;
 
 use async_trait::async_trait;
 use datafusion::{
@@ -29,7 +30,7 @@ use datafusion::{
         runtime_env::RuntimeEnvBuilder,
     },
     physical_expr::{LexOrdering, PhysicalSortExpr, expressions::Column},
-    physical_plan::{ExecutionPlan, displayable},
+    physical_plan::ExecutionPlan,
     prelude::{SessionConfig, SessionContext},
 };
 use object_store::{ObjectMeta, ObjectStore};
@@ -367,7 +368,12 @@ async fn planned(ctx: &SessionContext, table: Arc<SortedTable>) -> Arc<dyn Execu
 }
 
 async fn planned_paths(ctx: &SessionContext, table: Arc<SortedTable>) -> Vec<String> {
-    super::displayed_file_paths(planned(ctx, table).await.as_ref())
+    let plan = planned(ctx, table).await;
+    PlanShape::of(&plan)
+        .files_in_only_scan()
+        .into_iter()
+        .map(|path| path.to_string())
+        .collect()
 }
 
 #[test]
@@ -501,8 +507,8 @@ async fn completion_order_does_not_change_the_recovered_file_order_or_the_plan()
             "the gate must have controlled completion"
         );
         assert_eq!(
-            displayable(plan.as_ref()).indent(true).to_string(),
-            displayable(baseline.as_ref()).indent(true).to_string()
+            PlanShape::of(&plan).to_string(),
+            PlanShape::of(&baseline).to_string()
         );
         assert_eq!(
             statistics(plan.as_ref(), None),

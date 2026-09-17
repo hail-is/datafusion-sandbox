@@ -74,11 +74,22 @@ _Avoid_: output (ambiguous with Outcome), destination, write path
 The DataFusion configuration and state a plan is built against.
 _Avoid_: context, config (either alone is narrower than what plan shape depends on)
 
+**Hostile session**:
+A session whose settings let the optimizer split any file scan across several partitions. A plan
+shape that holds under one holds because the plan pins it, not because the settings spared it.
+_Avoid_: adversarial config, splitting session, test session (unqualified)
+
 **Plan shape**:
 The structure of the physical plan a plan builder produces: which operators appear and how they
 nest. Distinct from the plan's results; two plan shapes can be equivalent in output and differ by
 an order of magnitude in time.
 _Avoid_: query plan (ambiguous between logical and physical), execution graph
+
+**Merge tree**:
+The plan shape that yields a combiner's rows in locus order with no sort: one sort-preserving merge
+over each sample group's union of scans, beneath a final merge of the groups. With one group it is a
+flat merge, one merge over every sample's scan.
+_Avoid_: nested merge, merge hierarchy, sort tree
 
 ### Runtimes
 

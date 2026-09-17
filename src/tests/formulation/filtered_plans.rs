@@ -18,23 +18,16 @@
 //! compared across formats rather than against its unfiltered shape.
 
 use super::{
-    FORMATS, FixtureDataset, REPRESENTATIONS, assert_filter_reaches_every_scan, assert_merge_tree,
-    collected_batches, dataset, displayed, expected_groups, formulations, hostile_config, nodes_of,
-    operators, planned, sink_plan,
+    FORMATS, FixtureDataset, REPRESENTATIONS, collected_batches, dataset, expected_groups,
+    formulations, planned, sink_plan,
 };
 use crate::fixture::{self, FixtureFormat, SAMPLES, SampleRow, block_on};
 use crate::formulation::Formulation;
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::ordered_frame::OrderedFrame;
+use crate::tests::{plan_shape::PlanShape, support::hostile_config};
 
-use datafusion::{
-    arrow::record_batch::RecordBatch,
-    datasource::source::DataSourceExec,
-    logical_expr::Expr,
-    physical_plan::{
-        ExecutionPlan, filter::FilterExec, repartition::RepartitionExec, union::UnionExec,
-    },
-};
+use datafusion::{logical_expr::Expr, physical_plan::ExecutionPlan};
 
 use std::{ops::Range, sync::Arc};
 
@@ -110,11 +103,12 @@ fn filtered_plans_keep_the_filter_inside_the_scans_in_both_formats_and_represent
                         &dataset,
                         restriction.filter(representation),
                     );
-                    assert_filter_stays_inside_the_scans(
-                        &plan,
-                        &expected_groups(formulation, SAMPLES.len()),
-                    );
-                    assert_filter_reaches_every_scan(&plan, SAMPLES.len(), representation);
+                    let shape = PlanShape::of(&plan);
+                    shape.assert_filter_stays_inside_the_scans(&expected_groups(
+                        formulation,
+                        SAMPLES.len(),
+                    ));
+                    shape.assert_filter_reaches_every_scan(SAMPLES.len(), representation);
                 }
             }
         }
@@ -139,12 +133,12 @@ fn parquet_and_vortex_filtered_plans_have_the_same_operators() {
                     &vortex,
                     restriction.filter(representation),
                 );
+                let parquet_shape = PlanShape::of(&parquet_plan);
+                let vortex_shape = PlanShape::of(&vortex_plan);
                 assert_eq!(
-                    operators(&parquet_plan),
-                    operators(&vortex_plan),
-                    "{representation:?} {formulation:?} {restriction:?}:\n{}\n{}",
-                    displayed(&parquet_plan),
-                    displayed(&vortex_plan),
+                    parquet_shape.operators(),
+                    vortex_shape.operators(),
+                    "{representation:?} {formulation:?} {restriction:?}:\n{parquet_shape}\n{vortex_shape}",
                 );
             }
         }
@@ -178,12 +172,12 @@ fn filtering_the_reference_combiner_leaves_its_operators_unchanged() {
                         &dataset,
                         restriction.filter(representation),
                     );
+                    let filtered_shape = PlanShape::of(&filtered);
+                    let unfiltered_shape = PlanShape::of(&unfiltered);
                     assert_eq!(
-                        operators(&filtered),
-                        operators(&unfiltered),
-                        "{format:?} {representation:?} {formulation:?} {restriction:?}:\n{}\n{}",
-                        displayed(&filtered),
-                        displayed(&unfiltered),
+                        filtered_shape.operators(),
+                        unfiltered_shape.operators(),
+                        "{format:?} {representation:?} {formulation:?} {restriction:?}:\n{filtered_shape}\n{unfiltered_shape}",
                     );
                 }
             }
@@ -217,37 +211,37 @@ fn assert_selects_files_and_returns_rows(restriction: LocusRestriction) {
                     collected_batches(formulation, dataset(format, representation), move |frame| {
                         frame.filter(filter)
                     });
-                assert_filter_stays_inside_the_scans(
-                    &plan,
-                    &expected_groups(formulation, SAMPLES.len()),
-                );
-                assert_filter_reaches_every_scan(&plan, SAMPLES.len(), representation);
+                let shape = PlanShape::of(&plan);
+                shape.assert_filter_stays_inside_the_scans(&expected_groups(
+                    formulation,
+                    SAMPLES.len(),
+                ));
+                shape.assert_filter_reaches_every_scan(SAMPLES.len(), representation);
+                let scanned_files = shape.scanned_files();
+                let scanned_stems: Vec<_> = scanned_files
+                    .iter()
+                    .map(|paths| fixture::file_stems(paths))
+                    .collect();
                 assert_eq!(
-                    scanned_stems(&plan),
+                    scanned_stems,
                     vec![restriction.expected_stems().to_vec(); SAMPLES.len()],
-                    "{context}:\n{}",
-                    displayed(&plan),
+                    "{context}:\n{shape}",
                 );
 
-                let rows: Vec<_> = batches
-                    .iter()
-                    .flat_map(|batch| rows(batch, representation))
-                    .collect();
                 match formulation {
                     Formulation::CombineRefsUnion
                     | Formulation::CombineRefsGroupedMerge { .. }
                     | Formulation::CombineRefsIntervalMerge { .. } => {
-                        let samples: Vec<String> = batches
+                        let rows: Vec<fixture::Row> = batches
                             .iter()
-                            .flat_map(|batch| fixture::string_column(batch, "s"))
+                            .flat_map(|batch| fixture::decode_rows(batch, representation))
                             .collect();
-                        assert_eq!(rows.len(), samples.len(), "{context}");
                         assert_eq!(
                             rows.len(),
                             expected_rows.len().checked_mul(SAMPLES.len()).unwrap(),
                             "{context}: {rows:?}"
                         );
-                        let loci: Vec<_> = rows.iter().map(|(locus, _)| *locus).collect();
+                        let loci: Vec<_> = rows.iter().map(|(locus, _, _)| *locus).collect();
                         assert!(
                             loci.is_sorted(),
                             "{context}: rows are not in locus order: {loci:?}"
@@ -255,14 +249,21 @@ fn assert_selects_files_and_returns_rows(restriction: LocusRestriction) {
                         for sample in SAMPLES {
                             let sample_rows: Vec<_> = rows
                                 .iter()
-                                .zip(&samples)
-                                .filter(|(_, s)| s == sample)
-                                .map(|(row, _)| row.clone())
+                                .filter(|(_, _, row_sample)| row_sample == sample)
+                                .map(|(locus, alleles, _)| (*locus, alleles.clone()))
                                 .collect();
                             assert_eq!(sample_rows, expected_rows, "{context}: rows of {sample}");
                         }
                     }
                     Formulation::CombineAllelesUnion => {
+                        let rows: Vec<_> = batches
+                            .iter()
+                            .flat_map(|batch| {
+                                fixture::decode_loci(batch, representation)
+                                    .into_iter()
+                                    .zip(fixture::string_column(batch, "alleles"))
+                            })
+                            .collect();
                         assert_eq!(rows, expected_rows, "{context}");
                     }
                 }
@@ -293,65 +294,4 @@ fn filtered_physical_plan(
         };
         sink_plan(ordered).await.unwrap()
     })
-}
-
-/// The filter changed nothing between the scans and the merges: no filter operator, the merge
-/// tree over `groups` with one ordered partition into every union input and no repartition
-/// beneath any union, and no sort. Operators above the outermost union may repartition under the
-/// hostile session's target partitions, as long as every repartition preserves its input order.
-fn assert_filter_stays_inside_the_scans(plan: &Arc<dyn ExecutionPlan>, groups: &[usize]) {
-    assert_merge_tree(plan, groups);
-    assert!(
-        nodes_of::<FilterExec>(plan).is_empty(),
-        "expected the filter to be applied inside every scan, but the plan contains a FilterExec:\n{}",
-        displayed(plan),
-    );
-    for union in nodes_of::<UnionExec>(plan) {
-        for input in union.children() {
-            assert!(
-                nodes_of::<RepartitionExec>(input).is_empty(),
-                "expected no repartition beneath a union:\n{}",
-                displayed(plan),
-            );
-        }
-    }
-    for repartition in nodes_of::<RepartitionExec>(plan) {
-        assert!(
-            repartition.maintains_input_order().iter().all(|&kept| kept),
-            "expected every repartition above the union to preserve its input order:\n{}",
-            displayed(plan),
-        );
-    }
-}
-
-/// The file stems each scan displays, one scan per sample in union order.
-fn scanned_stems(plan: &Arc<dyn ExecutionPlan>) -> Vec<Vec<&'static str>> {
-    nodes_of::<DataSourceExec>(plan)
-        .iter()
-        .map(|scan| {
-            let text = displayed(scan);
-            let (_, group) = text
-                .split_once("file_groups={1 group: [[")
-                .unwrap_or_else(|| panic!("{text}"));
-            let (paths, _) = group.split_once("]]").unwrap();
-            paths.split(", ").map(stem).collect()
-        })
-        .collect()
-}
-
-/// The fixture file stem `path` names, as one of the fixture's own stems.
-fn stem(path: &str) -> &'static str {
-    let (stem, _) = path.rsplit('/').next().unwrap().split_once('.').unwrap();
-    ["a", "b", "c", "d"]
-        .into_iter()
-        .find(|known| *known == stem)
-        .unwrap_or_else(|| panic!("{path} is not a fixture file"))
-}
-
-/// Each row's locus and alleles, in result order.
-fn rows(batch: &RecordBatch, representation: LocusRepresentation) -> Vec<(Locus, String)> {
-    fixture::decode_loci(batch, representation)
-        .into_iter()
-        .zip(fixture::string_column(batch, "alleles"))
-        .collect()
 }

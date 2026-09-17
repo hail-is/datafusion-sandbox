@@ -17,6 +17,13 @@ Each `tests` subtree root states whose tests it contains and where the parent's 
 crate currently needs only the library root's `src/tests.rs` subtree. Nested parents add their own
 subtree when one of their children gains tests.
 
+A `tests` subtree may also hold shared test-support modules that are the tests of no child: plan
+observation, session builders, and constructors several test modules use. They are `#[cfg(test)]` like
+the tests beside them and keep the same rule, reaching tested modules through their paths and naming
+no private item of the parent. Test support becomes public library code, as `fixture` is, only when a
+crate test or benchmark needs it. Nothing under `tests/` or `benches/` observes a plan, so plan
+observation stays inside the library.
+
 A crate test lives under `tests/` and is reserved for behavior that needs the built binary. The two CLI
 process tests in `tests/cli.rs` are the only crate tests. "Module test" and "crate test" describe where
 a test lives and what it can see. "Unit test" and "integration test" describe the claim a test makes.
