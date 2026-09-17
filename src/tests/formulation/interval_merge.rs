@@ -33,13 +33,13 @@ use object_store::path::Path;
 
 use std::{num::NonZeroUsize, sync::Arc};
 
-/// Split points cutting the fixture's eight loci into three intervals: `..chr1:3`, holding
-/// chr1:1, chr1:2, and chr1:2; `chr1:3..chr2:2`, holding chr1:3, chr1:4, and chr2:1; and
-/// `chr2:2..`, holding chr2:2 and chr2:3. The middle interval crosses the contig boundary.
+/// Split points cutting the fixture's eight loci into three intervals: `..chr01:3`, holding
+/// chr01:1, chr01:2, and chr01:2; `chr01:3..chr02:2`, holding chr01:3, chr01:4, and chr02:1; and
+/// `chr02:2..`, holding chr02:2 and chr02:3. The middle interval crosses the contig boundary.
 const THREE_INTERVALS: &str = "1:3,2:2";
 
-/// Split points whose middle interval, `chr1:5..chr2:1`, holds no fixture locus: it lies in the
-/// gap between chr1:4 and chr2:1, both in file b, so every sample's scan keeps that file and
+/// Split points whose middle interval, `chr01:5..chr02:1`, holds no fixture locus: it lies in the
+/// gap between chr01:4 and chr02:1, both in file b, so every sample's scan keeps that file and
 /// returns no rows from it.
 const WITH_AN_EMPTY_INTERVAL: &str = "1:5,2:1";
 

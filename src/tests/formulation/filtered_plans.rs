@@ -50,8 +50,8 @@ enum LocusRestriction {
 
 impl LocusRestriction {
     const ALL: [Self; 2] = [Self::Contig, Self::LocusInterval];
-    const CONTIG: &'static str = "chr2";
-    const INTERVAL_CONTIG: &'static str = "chr1";
+    const CONTIG: &'static str = "chr02";
+    const INTERVAL_CONTIG: &'static str = "chr01";
     const INTERVAL: Range<i32> = 3..5;
 
     fn filter(self, representation: LocusRepresentation) -> Expr {
@@ -79,8 +79,8 @@ impl LocusRestriction {
     }
 
     /// The files of one sample whose ordering statistics admit a matching row, in locus order.
-    /// Files d and c are constant on chr1, b spans the contig boundary, and a is constant on chr2.
-    /// File c holds chr1:3 and b starts at chr1:4.
+    /// Files d and c are constant on chr01, b spans the contig boundary, and a is constant on chr02.
+    /// File c holds chr01:3 and b starts at chr01:4.
     const fn expected_stems(self) -> [&'static str; 2] {
         match self {
             Self::Contig => ["b", "a"],

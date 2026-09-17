@@ -175,8 +175,8 @@ order and group by.
 _Avoid_: site, coordinate, variant (a variant is a locus plus alleles)
 
 **Contig ordinal**:
-The integer standing for a contig, which names it as `chr{ordinal}` and places it in the locus
-ordering. The packed representation stores loci by it; a caller names split points by it.
+The integer standing for a contig, which names it and places it in the locus ordering. The packed
+representation stores loci by it; a caller names split points by it.
 _Avoid_: contig index, chromosome number, contig id
 
 **Locus representation**:

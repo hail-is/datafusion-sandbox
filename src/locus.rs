@@ -300,9 +300,9 @@ impl fmt::Display for LocusRepresentation {
 
 /// A locus named by its contig ordinal and position, as a caller writes it: `contig:position`.
 ///
-/// Orders by contig ordinal, then position. The packed representation's numeric order follows
-/// that order. The contig-position representation stores the rendered name `chr{ordinal}`, whose
-/// string order diverges once ordinals have different digit counts.
+/// Orders by contig ordinal, then position. For the generator-supported ordinals 0 through 22,
+/// both representations' stored order follows that order: packed numerically, contig-position
+/// through fixed-width contig names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Locus {
     contig_ordinal: u32,
@@ -337,8 +337,10 @@ impl Locus {
         })
     }
 
-    /// The locus at `position` on the contig named `contig_name`, as the contig-position
-    /// representation stores it: `chr` followed by the contig ordinal.
+    /// The locus at `position` on the contig named `contig_name`.
+    ///
+    /// Accepts the two-digit form the contig-position representation stores for generated
+    /// datasets and an unpadded ordinal, such as either `chr01` or `chr1`.
     ///
     /// # Errors
     ///
@@ -369,10 +371,11 @@ impl Locus {
         self.position
     }
 
-    /// The contig's name under the contig-position representation.
+    /// The contig's name under the contig-position representation, zero-padded to at least two
+    /// digits.
     #[must_use]
     pub fn contig_name(self) -> String {
-        format!("{}{}", Self::CONTIG_NAME_PREFIX, self.contig_ordinal)
+        format!("{}{:02}", Self::CONTIG_NAME_PREFIX, self.contig_ordinal)
     }
 
     /// This locus as the packed representation stores it: the contig ordinal in the high 32

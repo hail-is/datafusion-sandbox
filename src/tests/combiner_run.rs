@@ -62,7 +62,7 @@ fn renders_collected_contig_position_rows() {
         "rendered outcome:\n{rendered}"
     );
     assert!(
-        rendered.contains("| chr1   | 1        | A,G     | 1"),
+        rendered.contains("| chr01  | 1        | A,G     | 1"),
         "rendered outcome:\n{rendered}"
     );
 }
