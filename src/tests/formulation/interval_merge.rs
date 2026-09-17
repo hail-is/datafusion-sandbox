@@ -466,7 +466,7 @@ fn collected_rows(
 /// Writes `formulation` over `dataset`, under a row limit of `limit` if given, to the output path
 /// plus `suffix` on the fixture's in-memory store under a hostile session and two threads. Reads
 /// the `file_count` files back in index order and returns the reported row count with each file's
-/// path and batches. Fails if the directory holds any other number of files.
+/// path and batches. Fails if the directory holds any file but the `file_count` predicted ones.
 fn write_partitioned(
     formulation: &Formulation,
     dataset: FixtureDataset,
@@ -488,17 +488,23 @@ fn write_partitioned(
             let directory = format!("{}{suffix}", output_path(&ordered, &dataset));
             let rows_written = output_format.write(ordered, &directory).await?;
 
+            let paths: Vec<String> = (0..file_count)
+                .map(|index| output_format.partition_file_path(&directory, index, file_count))
+                .collect();
             let store = dataset.fixture.store();
-            let listed: Vec<Path> = store
-                .list(Some(&Path::from(
-                    ListingTableUrl::parse(&directory)?.prefix().as_ref(),
-                )))
+            let mut listed: Vec<Path> = store
+                .list(Some(&store_path(&directory)?))
                 .map_ok(|meta| meta.location)
                 .try_collect()
                 .await?;
+            listed.sort();
+            let predicted: Vec<Path> = paths
+                .iter()
+                .map(|path| store_path(path))
+                .collect::<datafusion::error::Result<_>>()?;
+            assert_eq!(listed, predicted, "files written to {directory}");
             let mut files = Vec::with_capacity(file_count);
-            for index in 0..file_count {
-                let path = output_format.partition_file_path(&directory, index, file_count);
+            for path in paths {
                 let batches = fixture::read_file(
                     &ctx,
                     &path,
@@ -508,16 +514,16 @@ fn write_partitioned(
                 .await?;
                 files.push((path, batches));
             }
-            assert_eq!(
-                listed.len(),
-                file_count,
-                "expected {file_count} files in {directory}, found {listed:?}"
-            );
             Ok((rows_written, files))
         },
         two_threads(),
     )
     .unwrap()
+}
+
+/// The location of `path` within its object store, as the store lists it.
+fn store_path(path: &str) -> datafusion::error::Result<Path> {
+    Ok(Path::from(ListingTableUrl::parse(path)?.prefix().as_ref()))
 }
 
 fn two_threads() -> PipelineOptions {
