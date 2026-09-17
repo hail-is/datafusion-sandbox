@@ -126,7 +126,7 @@ fn a_locus_interval_filter_prunes_files_outside_it_and_keeps_the_scan_ordered() 
                 .collect();
             assert_eq!(
                 loci,
-                [("chr1".to_string(), 3), ("chr1".to_string(), 4)],
+                [Locus::new(1, 3).unwrap(), Locus::new(1, 4).unwrap()],
                 "{format:?} {representation:?}"
             );
         }
@@ -421,10 +421,12 @@ fn an_unsupported_pruning_expression_keeps_every_file_and_filters_the_rows() {
     )
     .unwrap();
     assert_eq!(stems(&paths), ["d", "c", "b", "a"]);
-    let expected: Vec<(String, i32)> = [("chr1", 1), ("chr1", 3), ("chr2", 1), ("chr2", 3)]
-        .into_iter()
-        .map(|(contig, position)| (contig.to_string(), position))
-        .collect();
+    let expected = [
+        Locus::new(1, 1).unwrap(),
+        Locus::new(1, 3).unwrap(),
+        Locus::new(2, 1).unwrap(),
+        Locus::new(2, 3).unwrap(),
+    ];
     assert_eq!(loci, expected);
 }
 
@@ -568,7 +570,7 @@ fn planning_reads_every_footer_once_and_execution_opens_only_retained_files() {
                     })
                     .collect();
                 assert!(
-                    loci.iter().all(|(contig, _)| contig == "chr2") && loci.len() == 3,
+                    loci.iter().all(|locus| locus.contig_ordinal() == 2) && loci.len() == 3,
                     "{format:?}: {loci:?}"
                 );
 

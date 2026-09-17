@@ -5,7 +5,7 @@ mod metadata_collection;
 use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
 
 use crate::{
-    locus::{LocusOrdering, LocusRepresentation},
+    locus::{Locus, LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
     sorted_table::{AttachedScalar, SortedTable},
 };
@@ -426,9 +426,9 @@ fn inexact_filters_keep_the_logical_residual_and_do_not_truncate_before_filterin
                         // which matching rows satisfy the limit.
                         assert_eq!(loci.len(), 2, "{loci:?}");
                         assert!(
-                            loci.iter().all(|(contig, position)| matches!(
-                                (contig.as_str(), position),
-                                ("chr1", 3 | 4) | ("chr2", 3)
+                            loci.iter().all(|locus| matches!(
+                                (locus.contig_ordinal(), locus.position()),
+                                (1, 3 | 4) | (2, 3)
                             )),
                             "{loci:?}"
                         );
@@ -1011,7 +1011,7 @@ fn collected_rows_arrive_in_locus_order() {
     )
     .unwrap();
 
-    let loci: Vec<(String, i32)> = batches
+    let loci: Vec<Locus> = batches
         .iter()
         .flat_map(|batch| fixture::decode_loci(batch, LocusRepresentation::ContigPosition))
         .collect();

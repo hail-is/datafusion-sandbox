@@ -68,11 +68,12 @@ impl LocusRestriction {
     }
 
     /// Whether a fixture row satisfies the restriction, judged independently of any plan.
-    fn keeps(self, (contig, position, _): SampleRow) -> bool {
+    fn keeps(self, (locus, _): SampleRow) -> bool {
         match self {
-            Self::Contig => contig == Self::CONTIG,
+            Self::Contig => locus.contig_name() == Self::CONTIG,
             Self::LocusInterval => {
-                contig == Self::INTERVAL_CONTIG && Self::INTERVAL.contains(&position)
+                locus.contig_name() == Self::INTERVAL_CONTIG
+                    && Self::INTERVAL.contains(&locus.position())
             }
         }
     }
@@ -88,11 +89,11 @@ impl LocusRestriction {
     }
 
     /// One sample's rows that satisfy the restriction, in locus-then-alleles order.
-    fn expected_rows(self) -> Vec<(String, i32, String)> {
+    fn expected_rows(self) -> Vec<(Locus, String)> {
         fixture::sample_rows()
             .into_iter()
             .filter(|&row| self.keeps(row))
-            .map(|(contig, position, alleles)| (contig.to_string(), position, alleles.to_string()))
+            .map(|(locus, alleles)| (locus, alleles.to_string()))
             .collect()
     }
 }
@@ -246,10 +247,7 @@ fn assert_selects_files_and_returns_rows(restriction: LocusRestriction) {
                             expected_rows.len().checked_mul(SAMPLES.len()).unwrap(),
                             "{context}: {rows:?}"
                         );
-                        let loci: Vec<_> = rows
-                            .iter()
-                            .map(|(contig, position, _)| (contig, position))
-                            .collect();
+                        let loci: Vec<_> = rows.iter().map(|(locus, _)| *locus).collect();
                         assert!(
                             loci.is_sorted(),
                             "{context}: rows are not in locus order: {loci:?}"
@@ -350,11 +348,10 @@ fn stem(path: &str) -> &'static str {
         .unwrap_or_else(|| panic!("{path} is not a fixture file"))
 }
 
-/// Each row's contig, position, and alleles, in result order.
-fn rows(batch: &RecordBatch, representation: LocusRepresentation) -> Vec<(String, i32, String)> {
+/// Each row's locus and alleles, in result order.
+fn rows(batch: &RecordBatch, representation: LocusRepresentation) -> Vec<(Locus, String)> {
     fixture::decode_loci(batch, representation)
         .into_iter()
         .zip(fixture::string_column(batch, "alleles"))
-        .map(|((contig, position), alleles)| (contig, position, alleles))
         .collect()
 }

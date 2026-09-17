@@ -8,7 +8,7 @@ use crate::fixture::{self, block_on};
 use crate::{
     dataset::Dataset,
     format::{InputFormat, OutputFormat},
-    locus::{LocusOrdering, LocusRepresentation},
+    locus::{Locus, LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
 };
 use datafusion::{
@@ -56,12 +56,11 @@ fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
                         .await?
                         .restrict_to(std::slice::from_ref(&sample_id))?;
                         let df = dataset.read(&ctx).await?;
-                        let columns = match representation {
-                            LocusRepresentation::ContigPosition => {
-                                vec!["contig", "position", "alleles", "s"]
-                            }
-                            LocusRepresentation::Packed => vec!["locus", "alleles", "s"],
-                        };
+                        let mut columns = LocusOrdering::locus_then_alleles()
+                            .expand(representation)
+                            .column_names();
+                        columns.push("s".to_string());
+                        let columns = columns.iter().map(String::as_str).collect::<Vec<_>>();
                         // Do not sort here: the dataset read must preserve file and row order.
                         let batches = df.select_columns(&columns)?.collect().await?;
                         let rows = batches
@@ -76,31 +75,21 @@ fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
                                 })
                             })
                             .collect::<Vec<_>>();
-                        let expected = match representation {
-                            LocusRepresentation::ContigPosition => vec![
-                                vec!["chr1", "1", "A,G"],
-                                vec!["chr1", "2", "A,C"],
-                                vec!["chr1", "2", "A,G"],
-                                vec!["chr1", "3", "A,C"],
-                                vec!["chr1", "4", "A,G"],
-                                vec!["chr2", "1", "A,C"],
-                                vec!["chr2", "2", "A,G"],
-                                vec!["chr2", "3", "A,C"],
-                            ],
-                            LocusRepresentation::Packed => vec![
-                                vec!["4294967297", "A,G"],
-                                vec!["4294967298", "A,C"],
-                                vec!["4294967298", "A,G"],
-                                vec!["4294967299", "A,C"],
-                                vec!["4294967300", "A,G"],
-                                vec!["8589934593", "A,C"],
-                                vec!["8589934594", "A,G"],
-                                vec!["8589934595", "A,C"],
-                            ],
-                        }
+                        let expected = [
+                            (Locus::new(1, 1).unwrap(), "A,G"),
+                            (Locus::new(1, 2).unwrap(), "A,C"),
+                            (Locus::new(1, 2).unwrap(), "A,G"),
+                            (Locus::new(1, 3).unwrap(), "A,C"),
+                            (Locus::new(1, 4).unwrap(), "A,G"),
+                            (Locus::new(2, 1).unwrap(), "A,C"),
+                            (Locus::new(2, 2).unwrap(), "A,G"),
+                            (Locus::new(2, 3).unwrap(), "A,C"),
+                        ]
                         .into_iter()
-                        .map(|mut row| {
-                            row.push(&sample_id);
+                        .map(|(locus, alleles)| {
+                            let mut row = fixture::locus_cells(locus, representation);
+                            row.push(alleles.to_string());
+                            row.push(sample_id.clone());
                             row
                         })
                         .collect::<Vec<_>>();
@@ -286,6 +275,45 @@ fn rejects_a_resolved_schema_missing_a_required_ordering_column() {
         error.to_string().contains("alleles"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn inferred_schema_locus_fields_match_the_representation_fields() {
+    for format in [
+        fixture::FixtureFormat::Parquet,
+        fixture::FixtureFormat::Vortex,
+    ] {
+        for representation in [
+            LocusRepresentation::ContigPosition,
+            LocusRepresentation::Packed,
+        ] {
+            let fixture = fixture::dataset_fixture(format, representation);
+
+            block_on(async {
+                let ctx = SessionContext::new();
+                fixture.register(&ctx);
+                let dataset = Dataset::discover(
+                    &ctx,
+                    fixture.table_path().clone(),
+                    fixture.input_format(),
+                    LocusOrdering::locus(),
+                    None,
+                )
+                .await
+                .unwrap();
+
+                for expected in representation.fields() {
+                    let actual = dataset.schema().field_with_name(expected.name()).unwrap();
+                    assert_eq!(
+                        actual.data_type(),
+                        expected.data_type(),
+                        "{format:?} {representation:?} field {}",
+                        expected.name()
+                    );
+                }
+            });
+        }
+    }
 }
 
 #[test]
@@ -477,10 +505,7 @@ async fn discover_in_memory_with_schema(sample_set: &[&str], schema: SchemaRef) 
 }
 
 fn contig_position_schema(include_alleles: bool) -> SchemaRef {
-    let mut fields = vec![
-        Field::new("contig", DataType::Utf8, false),
-        Field::new("position", DataType::Int32, false),
-    ];
+    let mut fields = LocusRepresentation::ContigPosition.fields();
     if include_alleles {
         fields.push(Field::new("alleles", DataType::Utf8, false));
     }

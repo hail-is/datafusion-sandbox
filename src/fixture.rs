@@ -36,8 +36,7 @@
 //! - `sample_rows`, the rows above as one sample's expected result.
 //! - `contig_filter`, a whole-contig restriction written in a representation.
 //!   Interval restrictions are `LocusInterval::filter` in the library.
-//! - `decode_loci` and `string_column`, the contig and position or one string
-//!   field of each row a plan returned.
+//! - `decode_loci` and `string_column`, the locus or one string field of each row a plan returned.
 //! - `read_file`, the rows of one file a test wrote, on any registered store.
 
 #![expect(
@@ -60,7 +59,7 @@ use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::pipeline::{self, PipelineOptions};
 use datafusion::{
     arrow::{
-        array::{Array, ArrayRef, Int32Array, Int64Array, StringArray},
+        array::{Array, ArrayRef, StringArray},
         compute::cast,
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
@@ -95,16 +94,42 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// Four samples from the `1kg_chr22` benchmark dataset, the most any test needs.
 pub const SAMPLES: &[&str] = &["HG00308", "HG00592", "HG02230", "NA18534"];
 
-/// One fixture row as contig, position, and alleles.
-pub type SampleRow = (&'static str, i32, &'static str);
+/// One fixture row as a locus and alleles.
+pub type SampleRow = (Locus, &'static str);
 
 /// Files and their rows in locus-then-alleles order, shared by memory and disk.
-const SAMPLE_FILES: &[(&str, [SampleRow; 2])] = &[
-    ("d", [("chr1", 1, "A,G"), ("chr1", 2, "A,C")]),
-    ("c", [("chr1", 2, "A,G"), ("chr1", 3, "A,C")]),
-    ("b", [("chr1", 4, "A,G"), ("chr2", 1, "A,C")]),
-    ("a", [("chr2", 2, "A,G"), ("chr2", 3, "A,C")]),
-];
+static SAMPLE_FILES: LazyLock<[(&str, [SampleRow; 2]); 4]> = LazyLock::new(|| {
+    [
+        (
+            "d",
+            [
+                (Locus::new(1, 1).unwrap(), "A,G"),
+                (Locus::new(1, 2).unwrap(), "A,C"),
+            ],
+        ),
+        (
+            "c",
+            [
+                (Locus::new(1, 2).unwrap(), "A,G"),
+                (Locus::new(1, 3).unwrap(), "A,C"),
+            ],
+        ),
+        (
+            "b",
+            [
+                (Locus::new(1, 4).unwrap(), "A,G"),
+                (Locus::new(2, 1).unwrap(), "A,C"),
+            ],
+        ),
+        (
+            "a",
+            [
+                (Locus::new(2, 2).unwrap(), "A,G"),
+                (Locus::new(2, 3).unwrap(), "A,C"),
+            ],
+        ),
+    ]
+});
 
 #[derive(Clone, Copy, Debug)]
 pub enum FixtureFormat {
@@ -321,10 +346,11 @@ fn build_in_memory_fixture_without_alleles(name: &'static str) -> Arc<DatasetFix
         FixtureFormat::Vortex,
         LocusRepresentation::ContigPosition,
     );
-    let batch = RecordBatch::try_from_iter(vec![
-        ("contig", Arc::new(StringArray::from(vec!["chr1"])) as _),
-        ("position", Arc::new(Int32Array::from(vec![1])) as _),
-    ])
+    let loci = [Locus::new(1, 1).unwrap()];
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(LocusRepresentation::ContigPosition.fields())),
+        LocusRepresentation::ContigPosition.locus_arrays(&loci),
+    )
     .expect("no-alleles fixture batch matches its schema");
 
     pipeline::run(
@@ -426,7 +452,7 @@ fn build_sample_tables(
             let pipeline_root = target.register(&ctx);
             let mut writes = Vec::new();
             for sample in sample_set {
-                for (filename, rows) in SAMPLE_FILES {
+                for (filename, rows) in SAMPLE_FILES.iter() {
                     let path = format!(
                         "{pipeline_root}/s={sample}/{filename}.{}",
                         output_format.extension()
@@ -449,41 +475,18 @@ fn build_sample_tables(
     .unwrap_or_else(|error| panic!("writing the {error_context} dataset fixture: {error}"))
 }
 
-fn sample_batch(rows: &[(&str, i32, &str)], representation: LocusRepresentation) -> RecordBatch {
-    let alleles = StringArray::from_iter_values(rows.iter().map(|&(_, _, alleles)| alleles));
-    let (fields, columns): (Vec<Field>, Vec<ArrayRef>) = match representation {
-        LocusRepresentation::ContigPosition => {
-            let contigs = StringArray::from_iter_values(rows.iter().map(|&(contig, _, _)| contig));
-            let positions =
-                Int32Array::from_iter_values(rows.iter().map(|&(_, position, _)| position));
-            (
-                vec![
-                    Field::new("contig", DataType::Utf8, false),
-                    Field::new("position", DataType::Int32, false),
-                    Field::new("alleles", DataType::Utf8, false),
-                ],
-                vec![Arc::new(contigs), Arc::new(positions), Arc::new(alleles)],
-            )
-        }
-        LocusRepresentation::Packed => {
-            let loci = Int64Array::from_iter_values(
-                rows.iter()
-                    .map(|&(contig, position, _)| packed_locus(contig, position)),
-            );
-            (
-                vec![
-                    Field::new("locus", DataType::Int64, false),
-                    Field::new("alleles", DataType::Utf8, false),
-                ],
-                vec![Arc::new(loci), Arc::new(alleles)],
-            )
-        }
-    };
+fn sample_batch(rows: &[SampleRow], representation: LocusRepresentation) -> RecordBatch {
+    let loci = rows.iter().map(|&(locus, _)| locus).collect::<Vec<_>>();
+    let alleles = StringArray::from_iter_values(rows.iter().map(|&(_, alleles)| alleles));
+    let mut fields = representation.fields();
+    fields.push(Field::new("alleles", DataType::Utf8, false));
+    let mut columns = representation.locus_arrays(&loci);
+    columns.push(Arc::new(alleles) as ArrayRef);
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
         .expect("fixture batch matches its schema")
 }
 
-/// One sample's rows in locus-then-alleles order, as contig, position, and alleles.
+/// One sample's rows in locus-then-alleles order, as loci and alleles.
 ///
 /// Every sample in a fixture holds these same rows, so a filtered plan's result over one sample
 /// is the rows here that satisfy its filter.
@@ -497,6 +500,9 @@ pub fn sample_rows() -> Vec<SampleRow> {
 
 /// The rows on `contig`, written in `representation`: an equality on `contig`, or under packed
 /// the locus interval from the contig's first position to the next contig's.
+///
+/// This stays separate from [`LocusInterval::filter`] because its contig-position equality is the
+/// simpler pushdown shape its caller tests.
 ///
 /// # Panics
 ///
@@ -516,42 +522,26 @@ pub fn contig_filter(representation: LocusRepresentation, contig: &str) -> Expr 
     }
 }
 
-/// The contig and position of each row in `batch`, read back from `representation`.
+/// The loci of each row in `batch`, read back from `representation`.
 ///
 /// # Panics
 ///
-/// Panics if `batch` lacks the representation's locus fields or holds them in another type.
+/// Panics if `batch` does not hold valid locus fields for `representation`.
 #[must_use]
-pub fn decode_loci(batch: &RecordBatch, representation: LocusRepresentation) -> Vec<(String, i32)> {
+pub fn decode_loci(batch: &RecordBatch, representation: LocusRepresentation) -> Vec<Locus> {
+    representation
+        .loci(batch)
+        .expect("a fixture result has valid locus fields")
+}
+
+/// Renders `locus` as the cells `DataFusion` displays for `representation`.
+#[must_use]
+pub fn locus_cells(locus: Locus, representation: LocusRepresentation) -> Vec<String> {
     match representation {
         LocusRepresentation::ContigPosition => {
-            let positions = batch
-                .column_by_name("position")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .unwrap();
-            string_column(batch, "contig")
-                .into_iter()
-                .zip(positions.values())
-                .map(|(contig, &position)| (contig, position))
-                .collect()
+            vec![locus.contig_name(), locus.position().to_string()]
         }
-        LocusRepresentation::Packed => {
-            let loci = batch
-                .column_by_name("locus")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
-            loci.values()
-                .iter()
-                .map(|&packed| {
-                    let locus = Locus::from_packed(packed).unwrap();
-                    (locus.contig_name(), locus.position())
-                })
-                .collect()
-        }
+        LocusRepresentation::Packed => vec![locus.packed().to_string()],
     }
 }
 
@@ -593,9 +583,4 @@ pub async fn read_file(
     ctx.read_table(Arc::new(ListingTable::try_new(config)?))?
         .collect()
         .await
-}
-
-/// The packed locus of `contig:position`, under the library's packing rule.
-fn packed_locus(contig: &str, position: i32) -> i64 {
-    Locus::from_contig_name(contig, position).unwrap().packed()
 }
