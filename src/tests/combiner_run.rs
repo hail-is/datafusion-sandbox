@@ -4,7 +4,7 @@ use crate::{
     combiner_run::{Action, CombinerRun, Outcome, WriteTarget},
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
-    locus::LocusRepresentation,
+    locus::{Locus, LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
 };
 use datafusion::{
@@ -228,28 +228,24 @@ fn collects_ordered_alleles_with_ranks_across_file_cuts() {
                     })
                 })
                 .collect::<Vec<_>>();
-            let expected = match representation {
-                LocusRepresentation::ContigPosition => vec![
-                    vec!["chr1", "1", "A,G", "1"],
-                    vec!["chr1", "2", "A,C", "1"],
-                    vec!["chr1", "2", "A,G", "2"],
-                    vec!["chr1", "3", "A,C", "1"],
-                    vec!["chr1", "4", "A,G", "1"],
-                    vec!["chr2", "1", "A,C", "1"],
-                    vec!["chr2", "2", "A,G", "1"],
-                    vec!["chr2", "3", "A,C", "1"],
-                ],
-                LocusRepresentation::Packed => vec![
-                    vec!["4294967297", "A,G", "1"],
-                    vec!["4294967298", "A,C", "1"],
-                    vec!["4294967298", "A,G", "2"],
-                    vec!["4294967299", "A,C", "1"],
-                    vec!["4294967300", "A,G", "1"],
-                    vec!["8589934593", "A,C", "1"],
-                    vec!["8589934594", "A,G", "1"],
-                    vec!["8589934595", "A,C", "1"],
-                ],
-            };
+            let expected = [
+                (Locus::new(1, 1).unwrap(), "A,G", 1),
+                (Locus::new(1, 2).unwrap(), "A,C", 1),
+                (Locus::new(1, 2).unwrap(), "A,G", 2),
+                (Locus::new(1, 3).unwrap(), "A,C", 1),
+                (Locus::new(1, 4).unwrap(), "A,G", 1),
+                (Locus::new(2, 1).unwrap(), "A,C", 1),
+                (Locus::new(2, 2).unwrap(), "A,G", 1),
+                (Locus::new(2, 3).unwrap(), "A,C", 1),
+            ]
+            .into_iter()
+            .map(|(locus, alleles, rank)| {
+                let mut row = fixture::locus_cells(locus, representation);
+                row.push(alleles.to_string());
+                row.push(rank.to_string());
+                row
+            })
+            .collect::<Vec<_>>();
             assert_eq!(rows, expected);
         }
     }
@@ -282,10 +278,7 @@ fn collects_references_in_locus_order_across_file_cuts() {
                     )
                     .unwrap(),
                 );
-                let columns = match representation {
-                    LocusRepresentation::ContigPosition => vec!["contig", "position"],
-                    LocusRepresentation::Packed => vec!["locus"],
-                };
+                let columns = LocusOrdering::locus().expand(representation).column_names();
                 let loci = batches
                     .iter()
                     .flat_map(|batch| {
@@ -302,29 +295,18 @@ fn collects_references_in_locus_order_across_file_cuts() {
                     })
                     .collect::<Vec<_>>();
                 // The reference combiner orders only by locus, not alleles or sample id.
-                let expected = match representation {
-                    LocusRepresentation::ContigPosition => vec![
-                        vec!["chr1", "1"],
-                        vec!["chr1", "2"],
-                        vec!["chr1", "2"],
-                        vec!["chr1", "3"],
-                        vec!["chr1", "4"],
-                        vec!["chr2", "1"],
-                        vec!["chr2", "2"],
-                        vec!["chr2", "3"],
-                    ],
-                    LocusRepresentation::Packed => vec![
-                        vec!["4294967297"],
-                        vec!["4294967298"],
-                        vec!["4294967298"],
-                        vec!["4294967299"],
-                        vec!["4294967300"],
-                        vec!["8589934593"],
-                        vec!["8589934594"],
-                        vec!["8589934595"],
-                    ],
-                }
+                let expected = [
+                    Locus::new(1, 1).unwrap(),
+                    Locus::new(1, 2).unwrap(),
+                    Locus::new(1, 2).unwrap(),
+                    Locus::new(1, 3).unwrap(),
+                    Locus::new(1, 4).unwrap(),
+                    Locus::new(2, 1).unwrap(),
+                    Locus::new(2, 2).unwrap(),
+                    Locus::new(2, 3).unwrap(),
+                ]
                 .into_iter()
+                .map(|locus| fixture::locus_cells(locus, representation))
                 .flat_map(|locus| std::iter::repeat_n(locus, SAMPLES.len()))
                 .collect::<Vec<_>>();
                 assert_eq!(

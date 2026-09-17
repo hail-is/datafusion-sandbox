@@ -198,7 +198,7 @@ impl Dataset {
     fn stored_ordering(&self) -> Result<StoredOrdering> {
         let stored_ordering = self.locus_ordering.expand(self.locus_representation);
         for column in stored_ordering.column_names() {
-            if self.schema.field_with_name(column).is_err() {
+            if self.schema.field_with_name(&column).is_err() {
                 return Err(DataFusionError::Plan(format!(
                     "locus ordering column '{column}' is missing from the dataset schema"
                 )));

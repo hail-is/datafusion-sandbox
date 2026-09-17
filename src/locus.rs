@@ -2,13 +2,20 @@
 //! half-open locus intervals a caller names in locus terms.
 
 use datafusion::{
-    arrow::datatypes::{DataType, SchemaRef},
-    common::DataFusionError,
+    arrow::{
+        array::{ArrayRef, Int32Array, Int64Array, StringViewArray},
+        datatypes::{DataType, Field, SchemaRef},
+        record_batch::RecordBatch,
+    },
+    common::{
+        DataFusionError,
+        cast::{as_int32_array, as_int64_array, as_string_view_array},
+    },
     error::Result,
     logical_expr::{Expr, SortExpr},
     prelude::{col, lit},
 };
-use std::{fmt, str::FromStr};
+use std::{fmt, str::FromStr, sync::Arc};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Component {
@@ -74,7 +81,7 @@ impl StoredOrdering {
 
     /// Names of every stored field covered by this ordering.
     #[must_use]
-    pub fn column_names(&self) -> Vec<&'static str> {
+    pub fn column_names(&self) -> Vec<String> {
         self.ordering
             .0
             .iter()
@@ -100,16 +107,15 @@ impl StoredOrdering {
 }
 
 impl Component {
-    fn column_names(
-        &self,
-        representation: LocusRepresentation,
-    ) -> impl Iterator<Item = &'static str> {
-        let columns: &'static [&'static str] = match (self, representation) {
-            (Self::Locus, LocusRepresentation::ContigPosition) => &["contig", "position"],
-            (Self::Locus, LocusRepresentation::Packed) => &["locus"],
-            (Self::Alleles, _) => &["alleles"],
-        };
-        columns.iter().copied()
+    fn column_names(&self, representation: LocusRepresentation) -> Vec<String> {
+        match self {
+            Self::Locus => representation
+                .fields()
+                .into_iter()
+                .map(|field| field.name().clone())
+                .collect(),
+            Self::Alleles => vec!["alleles".to_string()],
+        }
     }
 }
 
@@ -123,6 +129,110 @@ pub enum LocusRepresentation {
 }
 
 impl LocusRepresentation {
+    /// The stored fields that record a locus, in storage order.
+    #[must_use]
+    pub fn fields(self) -> Vec<Field> {
+        match self {
+            Self::ContigPosition => vec![
+                Field::new("contig", DataType::Utf8View, false),
+                Field::new("position", DataType::Int32, false),
+            ],
+            Self::Packed => vec![Field::new("locus", DataType::Int64, false)],
+        }
+    }
+
+    /// Builds the stored locus arrays for `loci`, in the same order as [`Self::fields`].
+    #[must_use]
+    pub fn locus_arrays(self, loci: &[Locus]) -> Vec<ArrayRef> {
+        match self {
+            Self::ContigPosition => vec![
+                Arc::new(StringViewArray::from_iter_values(
+                    loci.iter().map(|locus| locus.contig_name()),
+                )),
+                Arc::new(Int32Array::from_iter_values(
+                    loci.iter().map(|locus| locus.position()),
+                )),
+            ],
+            Self::Packed => vec![Arc::new(Int64Array::from_iter_values(
+                loci.iter().map(|locus| locus.packed()),
+            ))],
+        }
+    }
+
+    /// Reads the loci in `batch` from this representation's stored fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plan error if a required field is absent, has the wrong type, contains a null,
+    /// or holds a value that is not a locus.
+    pub fn loci(self, batch: &RecordBatch) -> Result<Vec<Locus>> {
+        match self {
+            Self::ContigPosition => {
+                let contigs = as_string_view_array(
+                    self.column(batch, "contig", &DataType::Utf8View)?.as_ref(),
+                )?;
+                let positions =
+                    as_int32_array(self.column(batch, "position", &DataType::Int32)?.as_ref())?;
+                contigs
+                    .iter()
+                    .zip(positions)
+                    .map(|(contig, position)| {
+                        let contig = contig.ok_or_else(|| {
+                            DataFusionError::Plan(
+                                "locus field 'contig' contains a null".to_string(),
+                            )
+                        })?;
+                        let position = position.ok_or_else(|| {
+                            DataFusionError::Plan(
+                                "locus field 'position' contains a null".to_string(),
+                            )
+                        })?;
+                        Locus::from_contig_name(contig, position).map_err(|error| {
+                            DataFusionError::Plan(format!(
+                                "invalid contig-position locus in stored row: {error}"
+                            ))
+                        })
+                    })
+                    .collect()
+            }
+            Self::Packed => {
+                as_int64_array(self.column(batch, "locus", &DataType::Int64)?.as_ref())?
+                    .iter()
+                    .map(|packed| {
+                        let packed = packed.ok_or_else(|| {
+                            DataFusionError::Plan("locus field 'locus' contains a null".to_string())
+                        })?;
+                        Locus::from_packed(packed).map_err(|error| {
+                            DataFusionError::Plan(format!(
+                                "invalid packed locus in stored row: {error}"
+                            ))
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn column<'a>(
+        self,
+        batch: &'a RecordBatch,
+        name: &str,
+        expected_type: &DataType,
+    ) -> Result<&'a ArrayRef> {
+        let column = batch.column_by_name(name).ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "{self} locus representation is missing required '{name}' field"
+            ))
+        })?;
+        if column.data_type() != expected_type {
+            return Err(DataFusionError::Plan(format!(
+                "{self} locus field '{name}' must have type {expected_type}, found {}",
+                column.data_type()
+            )));
+        }
+        Ok(column)
+    }
+
     /// Detects the representation from the mutually exclusive stored fields.
     ///
     /// # Errors
@@ -140,15 +250,11 @@ impl LocusRepresentation {
                             .to_string(),
                     ));
                 }
+                Self::ContigPosition.validate_fields(schema)?;
                 Ok(Self::ContigPosition)
             }
             (true, false) => {
-                let locus_type = schema.field_with_name("locus")?.data_type();
-                if locus_type != &DataType::Int64 {
-                    return Err(DataFusionError::Plan(format!(
-                        "packed locus field must have type Int64, found {locus_type}"
-                    )));
-                }
+                Self::Packed.validate_fields(schema)?;
                 Ok(Self::Packed)
             }
             (true, true) => Err(DataFusionError::Plan(
@@ -160,6 +266,26 @@ impl LocusRepresentation {
                     .to_string(),
             )),
         }
+    }
+
+    fn validate_fields(self, schema: &SchemaRef) -> Result<()> {
+        for expected in self.fields() {
+            let found = schema.field_with_name(expected.name())?.data_type();
+            if found != expected.data_type() {
+                let message = match self {
+                    Self::ContigPosition => format!(
+                        "contig-position locus field '{}' must have type {}, found {found}",
+                        expected.name(),
+                        expected.data_type()
+                    ),
+                    Self::Packed => {
+                        format!("packed locus field must have type Int64, found {found}")
+                    }
+                };
+                return Err(DataFusionError::Plan(message));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -174,9 +300,9 @@ impl fmt::Display for LocusRepresentation {
 
 /// A locus named by its contig ordinal and position, as a caller writes it: `contig:position`.
 ///
-/// Orders by contig, then position, which is the dataset's locus ordering under both
-/// representations. The packed representation stores it as `ordinal << 32 | position`; the
-/// contig-position representation names the contig `chr{ordinal}`.
+/// Orders by contig ordinal, then position. The packed representation's numeric order follows
+/// that order. The contig-position representation stores the rendered name `chr{ordinal}`, whose
+/// string order diverges once ordinals have different digit counts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Locus {
     contig_ordinal: u32,

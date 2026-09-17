@@ -539,10 +539,12 @@ fn assert_filter_reaches_every_scan(
     n_scans: usize,
     representation: LocusRepresentation,
 ) {
-    let locus_column = match representation {
-        LocusRepresentation::ContigPosition => "contig",
-        LocusRepresentation::Packed => "locus",
-    };
+    let locus_column = LocusOrdering::locus()
+        .expand(representation)
+        .column_names()
+        .into_iter()
+        .next()
+        .expect("a locus ordering has a stored field");
     let scans = nodes_of::<DataSourceExec>(plan);
     assert_eq!(scans.len(), n_scans, "{}", displayed(plan));
     for scan in &scans {
@@ -552,7 +554,7 @@ fn assert_filter_reaches_every_scan(
             .or_else(|| text.split_once("predicate:"))
             .map(|(_, predicate)| predicate);
         assert!(
-            predicate.is_some_and(|predicate| predicate.contains(locus_column)),
+            predicate.is_some_and(|predicate| predicate.contains(&locus_column)),
             "expected a filter on {locus_column} to reach the scan: {text}"
         );
     }

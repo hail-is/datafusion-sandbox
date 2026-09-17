@@ -11,10 +11,12 @@ pub fn required_ordering() -> LocusOrdering {
 /// of alleles at each locus, ranked within the locus.
 pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<(DataFrame, StoredOrdering)> {
     let ordering = dataset.query_ordering(&required_ordering())?;
+    let columns = ordering.column_names();
+    let columns = columns.iter().map(String::as_str).collect::<Vec<_>>();
     let frame = dataset
         .read(ctx)
         .await?
-        .select_columns(&ordering.column_names())?
+        .select_columns(&columns)?
         .distinct()?;
     // ADR 0003: preferring existing sort lets this window stack avoid a re-sort.
     let frame = frame.window(vec![

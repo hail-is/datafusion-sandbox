@@ -10,7 +10,7 @@ use super::{
 };
 use crate::fixture::{self, FixtureFormat, SAMPLES};
 use crate::formulation::Formulation;
-use crate::locus::{LocusRepresentation, SplitPoints};
+use crate::locus::{Locus, LocusRepresentation, SplitPoints};
 use crate::ordered_frame::OutputLayout;
 use crate::pipeline::{self, PipelineOptions};
 use crate::sink::PartitionedSinkExec;
@@ -432,13 +432,11 @@ fn assert_one_merge_per_interval(
     );
 }
 
-/// A combined row: contig, position, alleles, and sample.
-type Row = (String, i32, String, String);
+/// A combined row: locus, alleles, and sample.
+type Row = (Locus, String, String);
 
-fn loci(rows: &[Row]) -> Vec<(String, i32)> {
-    rows.iter()
-        .map(|(contig, position, _, _)| (contig.clone(), *position))
-        .collect()
+fn loci(rows: &[Row]) -> Vec<Locus> {
+    rows.iter().map(|(locus, _, _)| *locus).collect()
 }
 
 fn rows(batch: &RecordBatch, representation: LocusRepresentation) -> Vec<Row> {
@@ -446,7 +444,7 @@ fn rows(batch: &RecordBatch, representation: LocusRepresentation) -> Vec<Row> {
         .into_iter()
         .zip(fixture::string_column(batch, "alleles"))
         .zip(fixture::string_column(batch, "s"))
-        .map(|(((contig, position), alleles), sample)| (contig, position, alleles, sample))
+        .map(|((locus, alleles), sample)| (locus, alleles, sample))
         .collect()
 }
 

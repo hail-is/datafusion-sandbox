@@ -1,7 +1,7 @@
 use crate::locus::{Locus, LocusInterval, LocusOrdering, LocusRepresentation, SplitPoints};
 use datafusion::{
     arrow::{
-        array::{ArrayRef, BooleanArray, Int32Array, Int64Array, StringArray},
+        array::BooleanArray,
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
     },
@@ -33,29 +33,11 @@ const PROBES: [Probe; 7] = [(1, 2), (1, 3), (1, 4), (2, 0), (2, 1), (2, 2), (2, 
 /// One row per probe, stored under `representation`.
 fn probe_batch(representation: LocusRepresentation) -> RecordBatch {
     let loci = PROBES.map(|(contig_ordinal, position)| locus(contig_ordinal, position));
-    let (fields, columns): (Vec<Field>, Vec<ArrayRef>) = match representation {
-        LocusRepresentation::ContigPosition => (
-            vec![
-                Field::new("contig", DataType::Utf8, false),
-                Field::new("position", DataType::Int32, false),
-            ],
-            vec![
-                Arc::new(StringArray::from_iter_values(
-                    loci.iter().map(|locus| locus.contig_name()),
-                )),
-                Arc::new(Int32Array::from_iter_values(
-                    loci.iter().map(|locus| locus.position()),
-                )),
-            ],
-        ),
-        LocusRepresentation::Packed => (
-            vec![Field::new("locus", DataType::Int64, false)],
-            vec![Arc::new(Int64Array::from_iter_values(
-                loci.iter().map(|locus| locus.packed()),
-            ))],
-        ),
-    };
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    RecordBatch::try_new(
+        Arc::new(Schema::new(representation.fields())),
+        representation.locus_arrays(&loci),
+    )
+    .unwrap()
 }
 
 /// The probes `interval`'s filter keeps under `representation`, found by evaluating the filter
@@ -395,6 +377,28 @@ fn packed_stored_ordering_exposes_its_columns_and_locus_prefix() {
 }
 
 #[test]
+fn a_locus_representation_round_trips_loci_through_its_stored_fields() {
+    let loci = vec![locus(1, 2), locus(1, 3), locus(2, 0)];
+
+    for representation in [
+        LocusRepresentation::ContigPosition,
+        LocusRepresentation::Packed,
+    ] {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(representation.fields())),
+            representation.locus_arrays(&loci),
+        )
+        .unwrap();
+
+        assert_eq!(
+            representation.loci(&batch).unwrap(),
+            loci,
+            "{representation}"
+        );
+    }
+}
+
+#[test]
 fn rejects_contig_without_position_as_a_locus_representation() {
     let error =
         LocusRepresentation::detect(&schema(vec![Field::new("contig", DataType::Utf8, false)]))
@@ -405,10 +409,43 @@ fn rejects_contig_without_position_as_a_locus_representation() {
 }
 
 #[test]
+fn rejects_wrongly_typed_contig_position_fields() {
+    for (fields, name, expected, found) in [
+        (
+            vec![
+                Field::new("contig", DataType::Utf8, false),
+                Field::new("position", DataType::Int32, false),
+            ],
+            "contig",
+            "Utf8View",
+            "Utf8",
+        ),
+        (
+            vec![
+                Field::new("contig", DataType::Utf8View, false),
+                Field::new("position", DataType::Int64, false),
+            ],
+            "position",
+            "Int32",
+            "Int64",
+        ),
+    ] {
+        let error = LocusRepresentation::detect(&schema(fields))
+            .expect_err("contig-position field types must match their stored shape");
+
+        assert!(matches!(error, DataFusionError::Plan(_)));
+        let message = error.to_string();
+        assert!(message.contains(name), "unexpected error: {message}");
+        assert!(message.contains(expected), "unexpected error: {message}");
+        assert!(message.contains(found), "unexpected error: {message}");
+    }
+}
+
+#[test]
 fn detects_a_contig_position_locus_representation() {
     let representation = LocusRepresentation::detect(&schema(vec![
-        Field::new("contig", DataType::Utf8, false),
-        Field::new("position", DataType::Int32, false),
+        Field::new("contig", DataType::Utf8View, true),
+        Field::new("position", DataType::Int32, true),
     ]))
     .unwrap();
 

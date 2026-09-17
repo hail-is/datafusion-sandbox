@@ -10,7 +10,7 @@ use super::{
 };
 use crate::fixture::{self, FixtureFormat, SAMPLES};
 use crate::formulation::Formulation;
-use crate::locus::LocusRepresentation;
+use crate::locus::{Locus, LocusRepresentation};
 use datafusion::{
     arrow::record_batch::RecordBatch,
     physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec,
@@ -114,11 +114,8 @@ fn returns_the_union_formulations_rows_in_locus_order() {
             for groups in [2, 3] {
                 let context = format!("{format:?} {representation:?} {groups} groups");
                 let grouped = rows(&grouped_merge(groups), format, representation);
-                let loci = |rows: &[Row]| {
-                    rows.iter()
-                        .map(|(contig, position, _, _)| (contig.clone(), *position))
-                        .collect::<Vec<_>>()
-                };
+                let loci =
+                    |rows: &[Row]| rows.iter().map(|(locus, _, _)| *locus).collect::<Vec<_>>();
                 assert_eq!(loci(&grouped), loci(&union), "{context}");
                 assert!(loci(&grouped).is_sorted(), "{context}: {grouped:?}");
                 let mut grouped = grouped;
@@ -137,8 +134,8 @@ fn grouped_merge(groups: usize) -> Formulation {
     }
 }
 
-/// A combined row: contig, position, alleles, and sample.
-type Row = (String, i32, String, String);
+/// A combined row: locus, alleles, and sample.
+type Row = (Locus, String, String);
 
 /// Runs `formulation` over the fixture on a hostile session and two threads, so that the
 /// group merges have another thread to run on, into a collecting sink, and returns the rows the
@@ -157,7 +154,7 @@ fn rows(
                 .into_iter()
                 .zip(fixture::string_column(batch, "alleles"))
                 .zip(fixture::string_column(batch, "s"))
-                .map(|(((contig, position), alleles), sample)| (contig, position, alleles, sample))
+                .map(|((locus, alleles), sample)| (locus, alleles, sample))
         })
         .collect()
 }
