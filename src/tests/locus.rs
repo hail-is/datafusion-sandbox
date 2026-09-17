@@ -26,9 +26,23 @@ fn configuration_error(error: &DataFusionError) -> String {
 /// test does not go through `Locus`.
 type Probe = (u32, i32);
 
-/// Loci around a contig boundary, in locus order: neighbours of every interval bound the filter
-/// tests use, plus a contig's first position.
-const PROBES: [Probe; 7] = [(1, 2), (1, 3), (1, 4), (2, 0), (2, 1), (2, 2), (2, 3)];
+/// Loci around contig boundaries, in locus order: neighbours of every interval bound the filter
+/// tests use, plus a contig's first position. Ordinals 9 and 10 cover the two-digit boundary.
+const PROBES: [Probe; 13] = [
+    (1, 2),
+    (1, 3),
+    (1, 4),
+    (2, 0),
+    (2, 1),
+    (2, 2),
+    (2, 3),
+    (9, 1),
+    (9, 2),
+    (9, 3),
+    (10, 0),
+    (10, 1),
+    (10, 2),
+];
 
 /// One row per probe, stored under `representation`.
 fn probe_batch(representation: LocusRepresentation) -> RecordBatch {
@@ -84,15 +98,18 @@ fn a_locus_parses_and_renders_as_contig_colon_position() {
     assert_eq!(parsed.position(), 16_050_075);
     assert_eq!(parsed.to_string(), "22:16050075");
     assert_eq!(parsed.contig_name(), "chr22");
+    assert_eq!(locus(3, 7).contig_name(), "chr03");
+    assert_eq!(locus(0, 0).contig_name(), "chr00");
 }
 
 #[test]
-fn a_locus_reads_its_contig_ordinal_from_a_contig_name() {
+fn a_locus_reads_its_contig_ordinal_from_padded_or_unpadded_contig_names() {
+    for name in ["chr3", "chr03"] {
+        assert_eq!(Locus::from_contig_name(name, 7).unwrap(), locus(3, 7));
+    }
+
     assert_eq!(Locus::from_contig_name("chr22", 5).unwrap(), locus(22, 5));
-    assert_eq!(
-        Locus::from_contig_name(&locus(3, 7).contig_name(), 7).unwrap(),
-        locus(3, 7)
-    );
+    assert_eq!(Locus::from_contig_name("chr00", 0).unwrap(), locus(0, 0));
 }
 
 #[test]
@@ -113,10 +130,15 @@ fn a_locus_rejects_a_contig_name_without_an_ordinal() {
 }
 
 #[test]
-fn a_locus_orders_by_contig_then_position() {
-    assert!(locus(1, 1000) < locus(2, 5));
-    assert!(locus(2, 5) < locus(2, 6));
-    assert_eq!(locus(2, 5), locus(2, 5));
+fn locus_and_rendered_contig_name_order_agree_across_ordinals() {
+    let contig_2 = locus(2, 5);
+    let contig_10 = locus(10, 5);
+
+    assert!(locus(1, 1000) < contig_2);
+    assert!(contig_2 < locus(2, 6));
+    assert!(contig_2 < contig_10);
+    assert!(contig_2.contig_name() < contig_10.contig_name());
+    assert_eq!(contig_2, locus(2, 5));
 }
 
 #[test]
@@ -261,13 +283,15 @@ fn a_locus_interval_rejects_a_start_not_before_its_end() {
 /// unbounded on a side.
 #[test]
 fn a_locus_interval_filter_keeps_exactly_the_loci_from_its_start_up_to_its_end() {
-    let cases: [(Option<Probe>, Option<Probe>); 6] = [
+    let cases: [(Option<Probe>, Option<Probe>); 8] = [
         (Some((1, 3)), Some((2, 2))),
         (None, Some((1, 3))),
         (Some((2, 2)), None),
         (Some((1, 3)), Some((1, 4))),
         (Some((1, 4)), Some((2, 1))),
         (Some((2, 0)), Some((2, 3))),
+        (Some((9, 1)), Some((9, 3))),
+        (Some((9, 2)), Some((10, 1))),
     ];
     for (start, end) in cases {
         let interval = LocusInterval::new(
@@ -378,7 +402,7 @@ fn packed_stored_ordering_exposes_its_columns_and_locus_prefix() {
 
 #[test]
 fn a_locus_representation_round_trips_loci_through_its_stored_fields() {
-    let loci = vec![locus(1, 2), locus(1, 3), locus(2, 0)];
+    let loci = vec![locus(0, 0), locus(1, 2), locus(1, 3), locus(2, 0)];
 
     for representation in [
         LocusRepresentation::ContigPosition,

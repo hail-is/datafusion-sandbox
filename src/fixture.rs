@@ -18,12 +18,12 @@
 //!
 //! | File stem | Rows as contig, position, alleles |
 //! | --- | --- |
-//! | d | chr1, 1, A,G; chr1, 2, A,C |
-//! | c | chr1, 2, A,G; chr1, 3, A,C |
-//! | b | chr1, 4, A,G; chr2, 1, A,C |
-//! | a | chr2, 2, A,G; chr2, 3, A,C |
+//! | d | chr01, 1, A,G; chr01, 2, A,C |
+//! | c | chr01, 2, A,G; chr01, 3, A,C |
+//! | b | chr01, 4, A,G; chr02, 1, A,C |
+//! | a | chr02, 2, A,G; chr02, 3, A,C |
 //!
-//! The d/c cut splits the alleles at chr1:2. The c/b and b/a cuts fall between
+//! The d/c cut splits the alleles at chr01:2. The c/b and b/a cuts fall between
 //! positions within a contig. File b spans contigs; d, c, and a have constant
 //! contigs. Packed loci use the contig ordinal in the high 32 bits.
 //!

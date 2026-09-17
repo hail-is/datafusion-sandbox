@@ -73,10 +73,10 @@ fn a_contig_filter_prunes_files_constant_on_another_contig_in_both_formats() {
         let fixture = fixture::dataset_fixture(format, LocusRepresentation::ContigPosition);
         let paths = block_on(async {
             let ctx = hostile_session(fixture);
-            let plan = filtered_plan(&ctx, fixture, Some(col("contig").eq(lit("chr2")))).await;
+            let plan = filtered_plan(&ctx, fixture, Some(col("contig").eq(lit("chr02")))).await;
             displayed_file_paths(plan.as_ref())
         });
-        // d and c are constant on chr1; b spans the contig boundary and a is constant on chr2.
+        // d and c are constant on chr01; b spans the contig boundary and a is constant on chr02.
         assert_eq!(stems(&paths), ["b", "a"], "{format:?}");
     }
 }
@@ -115,7 +115,7 @@ fn a_locus_interval_filter_prunes_files_outside_it_and_keeps_the_scan_ordered() 
                 PipelineOptions::single_threaded(),
             )
             .unwrap();
-            // d ends at chr1:2 and a starts at chr2:2; c holds chr1:3 and b starts at chr1:4.
+            // d ends at chr01:2 and a starts at chr02:2; c holds chr01:3 and b starts at chr01:4.
             assert_eq!(stems(&paths), ["c", "b"], "{format:?} {representation:?}");
             let loci: Vec<_> = batches
                 .iter()
@@ -144,7 +144,7 @@ fn a_filter_excluding_every_file_returns_an_empty_result_with_the_projected_sche
                 let table = sample_table(&ctx, &fixture, fixture::SAMPLES[0]).await;
                 let df = ctx
                     .read_table(Arc::new(table))?
-                    .filter(col("contig").eq(lit("chr3")))?
+                    .filter(col("contig").eq(lit("chr03")))?
                     .select(vec![col("position")])?;
                 let plan = df.create_physical_plan().await?;
                 let text = displayable(plan.as_ref()).indent(true).to_string();
@@ -176,14 +176,14 @@ fn retained_files_keep_their_recovered_order_and_the_scan_statistics_describe_th
             fixture,
             Some(
                 col("contig")
-                    .eq(lit("chr1"))
+                    .eq(lit("chr01"))
                     .and(col("position").gt_eq(lit(2))),
             ),
         )
         .await;
         let all = displayed_file_paths(unfiltered.as_ref());
         let kept = displayed_file_paths(filtered.as_ref());
-        // d, c, and b all reach chr1:2 or later on chr1; a is constant on chr2.
+        // d, c, and b all reach chr01:2 or later on chr01; a is constant on chr02.
         assert_eq!(stems(&kept), ["d", "c", "b"]);
         let mut expected = all.iter().filter(|path| kept.contains(path));
         assert!(kept.iter().all(|path| expected.next() == Some(path)));
@@ -534,7 +534,7 @@ fn planning_reads_every_footer_once_and_execution_opens_only_retained_files() {
 
                 let plan = ctx
                     .read_table(Arc::new(table))?
-                    .filter(col("contig").eq(lit("chr2")))?
+                    .filter(col("contig").eq(lit("chr02")))?
                     .create_physical_plan()
                     .await?;
 
@@ -576,7 +576,7 @@ fn planning_reads_every_footer_once_and_execution_opens_only_retained_files() {
                 store.take_read_stems();
                 let plan = ctx
                     .read_table(Arc::new(table))?
-                    .filter(col("contig").eq(lit("chr2")))?
+                    .filter(col("contig").eq(lit("chr02")))?
                     .create_physical_plan()
                     .await?;
                 assert_eq!(stems(&displayed_file_paths(plan.as_ref())), ["b", "a"]);
