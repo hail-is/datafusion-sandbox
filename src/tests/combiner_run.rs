@@ -628,25 +628,18 @@ fn interval_merge_writes_one_file_per_interval_in_locus_order() {
             };
             assert_eq!(rows, 32, "{context}");
 
-            let mut names: Vec<String> = std::fs::read_dir(&directory)
+            let mut listed: Vec<String> = std::fs::read_dir(&directory)
                 .unwrap()
-                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .map(|entry| entry.unwrap().path().to_str().unwrap().to_string())
                 .collect();
-            names.sort();
-            let extension = output_format().extension();
-            assert_eq!(
-                names,
-                [
-                    format!("0.{extension}"),
-                    format!("1.{extension}"),
-                    format!("2.{extension}")
-                ],
-                "{context}"
-            );
+            listed.sort();
+            let paths: Vec<String> = (0..3)
+                .map(|index| output_format().partition_file_path(&directory, index, 3))
+                .collect();
+            assert_eq!(listed, paths, "{context}");
             let mut written = Vec::new();
-            for index in 0..3 {
-                let path = output_format().partition_file_path(&directory, index, 3);
-                let file_rows = rows_of(&read_back(&path, format));
+            for (index, path) in paths.iter().enumerate() {
+                let file_rows = rows_of(&read_back(path, format));
                 if index == 1 {
                     assert!(file_rows.is_empty(), "{context}: {path}: {file_rows:?}");
                 } else {
@@ -738,25 +731,27 @@ fn interval_merge_explains_the_partitioned_sink_and_analyze_performs_the_writes(
         sink_line.contains("rows_written"),
         "sink line without write metrics: {sink_line}\nplan:\n{analyzed}"
     );
-    let mut names: Vec<String> = std::fs::read_dir(&directory)
+    let mut listed: Vec<String> = std::fs::read_dir(&directory)
         .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|entry| entry.unwrap().path().to_str().unwrap().to_string())
         .collect();
-    names.sort();
+    listed.sort();
+    let paths: Vec<String> = (0..3)
+        .map(|index| {
+            OutputFormat::VORTEX.partition_file_path(directory.to_str().unwrap(), index, 3)
+        })
+        .collect();
+    assert_eq!(listed, paths);
+    // The one check of the naming scheme itself, against ADR 0015 rather than the predictor.
+    let names: Vec<&str> = paths
+        .iter()
+        .map(|path| path.rsplit('/').next().unwrap())
+        .collect();
     assert_eq!(names, ["0.vortex", "1.vortex", "2.vortex"]);
     assert_eq!(
-        (0..3)
-            .map(|index| {
-                rows_of(&read_back(
-                    &OutputFormat::VORTEX.partition_file_path(
-                        directory.to_str().unwrap(),
-                        index,
-                        3,
-                    ),
-                    FixtureFormat::Vortex,
-                ))
-                .len()
-            })
+        paths
+            .iter()
+            .map(|path| rows_of(&read_back(path, FixtureFormat::Vortex)).len())
             .sum::<usize>(),
         32
     );

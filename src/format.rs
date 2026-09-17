@@ -50,10 +50,10 @@ impl InputFormat {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct OutputFormat(OutputRepr);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum OutputRepr {
     Parquet { compression: Option<String> },
     Vortex { compact: Option<bool> },
@@ -94,6 +94,9 @@ impl OutputFormat {
         Ok(self)
     }
 
+    /// The extension of every file this format writes. It carries no compression suffix because
+    /// neither format here has one; a format that does would add it here, and every path named
+    /// from it would follow.
     #[must_use]
     pub const fn extension(&self) -> &'static str {
         match self.0 {
@@ -150,11 +153,11 @@ impl OutputFormat {
     ) -> Result<DataFrame> {
         let target: Arc<dyn SinkTarget> = match layout {
             OutputLayout::SingleFile => Arc::new(FileSinkTarget {
-                output: self.output_factory(),
+                output: self.clone(),
                 path: path.to_string(),
             }),
             OutputLayout::FilePerPartition => Arc::new(DirectoryFileSinkTarget {
-                output: self.output_factory(),
+                output: self.clone(),
                 directory: path.to_string(),
             }),
         };
@@ -162,23 +165,27 @@ impl OutputFormat {
     }
 
     /// The path of the file holding partition `index` of `count` when this format writes a
-    /// directory at `directory` in [`OutputLayout::FilePerPartition`], with this format's
-    /// extension. A format with a compression suffix would add it to the extension when it
-    /// writes; neither format here has one.
+    /// directory at `directory` in [`OutputLayout::FilePerPartition`]: the index zero-padded to
+    /// the digit count of `count`, with this format's extension. The write names its files
+    /// through this function, so a caller predicting them names the same files.
     #[must_use]
     pub fn partition_file_path(&self, directory: &str, index: usize, count: usize) -> String {
-        partition_file_path(directory, index, count, self.extension())
+        let width = count.to_string().len();
+        format!(
+            "{}/{index:0width$}.{}",
+            directory.trim_end_matches('/'),
+            self.extension()
+        )
     }
 
-    fn output_factory(&self) -> OutputFactory {
+    /// The `DataFusion` format that writes files in this format on `state`, with this format's
+    /// options applied over the session's defaults.
+    fn write_format(&self, state: &dyn Session) -> Result<Arc<dyn FileFormat>> {
         let factory: Arc<dyn FileFormatFactory> = match self.0 {
             OutputRepr::Parquet { .. } => Arc::new(ParquetFormatFactory::new()),
             OutputRepr::Vortex { .. } => Arc::new(VortexFormatFactory::new()),
         };
-        OutputFactory {
-            factory,
-            format_options: self.format_options(),
-        }
+        factory.create(state, &self.format_options())
     }
 
     fn format_options(&self) -> HashMap<String, String> {
@@ -199,27 +206,13 @@ impl OutputFormat {
     }
 }
 
-/// The factory and options that make a format's writer on a session.
-#[derive(Debug)]
-struct OutputFactory {
-    factory: Arc<dyn FileFormatFactory>,
-    format_options: HashMap<String, String>,
-}
-
-impl OutputFactory {
-    /// The writer on `state`, with this output's options applied over the session's defaults.
-    fn create(&self, state: &dyn Session) -> Result<Arc<dyn FileFormat>> {
-        self.factory.create(state, &self.format_options)
-    }
-}
-
 /// A format's file sink at a path, built the way `COPY TO` builds it except that the caller
 /// supplies the ordering requirement instead of the planner deriving one from the input.
 ///
 /// It creates the format itself, because the layout picks a target with no session in hand.
 #[derive(Debug)]
 struct FileSinkTarget {
-    output: OutputFactory,
+    output: OutputFormat,
     path: String,
 }
 
@@ -231,7 +224,7 @@ impl SinkTarget for FileSinkTarget {
         input: Arc<dyn ExecutionPlan>,
         ordering: Option<LexRequirement>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let format = self.output.create(state)?;
+        let format = self.output.write_format(state)?;
         file_sink_plan(state, format.as_ref(), &self.path, input, ordering).await
     }
 }
@@ -245,7 +238,7 @@ impl SinkTarget for FileSinkTarget {
 /// format is created once here and shared by every partition's target.
 #[derive(Debug)]
 struct DirectoryFileSinkTarget {
-    output: OutputFactory,
+    output: OutputFormat,
     directory: String,
 }
 
@@ -257,12 +250,13 @@ impl SinkTarget for DirectoryFileSinkTarget {
         input: Arc<dyn ExecutionPlan>,
         ordering: Option<LexRequirement>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let format = self.output.create(state)?;
-        let extension = file_extension(format.as_ref());
+        let format = self.output.write_format(state)?;
         let partition = |index: usize, count: usize| -> Arc<dyn SinkTarget> {
             Arc::new(PartitionFileSinkTarget {
                 format: Arc::clone(&format),
-                path: partition_file_path(&self.directory, index, count, &extension),
+                path: self
+                    .output
+                    .partition_file_path(&self.directory, index, count),
             })
         };
         Ok(Arc::new(
@@ -322,31 +316,9 @@ fn single_file_sink_config(
         table_partition_cols: Vec::new(),
         insert_op: InsertOp::Append,
         keep_partition_by_columns: state.config_options().execution.keep_partition_by_columns,
-        file_extension: file_extension(format),
+        file_extension: format.get_ext(),
         file_output_mode: FileOutputMode::Automatic,
     })
-}
-
-/// The path of the file holding partition `index` of `count` in `directory`: the index
-/// zero-padded to the digit count of `count`, with `extension`.
-fn partition_file_path(directory: &str, index: usize, count: usize, extension: &str) -> String {
-    let width = count.to_string().len();
-    format!(
-        "{}/{index:0width$}.{extension}",
-        directory.trim_end_matches('/')
-    )
-}
-
-/// The extension `format` writes, with its compression suffix when it has one.
-fn file_extension(format: &dyn FileFormat) -> String {
-    format.compression_type().map_or_else(
-        || format.get_ext(),
-        |compression| {
-            format
-                .get_ext_with_compression(&compression)
-                .unwrap_or_else(|_| format.get_ext())
-        },
-    )
 }
 
 impl fmt::Display for OutputFormat {

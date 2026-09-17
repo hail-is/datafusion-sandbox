@@ -36,14 +36,13 @@ mechanism of [ADR 0014](0014-hold-the-merge-tree-with-the-sinks-ordering-require
   requirement arrives through the sink provider as it does for every other sink.
 - **The format builds every partition sink itself.** Each partition sink is the plan the format's
   `create_writer_physical_plan` returns for a single-file configuration at `dir/<index>.<ext>`,
-  the index zero-padded to the digit count of the partition count, over the input-partition plan
-  the exec supplies: a one-partition plan yielding input partition `i`. Building through the
-  format rather than the
-  sink constructors keeps what the format adds beyond the constructor: Parquet's sorting-column
-  metadata from the ordering, Vortex's compact encodings from the compression option, and the
-  session's table options. In the pinned Vortex crate the compact-encoding setter is
-  crate-private, so a sink built directly could not honor `--compression compact`; the format
-  route is the only one that does.
+  the index zero-padded to the digit count of the partition count and `<ext>` the output format's
+  extension, over the input-partition plan the exec supplies: a one-partition plan yielding input
+  partition `i`. Building through the format rather than the sink constructors keeps what the
+  format adds beyond the constructor: Parquet's sorting-column metadata from the ordering,
+  Vortex's compact encodings from the compression option, and the session's table options. In the
+  pinned Vortex crate the compact-encoding setter is crate-private, so a sink built directly could
+  not honor `--compression compact`; the format route is the only one that does.
 - **The partition sinks are built once, at plan time.** The format needs the session to build a
   sink, and the session is available when the target is planned but not when the plan executes.
   The input at plan time is the pre-optimization plan, whose partition count is the interval count
