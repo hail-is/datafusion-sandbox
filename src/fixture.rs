@@ -363,10 +363,7 @@ fn build_in_memory_fixture_without_alleles(name: &'static str) -> Arc<DatasetFix
                 Ok(())
             }
         },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
+        PipelineOptions::single_threaded(),
     )
     .unwrap_or_else(|error| panic!("writing the {name} dataset fixture: {error}"));
     fixture
@@ -467,10 +464,7 @@ fn build_sample_tables(
                 .collect::<datafusion::error::Result<Vec<_>>>()?;
             Ok(pipeline_root)
         },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
+        PipelineOptions::single_threaded(),
     )
     .unwrap_or_else(|error| panic!("writing the {error_context} dataset fixture: {error}"))
 }

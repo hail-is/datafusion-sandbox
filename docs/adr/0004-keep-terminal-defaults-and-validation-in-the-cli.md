@@ -3,7 +3,8 @@
 The CLI resolves action and format defaults, applies the twenty-row default for `--show`, and
 validates output extensions and compression before it executes a combiner run. These choices depend
 on arguments a person typed and the diagnostic they should see; the library accepts resolved
-settings and applies no presentation defaults.
+settings and applies no presentation defaults. A default that depends on neither, such as the
+thread count, belongs to the pipeline: it states the default once and the CLI reads it from there.
 
 ## Considered option
 

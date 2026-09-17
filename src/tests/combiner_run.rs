@@ -787,10 +787,7 @@ fn read_back(path: &str, format: FixtureFormat) -> Vec<RecordBatch> {
     };
     pipeline::run(
         move |ctx| async move { fixture::read_file(&ctx, &path, &input_format, None).await },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
+        PipelineOptions::single_threaded(),
     )
     .unwrap()
 }
@@ -871,6 +868,45 @@ fn reports_sample_ids_absent_from_the_dataset() {
     );
 }
 
+/// The output path of a write, explained or not, is among the paths the run hands the pipeline:
+/// one on a store the pipeline cannot serve fails the run before dataset discovery, so the input
+/// path here need not exist.
+#[test]
+fn rejects_an_output_path_on_an_unsupported_store_before_discovery() {
+    let write_to_s3 = || WriteTarget {
+        output_path: "s3://bucket/out.vortex".to_string(),
+        output_format: OutputFormat::VORTEX,
+    };
+
+    for action in [
+        Action::Write(write_to_s3()),
+        Action::Explain {
+            write: Some(write_to_s3()),
+        },
+        Action::ExplainAnalyze {
+            write: Some(write_to_s3()),
+        },
+    ] {
+        let description = format!("{action:?}");
+        let err = run(
+            Formulation::CombineRefsUnion,
+            "no-such-dataset",
+            InputFormat::VORTEX,
+            action,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("s3://bucket/out.vortex"),
+            "{description}: {message}"
+        );
+        assert!(message.contains("gs://"), "{description}: {message}");
+    }
+}
+
 fn run(
     formulation: Formulation,
     input_path: &str,
@@ -886,7 +922,7 @@ fn run(
         action,
         sample_set,
         row_limit,
-        threads: 1,
+        threads: NonZeroUsize::MIN,
     }
     .execute()
 }

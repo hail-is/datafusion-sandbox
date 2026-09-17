@@ -417,10 +417,7 @@ where
             datafusion::physical_plan::collect(Arc::clone(&plan), ctx.task_ctx()).await?;
             Ok((plan, collected.take()))
         },
-        PipelineOptions {
-            threads: 2,
-            ..Default::default()
-        },
+        PipelineOptions::new(NonZeroUsize::new(2).unwrap()),
     )
     .unwrap()
 }

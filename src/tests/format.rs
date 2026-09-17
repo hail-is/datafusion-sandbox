@@ -39,10 +39,7 @@ fn assert_writes_rows(format: &'static OutputFormat, extension: &'static str) {
             let bytes = store.get(&object_path).await?.bytes().await?;
             Ok((rows_written, metadata, bytes))
         },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
 

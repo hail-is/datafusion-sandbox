@@ -112,10 +112,7 @@ fn a_locus_interval_filter_prunes_files_outside_it_and_keeps_the_scan_ordered() 
                     let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx()).await?;
                     Ok((paths, batches))
                 },
-                PipelineOptions {
-                    threads: 1,
-                    ..Default::default()
-                },
+                PipelineOptions::single_threaded(),
             )
             .unwrap();
             // d ends at chr1:2 and a starts at chr2:2; c holds chr1:3 and b starts at chr1:4.
@@ -159,10 +156,7 @@ fn a_filter_excluding_every_file_returns_an_empty_result_with_the_projected_sche
                 assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
                 Ok(())
             },
-            PipelineOptions {
-                threads: 1,
-                ..Default::default()
-            },
+            PipelineOptions::single_threaded(),
         )
         .unwrap();
     }
@@ -414,10 +408,7 @@ fn an_unsupported_pruning_expression_keeps_every_file_and_filters_the_rows() {
                 .collect();
             Ok((paths, loci))
         },
-        PipelineOptions {
-            threads: 1,
-            ..Default::default()
-        },
+        PipelineOptions::single_threaded(),
     )
     .unwrap();
     assert_eq!(stems(&paths), ["d", "c", "b", "a"]);
@@ -593,10 +584,7 @@ fn planning_reads_every_footer_once_and_execution_opens_only_retained_files() {
                 assert_eq!(metered.started().len(), 4, "{format:?}");
                 Ok(())
             },
-            PipelineOptions {
-                threads: 1,
-                ..Default::default()
-            },
+            PipelineOptions::single_threaded(),
         )
         .unwrap();
     }
