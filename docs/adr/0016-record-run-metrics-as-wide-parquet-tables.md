@@ -56,5 +56,13 @@ Adding a metric means adding a column, and until it is added every run that repo
 warns. The tracer bullet in issue #171 records the six baseline metrics and issue #172 adds the
 rest. The `run_metrics` module owns both schemas and the tree walk and knows nothing of datasets
 or storage, so its tests run against a generated-table plan in memory, per
-[ADR 0010](0010-keep-tests-on-in-memory-object-stores.md). A run id repeated against the same
-metrics directory overwrites the earlier run's files; issue #174 adds the refusal.
+[ADR 0010](0010-keep-tests-on-in-memory-object-stores.md).
+
+Two guarantees protect the history a metrics directory accumulates (issue #174). A measured write
+refuses a run id that already has a run record under the directory, before it discovers the
+dataset or writes anything: a single-file write silently replaces an existing object, so the check
+is the only thing standing between a repeated id and an overwritten run. And a measured write that
+fails records nothing: the tables are written only after the data write succeeds, and the run
+record is written last, so it is the mark of a recorded run. A failure between the two table
+writes leaves run metrics without a record, and a retry of that id replaces them rather than being
+refused.

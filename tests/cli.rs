@@ -144,6 +144,49 @@ fn a_measured_write_prints_the_run_id_and_records_both_tables() {
     );
 }
 
+/// A second measured write with the run id of a recorded run is refused, naming the id on
+/// stderr, and its output path is never written.
+#[test]
+fn a_repeated_run_id_is_refused_before_the_write() {
+    let dataset = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let dir = tempfile::tempdir().unwrap();
+    let metrics_directory = dir.path().join("metrics").to_str().unwrap().to_string();
+    let measured_write = |output_path: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+            .args([
+                "--threads",
+                "1",
+                "combine-refs",
+                dataset.table_path(),
+                "--write",
+                output_path.to_str().unwrap(),
+                "--metrics",
+                &metrics_directory,
+                "--run-id",
+                "cli-run",
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let first = measured_write(&dir.path().join("first.vortex"));
+    assert!(
+        first.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second_output = dir.path().join("second.vortex");
+    let second = measured_write(&second_output);
+
+    assert!(!second.status.success());
+    let stderr = String::from_utf8(second.stderr).unwrap();
+    assert!(
+        stderr.contains("run id 'cli-run' already has a run record"),
+        "stderr:\n{stderr}"
+    );
+    assert!(!second_output.exists());
+}
+
 #[test]
 fn metrics_without_a_write_is_rejected_before_any_run() {
     let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))

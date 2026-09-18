@@ -83,9 +83,11 @@ A measured write, `--write PATH --metrics DIR`, writes the output as a plain wri
 the run under `DIR`: one row of resolved settings, wall-clock timings, and peak resident set size
 in `DIR/runs/<id>.parquet`, and one row per plan operator per partition of DataFusion's metrics in
 `DIR/metrics/<id>.parquet`.
-`--run-id ID` names the run; without it a UUID is generated and printed. Both tables are Parquet
-whatever the output format, and each run adds one file, so `DIR/runs` and `DIR/metrics` read as
-tables of every run with datafusion-cli, DuckDB, or pandas. See
+`--run-id ID` names the run; without it a UUID is generated and printed. An id that already has a
+run record under `DIR` is refused before anything is written, and a run that fails records
+nothing. Both tables are Parquet whatever the output format, and each run adds one file, so
+`DIR/runs` and `DIR/metrics` read as tables of every run with datafusion-cli, DuckDB, or pandas.
+See
 [ADR 0016](docs/adr/0016-record-run-metrics-as-wide-parquet-tables.md).
 Several metric names mislead: a Parquet scan's `elapsed_compute` excludes decoding, for one.
 [What the run metrics measure](notes/datafusion-metrics.md) says what each column of the metrics
