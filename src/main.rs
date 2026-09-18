@@ -17,6 +17,7 @@ use datafusion_sandbox::locus::SplitPoints;
 use datafusion_sandbox::ordered_frame::OutputLayout;
 use datafusion_sandbox::pipeline;
 use std::{num::NonZeroUsize, path::Path};
+use uuid::Uuid;
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
 
@@ -135,6 +136,19 @@ struct CombinerArgs {
         conflicts_with = "show"
     )]
     compression: Option<String>,
+    /// Record the run under DIR: its run record at DIR/runs/<ID>.parquet and its run metrics at
+    /// DIR/metrics/<ID>.parquet, both Parquet whatever the output format. DIR may be any path
+    /// --write accepts. Requires --write and performs it.
+    #[arg(
+        long,
+        value_name = "DIR",
+        requires = "write",
+        conflicts_with_all = ["show", "explain", "explain_analyze"]
+    )]
+    metrics: Option<String>,
+    /// The id naming this run in the metrics tables. Defaults to a generated UUID.
+    #[arg(long, value_name = "ID", requires = "metrics")]
+    run_id: Option<String>,
     /// Return at most ROWS combined rows. Defaults to 20 with --show and unlimited otherwise.
     #[arg(long, value_name = "ROWS")]
     limit: Option<usize>,
@@ -271,6 +285,8 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
         formats,
         action,
         compression,
+        metrics,
+        run_id,
         limit,
         sample_set,
     } = args;
@@ -290,7 +306,17 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
         })
     };
     let action = match cli_action {
-        CliAction::Write(output_path) => Action::Write(write_target(output_path)?),
+        CliAction::Write(output_path) => {
+            let write = write_target(output_path)?;
+            match metrics {
+                Some(metrics_directory) => Action::MeasuredWrite {
+                    write,
+                    metrics_directory,
+                    run_id: run_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+                },
+                None => Action::Write(write),
+            }
+        }
         CliAction::Show => Action::Collect,
         CliAction::Explain { write } => Action::Explain {
             write: write.map(write_target).transpose()?,
@@ -315,6 +341,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let run = resolve(cli)?;
     println!("formulation: {}", run.formulation);
+    if let Action::MeasuredWrite { run_id, .. } = &run.action {
+        println!("run id: {run_id}");
+    }
     let outcome = run.execute()?;
     println!("{}", outcome.render()?);
     Ok(())
@@ -472,6 +501,130 @@ mod tests {
                 "{action} diagnostic:\n{diagnostic}"
             );
         }
+    }
+
+    #[test]
+    fn metrics_requires_a_write_action() {
+        let error = Cli::try_parse_from([
+            "datafusion-sandbox",
+            "combine-refs",
+            "input",
+            "--metrics",
+            "runs",
+        ])
+        .err()
+        .unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(
+            diagnostic.contains("--metrics"),
+            "diagnostic:\n{diagnostic}"
+        );
+        assert!(diagnostic.contains("--write"), "diagnostic:\n{diagnostic}");
+    }
+
+    /// `--metrics` conflicts with every other action outright, whether or not a `--write` is
+    /// there for an explain to combine with.
+    #[test]
+    fn metrics_conflicts_with_every_non_write_action() {
+        for args in [
+            vec!["--show"],
+            vec!["--explain"],
+            vec!["--explain-analyze"],
+            vec!["--explain", "--write", "out.vortex"],
+            vec!["--explain-analyze", "--write", "out.vortex"],
+        ] {
+            let error = Cli::try_parse_from(
+                [
+                    "datafusion-sandbox",
+                    "combine-refs",
+                    "input",
+                    "--metrics",
+                    "runs",
+                ]
+                .into_iter()
+                .chain(args.iter().copied()),
+            )
+            .err()
+            .unwrap();
+            let diagnostic = error.to_string();
+
+            assert!(
+                diagnostic.contains("cannot be used with"),
+                "{args:?} diagnostic:\n{diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("--metrics"),
+                "{args:?} diagnostic:\n{diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_id_requires_metrics() {
+        let error = Cli::try_parse_from([
+            "datafusion-sandbox",
+            "combine-refs",
+            "input",
+            "--write",
+            "out.vortex",
+            "--run-id",
+            "run-1",
+        ])
+        .err()
+        .unwrap();
+        let diagnostic = error.to_string();
+
+        assert!(diagnostic.contains("--run-id"), "diagnostic:\n{diagnostic}");
+        assert!(
+            diagnostic.contains("--metrics"),
+            "diagnostic:\n{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn write_with_metrics_resolves_to_a_measured_write_with_a_generated_run_id() {
+        let run = resolve(parse_combiner([
+            "--write",
+            "out.vortex",
+            "--metrics",
+            "runs",
+            "--compression",
+            "compact",
+        ]))
+        .unwrap();
+
+        let Action::MeasuredWrite {
+            write,
+            metrics_directory,
+            run_id,
+        } = run.action
+        else {
+            panic!("expected a measured write, got {:?}", run.action);
+        };
+        assert_eq!(write.output_path, "out.vortex");
+        assert_eq!(write.output_format.compression(), Some("compact"));
+        assert_eq!(metrics_directory, "runs");
+        assert!(Uuid::parse_str(&run_id).is_ok(), "run id {run_id:?}");
+        assert_eq!(run.row_limit, None);
+    }
+
+    #[test]
+    fn an_explicit_run_id_is_honored() {
+        let run = resolve(parse_combiner([
+            "--write",
+            "out.vortex",
+            "--metrics",
+            "runs",
+            "--run-id",
+            "sweep-3",
+        ]))
+        .unwrap();
+
+        let Action::MeasuredWrite { run_id, .. } = run.action else {
+            panic!("expected a measured write, got {:?}", run.action);
+        };
+        assert_eq!(run_id, "sweep-3");
     }
 
     #[test]
