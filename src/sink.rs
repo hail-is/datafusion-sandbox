@@ -14,6 +14,10 @@
 //! The [`SinkTarget`] implementations here are the ones needing no format: the collecting and
 //! draining sinks. A write's targets live in [`crate::format`], beside the writer factories and
 //! options they build a sink from.
+//!
+//! [`execute_and_retain`] is how a sink frame runs: it builds the physical plan, executes it to
+//! completion, and hands the plan back with the rows written, so every operator's metrics are
+//! readable from it afterwards. A frame-level collect would drop the plan with the batches.
 
 use crate::{locus::StoredOrdering, ordered_frame::OrderedFrame};
 
@@ -37,7 +41,7 @@ use datafusion::{
         EquivalenceProperties, LexRequirement, OrderingRequirements, PhysicalExpr, PhysicalSortExpr,
     },
     physical_plan::{
-        ChildrenPropertiesMode, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan,
+        self, ChildrenPropertiesMode, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan,
         ExecutionPlanProperties, InputDistributionRequirements, Partitioning, PlanProperties,
         ReplaceChildrenOptions, SendableRecordBatchStream,
         execution_plan::{EvaluationType, SchedulingType},
@@ -96,6 +100,31 @@ pub fn run_into(
     )?
     .build()?;
     Ok(DataFrame::new(state, plan))
+}
+
+/// What executing a sink frame yields: the rows the sink wrote, and the physical plan that wrote
+/// them. Every operator's metrics are readable from the plan.
+#[derive(Debug)]
+pub struct ExecutedSink {
+    pub rows_written: u64,
+    pub plan: Arc<dyn ExecutionPlan>,
+}
+
+/// Executes `frame`, a sink frame, to completion and keeps hold of the physical plan it ran.
+///
+/// This is the one path a sink frame executes on. The plan is built and run the way a frame-level
+/// collect builds and runs it, on the frame's own session, and then kept rather than dropped.
+///
+/// # Errors
+///
+/// Returns an error if the plan cannot be built or executed, or if the sink yields anything other
+/// than count batches.
+pub async fn execute_and_retain(frame: DataFrame) -> Result<ExecutedSink> {
+    let task_ctx = Arc::new(frame.task_ctx());
+    let plan = frame.create_physical_plan().await?;
+    let batches = physical_plan::collect(Arc::clone(&plan), task_ctx).await?;
+    let rows_written = rows_written(&batches)?;
+    Ok(ExecutedSink { rows_written, plan })
 }
 
 /// The frame that runs `df` into a sink keeping every batch it receives, in arrival order.
@@ -501,7 +530,7 @@ fn count_schema() -> SchemaRef {
 /// # Errors
 ///
 /// Returns an error if `batches` is empty or holds anything other than the count schema.
-pub fn rows_written(batches: &[RecordBatch]) -> Result<u64> {
+fn rows_written(batches: &[RecordBatch]) -> Result<u64> {
     let malformed = || {
         DataFusionError::Internal(format!(
             "expected batches of one non-null count: UInt64 column from the sink, got {batches:?}"

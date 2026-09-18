@@ -112,8 +112,9 @@ impl OutputFormat {
     /// Returns an error if the write plan cannot be built or executed, or if the execution result
     /// does not contain the expected row counts.
     pub async fn write(&self, ordered: OrderedFrame, path: &str) -> Result<u64> {
-        let batches = self.sink_frame(ordered, path)?.collect().await?;
-        sink::rows_written(&batches)
+        Ok(sink::execute_and_retain(self.sink_frame(ordered, path)?)
+            .await?
+            .rows_written)
     }
 
     /// Writes one file of unordered rows to `path`, returning the number of rows written.
@@ -123,11 +124,8 @@ impl OutputFormat {
     /// Returns an error if the write plan cannot be built or executed, or if the execution result
     /// does not contain the expected row counts.
     pub async fn write_unordered(&self, frame: DataFrame, path: &str) -> Result<u64> {
-        let batches = self
-            .sink_frame_with(frame, path, None, OutputLayout::SingleFile)?
-            .collect()
-            .await?;
-        sink::rows_written(&batches)
+        let frame = self.sink_frame_with(frame, path, None, OutputLayout::SingleFile)?;
+        Ok(sink::execute_and_retain(frame).await?.rows_written)
     }
 
     /// The frame that writes `ordered` to `path` when executed.
