@@ -8,11 +8,19 @@
 //! [ADR 0016](../docs/adr/0016-record-run-metrics-as-wide-parquet-tables.md) for why the tables
 //! are wide and why an unknown metric is dropped rather than failing the run.
 //!
-//! The metric columns are the six baseline metrics every `DataFusion` operator can record. A
-//! metric of any other name is dropped and its name handed back for the caller to warn about.
-//! Vortex's own scan metrics (bytes read, decode time) live in Vortex's registry and never reach
-//! the plan, so a Vortex scan's row is nearly empty without the scan being cheap; issue #169
-//! tracks recording them.
+//! The metric columns are every metric the operators present in a current formulation's plan
+//! record under the pinned `DataFusion`: the six baseline metrics every operator can record, the
+//! file stream's on every scan, the Parquet scan's, the Vortex scan's counter, the repartition
+//! timers, the aggregate's spill counters, peak memory, and timers, and the sink's rows and bytes
+//! written. A metric of any other name is dropped and its name handed back for the caller to
+//! warn about.
+//!
+//! Two columns are emptier than their names suggest. Vortex's own scan metrics (bytes read,
+//! decode time) live in Vortex's registry and never reach the plan, so a Vortex scan's row holds
+//! the file stream's metrics and nothing Vortex-specific; a near-empty Vortex scan row is not a
+//! cheap scan. Issue #169 tracks recording them. And `peak_mem_used` is recorded only by
+//! `DataFusion`'s fallback grouped hash aggregate stream; the streams it picks for the allele
+//! combiner's distinct do not report it, so the column is null for every current plan.
 
 use datafusion::{
     arrow::{
@@ -23,7 +31,7 @@ use datafusion::{
     error::{DataFusionError, Result},
     physical_plan::{
         ExecutionPlan, displayable,
-        metrics::{MetricValue, MetricsSet},
+        metrics::{MetricValue, MetricsSet, RatioMergeStrategy},
     },
 };
 
@@ -123,11 +131,12 @@ pub struct RunMetrics {
 /// `node` is the operator's pre-order index in the plan, `parent` the index of the operator
 /// above it, null at the root, and `depth` its distance from the root. `partition` is null for a
 /// metric the operator reports globally rather than per partition, and for an operator that
-/// reports no metrics at all. Counts are integers, times are nanosecond integers, and timestamps
-/// are nanosecond timestamps.
+/// reports no metrics at all. Then one column per metric in [`METRICS`], every one nullable:
+/// counts and gauges are integers, times are nanosecond integers, timestamps are nanosecond
+/// timestamps, and a pruning metric or a ratio is two integer columns.
 #[must_use]
 pub fn run_metrics_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
+    let mut fields = vec![
         Field::new("run_id", DataType::Utf8, false),
         Field::new("node", DataType::UInt64, false),
         Field::new("parent", DataType::UInt64, true),
@@ -135,20 +144,27 @@ pub fn run_metrics_schema() -> SchemaRef {
         Field::new("operator", DataType::Utf8, false),
         Field::new("display", DataType::Utf8, false),
         Field::new("partition", DataType::UInt64, true),
-        Field::new("output_rows", DataType::UInt64, true),
-        Field::new("output_batches", DataType::UInt64, true),
-        Field::new("output_bytes", DataType::UInt64, true),
-        Field::new("elapsed_compute", DataType::UInt64, true),
-        Field::new("start_timestamp", timestamp_type(), true),
-        Field::new("end_timestamp", timestamp_type(), true),
-    ]))
+    ];
+    for metric in METRICS {
+        fields.extend(
+            metric
+                .columns()
+                .into_iter()
+                .map(|(name, data_type)| Field::new(name, data_type, true)),
+        );
+    }
+    Arc::new(Schema::new(fields))
 }
 
 /// The run metrics of `plan`, an executed plan, for the run `run_id`.
 ///
-/// Every operator gets one row per partition it reported metrics for, its counts summed and its
-/// timestamps spanned within the partition, and one row of nulls if it reported none. A metric
-/// whose name is not a column is dropped and named in the result.
+/// Every operator gets one row per partition it reported metrics for, and one row of nulls if it
+/// reported none. Within a partition, metrics of one name are summed the way `DataFusion` sums
+/// them: counts, times, and gauges add, a start timestamp takes the earliest and an end
+/// timestamp the latest, a pruning metric adds both counts, and a ratio merges by its own
+/// strategy. A Parquet scan reports its metrics once per file, so its partition's row holds the
+/// sum over its files. A metric whose name is not a column, or whose kind is not the column's,
+/// is dropped and named in the result.
 ///
 /// # Errors
 ///
@@ -158,7 +174,7 @@ pub fn run_metrics_batch(run_id: &str, plan: &Arc<dyn ExecutionPlan>) -> Result<
     let mut unrecorded = BTreeSet::new();
     visit(plan, None, 0, &mut 0, &mut rows, &mut unrecorded);
 
-    let columns: Vec<ArrayRef> = vec![
+    let mut columns: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from(vec![run_id; rows.len()])),
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|row| row.node),
@@ -174,29 +190,326 @@ pub fn run_metrics_batch(run_id: &str, plan: &Arc<dyn ExecutionPlan>) -> Result<
             rows.iter().map(|row| row.display.as_str()),
         )),
         Arc::new(UInt64Array::from_iter(rows.iter().map(|row| row.partition))),
-        Arc::new(UInt64Array::from_iter(
-            rows.iter().map(|row| row.metrics.output_rows),
-        )),
-        Arc::new(UInt64Array::from_iter(
-            rows.iter().map(|row| row.metrics.output_batches),
-        )),
-        Arc::new(UInt64Array::from_iter(
-            rows.iter().map(|row| row.metrics.output_bytes),
-        )),
-        Arc::new(UInt64Array::from_iter(
-            rows.iter().map(|row| row.metrics.elapsed_compute),
-        )),
-        Arc::new(timestamp_array(
-            rows.iter().map(|row| row.metrics.start_timestamp).collect(),
-        )),
-        Arc::new(timestamp_array(
-            rows.iter().map(|row| row.metrics.end_timestamp).collect(),
-        )),
     ];
+    for metric in METRICS {
+        for (index, (_, data_type)) in metric.columns().iter().enumerate() {
+            let cells = rows.iter().map(|row| row.metrics.get(metric.name()));
+            columns.push(if *data_type == timestamp_type() {
+                Arc::new(timestamp_array(
+                    cells
+                        .map(|cell| cell.and_then(Recorded::timestamp))
+                        .collect(),
+                ))
+            } else {
+                Arc::new(UInt64Array::from_iter(
+                    cells.map(|cell| cell.and_then(|cell| cell.integer(index))),
+                ))
+            });
+        }
+    }
     Ok(RunMetrics {
         batch: RecordBatch::try_new(run_metrics_schema(), columns)?,
         unrecorded: unrecorded.into_iter().collect(),
     })
+}
+
+/// A metric the table has columns for, by the name it reports under.
+#[derive(Clone, Copy, Debug)]
+enum Metric {
+    /// A count, gauge, or time: one integer column named for the metric.
+    Integer(&'static str),
+    /// One nanosecond timestamp column named for the metric.
+    Timestamp(&'static str),
+    /// A pruning metric: `<name>_pruned` and `<name>_total`.
+    Pruning(&'static str),
+    /// A ratio: `<name>_num` and `<name>_den`.
+    Ratio(&'static str),
+}
+
+/// Every metric the operators present in a current formulation's plan record under the pinned
+/// `DataFusion`, in the order their columns appear. The names are the ones the metrics print
+/// under, confirmed against the pinned sources; the kinds are the `MetricValue` variants they
+/// are built as.
+const METRICS: &[Metric] = &[
+    // Baseline, on every operator.
+    Metric::Integer("output_rows"),
+    Metric::Integer("output_batches"),
+    Metric::Integer("output_bytes"),
+    Metric::Integer("elapsed_compute"),
+    Metric::Timestamp("start_timestamp"),
+    Metric::Timestamp("end_timestamp"),
+    // File stream, on every scan, and the scan's batch splitting.
+    Metric::Integer("files_opened"),
+    Metric::Integer("files_processed"),
+    Metric::Integer("file_open_errors"),
+    Metric::Integer("file_scan_errors"),
+    Metric::Integer("batches_split"),
+    Metric::Integer("time_elapsed_opening"),
+    Metric::Integer("time_elapsed_scanning_until_data"),
+    Metric::Integer("time_elapsed_scanning_total"),
+    Metric::Integer("time_elapsed_processing"),
+    // Parquet scan, reported once per file and summed within the partition.
+    Metric::Integer("bytes_scanned"),
+    Metric::Integer("metadata_load_time"),
+    Metric::Integer("pushdown_rows_pruned"),
+    Metric::Integer("pushdown_rows_matched"),
+    Metric::Integer("predicate_evaluation_errors"),
+    Metric::Integer("row_pushdown_eval_time"),
+    Metric::Integer("statistics_eval_time"),
+    Metric::Integer("bloom_filter_eval_time"),
+    Metric::Integer("page_index_eval_time"),
+    Metric::Integer("predicate_cache_inner_records"),
+    Metric::Integer("predicate_cache_records"),
+    Metric::Integer("row_groups_pruned_dynamic_filter"),
+    // The next two are registered only once nonzero.
+    Metric::Integer("page_index_pages_skipped_by_fully_matched"),
+    Metric::Integer("page_index_load_skipped"),
+    Metric::Pruning("files_ranges_pruned_statistics"),
+    Metric::Pruning("row_groups_pruned_bloom_filter"),
+    Metric::Pruning("limit_pruned_row_groups"),
+    Metric::Pruning("row_groups_pruned_statistics"),
+    Metric::Pruning("page_index_pages_pruned"),
+    Metric::Pruning("page_index_rows_pruned"),
+    Metric::Ratio("scan_efficiency_ratio"),
+    Metric::Ratio("output_rows_skew"),
+    // Vortex scan.
+    Metric::Integer("num_predicate_creation_errors"),
+    // Repartition.
+    Metric::Integer("fetch_time"),
+    Metric::Integer("repartition_time"),
+    Metric::Integer("send_time"),
+    // Aggregate.
+    Metric::Integer("peak_mem_used"),
+    Metric::Integer("spill_count"),
+    Metric::Integer("spilled_bytes"),
+    Metric::Integer("spilled_rows"),
+    Metric::Integer("skipped_aggregation_rows"),
+    // The group-by timers of the hash and ordered aggregate streams.
+    Metric::Integer("time_calculating_group_ids"),
+    Metric::Integer("aggregate_arguments_time"),
+    Metric::Integer("aggregation_time"),
+    Metric::Integer("emitting_time"),
+    Metric::Ratio("reduction_factor"),
+    // Sink.
+    Metric::Integer("rows_written"),
+    Metric::Integer("bytes_written"),
+];
+
+impl Metric {
+    /// The name this metric reports under.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Integer(name)
+            | Self::Timestamp(name)
+            | Self::Pruning(name)
+            | Self::Ratio(name) => name,
+        }
+    }
+
+    /// The columns this metric fills, in schema order.
+    fn columns(self) -> Vec<(String, DataType)> {
+        match self {
+            Self::Integer(name) => vec![(name.to_string(), DataType::UInt64)],
+            Self::Timestamp(name) => vec![(name.to_string(), timestamp_type())],
+            Self::Pruning(name) => vec![
+                (format!("{name}_pruned"), DataType::UInt64),
+                (format!("{name}_total"), DataType::UInt64),
+            ],
+            Self::Ratio(name) => vec![
+                (format!("{name}_num"), DataType::UInt64),
+                (format!("{name}_den"), DataType::UInt64),
+            ],
+        }
+    }
+
+    /// The metric named `name`, if the table has columns for one.
+    fn named(name: &str) -> Option<Self> {
+        METRICS.iter().copied().find(|metric| metric.name() == name)
+    }
+}
+
+/// One metric's value in one row, in the kind its columns hold.
+#[derive(Clone, Copy, Debug)]
+enum Recorded {
+    /// A count, gauge, or time.
+    Integer(u64),
+    /// Nanoseconds since the Unix epoch.
+    Timestamp(i64),
+    Pruning {
+        pruned: u64,
+        total: u64,
+    },
+    Ratio {
+        numerator: u64,
+        denominator: u64,
+    },
+}
+
+impl Recorded {
+    /// `value` in the kind `metric`'s columns hold, or `None` when it is not of that kind.
+    fn of(metric: Metric, value: &MetricValue) -> Option<Self> {
+        match (metric, value) {
+            (
+                Metric::Integer(_),
+                MetricValue::OutputRows(_)
+                | MetricValue::OutputBatches(_)
+                | MetricValue::OutputBytes(_)
+                | MetricValue::SpillCount(_)
+                | MetricValue::SpilledBytes(_)
+                | MetricValue::SpilledRows(_)
+                | MetricValue::CurrentMemoryUsage(_)
+                | MetricValue::ElapsedCompute(_)
+                | MetricValue::Count { .. }
+                | MetricValue::Gauge { .. }
+                | MetricValue::PeakMemoryUsage { .. }
+                | MetricValue::Time { .. },
+            ) => Some(Self::Integer(to_u64(value.as_usize()))),
+            (
+                Metric::Timestamp(_),
+                MetricValue::StartTimestamp(timestamp) | MetricValue::EndTimestamp(timestamp),
+            ) => timestamp
+                .value()
+                .and_then(|time| time.timestamp_nanos_opt())
+                .map(Self::Timestamp),
+            (
+                Metric::Pruning(_),
+                MetricValue::PruningMetrics {
+                    pruning_metrics, ..
+                },
+            ) => {
+                let pruned = to_u64(pruning_metrics.pruned());
+                Some(Self::Pruning {
+                    pruned,
+                    total: pruned.saturating_add(to_u64(pruning_metrics.matched())),
+                })
+            }
+            (Metric::Ratio(_), MetricValue::Ratio { ratio_metrics, .. }) => Some(Self::Ratio {
+                numerator: to_u64(ratio_metrics.part()),
+                denominator: to_u64(ratio_metrics.total()),
+            }),
+            (
+                Metric::Integer(_) | Metric::Timestamp(_) | Metric::Pruning(_) | Metric::Ratio(_),
+                _,
+            ) => None,
+        }
+    }
+
+    /// This value with `next`, another reading of the same metric within the partition, folded
+    /// in the way `DataFusion` folds them: counts add, a start timestamp takes the earliest and
+    /// an end timestamp the latest, a pruning metric adds both counts, and a ratio merges by the
+    /// strategy `value` carries.
+    fn fold(self, next: Self, value: &MetricValue) -> Self {
+        match (self, next) {
+            (Self::Integer(previous), Self::Integer(next)) => {
+                Self::Integer(previous.saturating_add(next))
+            }
+            (Self::Timestamp(previous), Self::Timestamp(next)) => {
+                Self::Timestamp(if matches!(value, MetricValue::StartTimestamp(_)) {
+                    previous.min(next)
+                } else {
+                    previous.max(next)
+                })
+            }
+            (
+                Self::Pruning { pruned, total },
+                Self::Pruning {
+                    pruned: next_pruned,
+                    total: next_total,
+                },
+            ) => Self::Pruning {
+                pruned: pruned.saturating_add(next_pruned),
+                total: total.saturating_add(next_total),
+            },
+            (
+                Self::Ratio {
+                    numerator,
+                    denominator,
+                },
+                Self::Ratio {
+                    numerator: next_numerator,
+                    denominator: next_denominator,
+                },
+            ) => {
+                let strategy = match value {
+                    MetricValue::Ratio { ratio_metrics, .. } => ratio_metrics.merge_strategy(),
+                    _ => &RatioMergeStrategy::AddPartAddTotal,
+                };
+                let (numerator, denominator) = match strategy {
+                    RatioMergeStrategy::AddPartAddTotal => (
+                        numerator.saturating_add(next_numerator),
+                        denominator.saturating_add(next_denominator),
+                    ),
+                    RatioMergeStrategy::AddPartSetTotal => {
+                        (numerator.saturating_add(next_numerator), next_denominator)
+                    }
+                    RatioMergeStrategy::SetPartAddTotal => {
+                        (next_numerator, denominator.saturating_add(next_denominator))
+                    }
+                };
+                Self::Ratio {
+                    numerator,
+                    denominator,
+                }
+            }
+            // Two readings of one metric name are of one kind; keep the later one otherwise.
+            (
+                Self::Integer(_) | Self::Timestamp(_) | Self::Pruning { .. } | Self::Ratio { .. },
+                next,
+            ) => next,
+        }
+    }
+
+    /// The integer cell this value holds in column `index` of its metric's columns.
+    const fn integer(&self, index: usize) -> Option<u64> {
+        match (self, index) {
+            (
+                Self::Integer(value)
+                | Self::Pruning { pruned: value, .. }
+                | Self::Ratio {
+                    numerator: value, ..
+                },
+                0,
+            )
+            | (
+                Self::Pruning { total: value, .. }
+                | Self::Ratio {
+                    denominator: value, ..
+                },
+                1,
+            ) => Some(*value),
+            (
+                Self::Integer(_) | Self::Timestamp(_) | Self::Pruning { .. } | Self::Ratio { .. },
+                _,
+            ) => None,
+        }
+    }
+
+    const fn timestamp(&self) -> Option<i64> {
+        match self {
+            Self::Timestamp(value) => Some(*value),
+            Self::Integer(_) | Self::Pruning { .. } | Self::Ratio { .. } => None,
+        }
+    }
+}
+
+/// The metrics of one row, by the name each reports under.
+type Metrics = BTreeMap<&'static str, Recorded>;
+
+/// Folds `value` into `metrics`, failing with its name when no column takes it.
+fn record<'a>(metrics: &mut Metrics, value: &'a MetricValue) -> Result<(), &'a str> {
+    let name = value.name();
+    let metric = Metric::named(name).ok_or(name)?;
+    let next = match Recorded::of(metric, value) {
+        Some(next) => next,
+        // A timestamp not yet recorded fills nothing; any other kind mismatch is unrecorded.
+        None if matches!(metric, Metric::Timestamp(_)) => return Ok(()),
+        None => return Err(name),
+    };
+    let folded = metrics
+        .get(metric.name())
+        .map_or(next, |previous| previous.fold(next, value));
+    metrics.insert(metric.name(), folded);
+    Ok(())
 }
 
 /// One row of the run metrics table.
@@ -207,48 +520,7 @@ struct Row {
     operator: String,
     display: String,
     partition: Option<u64>,
-    metrics: Baseline,
-}
-
-/// The baseline metric columns of one row, every one null until a metric fills it.
-#[derive(Default)]
-struct Baseline {
-    output_rows: Option<u64>,
-    output_batches: Option<u64>,
-    output_bytes: Option<u64>,
-    elapsed_compute: Option<u64>,
-    start_timestamp: Option<i64>,
-    end_timestamp: Option<i64>,
-}
-
-impl Baseline {
-    /// Folds `value` into this row, failing with its name when no column takes it.
-    fn record<'a>(&mut self, value: &'a MetricValue) -> Result<(), &'a str> {
-        match value {
-            MetricValue::OutputRows(count) => add(&mut self.output_rows, count.value()),
-            MetricValue::OutputBatches(count) => add(&mut self.output_batches, count.value()),
-            MetricValue::OutputBytes(count) => add(&mut self.output_bytes, count.value()),
-            MetricValue::ElapsedCompute(time) => add(&mut self.elapsed_compute, time.value()),
-            MetricValue::StartTimestamp(timestamp) => {
-                if let Some(nanos) = timestamp.value().and_then(|t| t.timestamp_nanos_opt()) {
-                    self.start_timestamp =
-                        Some(self.start_timestamp.map_or(nanos, |s| s.min(nanos)));
-                }
-            }
-            MetricValue::EndTimestamp(timestamp) => {
-                if let Some(nanos) = timestamp.value().and_then(|t| t.timestamp_nanos_opt()) {
-                    self.end_timestamp = Some(self.end_timestamp.map_or(nanos, |e| e.max(nanos)));
-                }
-            }
-            other => return Err(other.name()),
-        }
-        Ok(())
-    }
-}
-
-/// Adds `value` to a count column, filling a null.
-fn add(column: &mut Option<u64>, value: usize) {
-    *column = Some(column.unwrap_or(0).saturating_add(to_u64(value)));
+    metrics: Metrics,
 }
 
 /// Appends the rows of `node` and, in pre-order, of every operator beneath it.
@@ -269,19 +541,15 @@ fn visit(
         .trim_end()
         .to_string();
 
-    let mut partitions: BTreeMap<Option<u64>, Baseline> = BTreeMap::new();
+    let mut partitions: BTreeMap<Option<u64>, Metrics> = BTreeMap::new();
     for metric in node.metrics().iter().flat_map(MetricsSet::iter) {
         let partition = metric.partition().map(to_u64);
-        if let Err(name) = partitions
-            .entry(partition)
-            .or_default()
-            .record(metric.value())
-        {
+        if let Err(name) = record(partitions.entry(partition).or_default(), metric.value()) {
             unrecorded.insert(name.to_string());
         }
     }
     if partitions.is_empty() {
-        partitions.insert(None, Baseline::default());
+        partitions.insert(None, Metrics::default());
     }
     rows.extend(partitions.into_iter().map(|(partition, metrics)| Row {
         node: index,

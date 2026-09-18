@@ -74,8 +74,8 @@ fn failing_binary_exits_nonzero_and_prints_the_error_on_stderr() {
 }
 
 /// `--write --metrics` performs the write, prints the run id under the formulation line, and
-/// records the run in two Parquet tables that read back with that id. A metric the tables have
-/// no column for is printed as a warning line.
+/// records the run in two Parquet tables that read back with that id. Every metric the plan
+/// reported has a column, so no warning line follows the row count.
 #[test]
 fn a_measured_write_prints_the_run_id_and_records_both_tables() {
     let dataset = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
@@ -105,14 +105,7 @@ fn a_measured_write_prints_the_run_id_and_records_both_tables() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.starts_with("formulation: union\nrun id: cli-run\n32\n"),
-        "stdout:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("warning: metric 'files_opened' has no column"),
-        "stdout:\n{stdout}"
-    );
+    assert_eq!(stdout, "formulation: union\nrun id: cli-run\n32\n");
     assert!(output_path.exists());
     for table in ["runs", "metrics"] {
         let path = format!("{metrics_directory}/{table}/cli-run.parquet");
