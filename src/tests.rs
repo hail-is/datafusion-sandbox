@@ -8,6 +8,7 @@ mod formulation;
 mod locus;
 mod pipeline;
 mod plan_shape;
+mod run_metrics;
 mod sink;
 mod sorted_table;
 mod support;

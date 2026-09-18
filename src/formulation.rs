@@ -54,6 +54,28 @@ impl Formulation {
         }
     }
 
+    /// The sample group count of a grouped merge; `None` for every other formulation.
+    #[must_use]
+    pub const fn groups(&self) -> Option<NonZeroUsize> {
+        match self {
+            Self::CombineRefsGroupedMerge { groups } => Some(*groups),
+            Self::CombineAllelesUnion
+            | Self::CombineRefsUnion
+            | Self::CombineRefsIntervalMerge { .. } => None,
+        }
+    }
+
+    /// The split points of an interval merge; `None` for every other formulation.
+    #[must_use]
+    pub const fn split_points(&self) -> Option<&SplitPoints> {
+        match self {
+            Self::CombineRefsIntervalMerge { split_points } => Some(split_points),
+            Self::CombineAllelesUnion
+            | Self::CombineRefsUnion
+            | Self::CombineRefsGroupedMerge { .. } => None,
+        }
+    }
+
     /// How a write of this formulation's rows lays them out: one file, or one file per partition
     /// of its frame, which for interval-merge is one per locus interval.
     #[must_use]

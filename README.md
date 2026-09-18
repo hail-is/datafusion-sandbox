@@ -79,6 +79,16 @@ itself.
 cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --groups 7 --explain --write data/combined.vortex
 cargo run -r -- combine-refs data/vortices_chr22 --formulation interval-merge --split-points 22:20000000,22:30000000,22:40000000 --write data/combined
 ```
+A measured write, `--write PATH --metrics DIR`, writes the output as a plain write does and records
+the run under `DIR`: one row of resolved settings and wall-clock timings in `DIR/runs/<id>.parquet`,
+and one row per plan operator per partition of DataFusion's metrics in `DIR/metrics/<id>.parquet`.
+`--run-id ID` names the run; without it a UUID is generated and printed. Both tables are Parquet
+whatever the output format, and each run adds one file, so `DIR/runs` and `DIR/metrics` read as
+tables of every run with datafusion-cli, DuckDB, or pandas. See
+[ADR 0016](docs/adr/0016-record-run-metrics-as-wide-parquet-tables.md).
+```
+cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --write data/combined.vortex --metrics data/runs --run-id grouped-8
+```
 An earlier variant of the reference combiner is still available as `cargo run -r --example combiner1`.
 
 ### Building for a specific GCE instance family

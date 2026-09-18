@@ -11,6 +11,7 @@
 //!   intervals.
 //! - [`ordered_frame`] carries a formulation's deferred rows, ordering, and output layout.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
+//! - [`run_metrics`] fills the run record and run metrics tables of a measured write.
 //! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of
 //!   every partition.
 //! - [`sorted_table`] scans files as one ordered partition.
@@ -47,6 +48,7 @@ pub mod generated;
 pub mod locus;
 pub mod ordered_frame;
 pub mod pipeline;
+pub mod run_metrics;
 pub mod sink;
 pub mod sorted_table;
 
