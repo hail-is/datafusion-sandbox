@@ -1757,6 +1757,7 @@ dependencies = [
  "divan",
  "futures",
  "futures-util",
+ "libc",
  "object_store",
  "snmalloc-rs",
  "tempfile",

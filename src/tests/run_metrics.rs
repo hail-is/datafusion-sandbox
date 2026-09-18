@@ -43,6 +43,7 @@ fn the_run_record_batch_carries_the_facts_it_is_given() {
         rows_written: 123_456,
         run_ns: 2_000_000_000,
         execute_ns: 1_500_000_000,
+        peak_rss_bytes: 3_221_225_472,
     };
 
     let batch = run_metrics::run_record_batch(&record).unwrap();
@@ -67,6 +68,7 @@ fn the_run_record_batch_carries_the_facts_it_is_given() {
             "123456",
             "2000000000",
             "1500000000",
+            "3221225472",
         ]
     );
     assert!(batch.column_by_name("split_points").unwrap().is_null(0));

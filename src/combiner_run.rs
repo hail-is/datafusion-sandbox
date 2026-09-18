@@ -6,6 +6,7 @@ use crate::{
     formulation::Formulation,
     ordered_frame::OrderedFrame,
     pipeline::{self, PipelineOptions},
+    process,
     run_metrics::{self, RunRecord},
     sink,
 };
@@ -185,6 +186,7 @@ impl CombinerRun {
                             rows_written: measured.executed.rows_written,
                             run_ns: measured.run_ns,
                             execute_ns: measured.execute_ns,
+                            peak_rss_bytes: measured.peak_rss_bytes,
                         };
                         record_run(&ctx, &metrics_directory, &record, &measured.executed.plan).await
                     }
@@ -209,15 +211,17 @@ const RUNS_TABLE: &str = "runs";
 /// The subdirectory of a metrics directory holding the run metrics table.
 const METRICS_TABLE: &str = "metrics";
 
-/// A write executed through the retaining seam, with the two wall-clock durations a run record
-/// carries: the whole run from `started` and the plan's execution alone.
+/// A write executed through the retaining seam, with the whole-run measurements a run record
+/// carries: the two wall-clock durations, of the whole run from `started` and of the plan's
+/// execution alone, and the process's peak resident set size as of the plan's completion.
 struct MeasuredWrite {
     executed: sink::ExecutedSink,
     run_ns: u64,
     execute_ns: u64,
+    peak_rss_bytes: u64,
 }
 
-/// Performs `write` of `ordered` and times it.
+/// Performs `write` of `ordered` and measures it.
 async fn measure_write(
     ordered: OrderedFrame,
     write: &WriteTarget,
@@ -230,10 +234,12 @@ async fn measure_write(
     let executed = sink::execute_and_retain(frame).await?;
     let execute_ns = elapsed_ns(executing);
     let run_ns = elapsed_ns(started);
+    let peak_rss_bytes = process::peak_rss_bytes()?;
     Ok(MeasuredWrite {
         executed,
         run_ns,
         execute_ns,
+        peak_rss_bytes,
     })
 }
 

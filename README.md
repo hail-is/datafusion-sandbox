@@ -80,8 +80,9 @@ cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --g
 cargo run -r -- combine-refs data/vortices_chr22 --formulation interval-merge --split-points 22:20000000,22:30000000,22:40000000 --write data/combined
 ```
 A measured write, `--write PATH --metrics DIR`, writes the output as a plain write does and records
-the run under `DIR`: one row of resolved settings and wall-clock timings in `DIR/runs/<id>.parquet`,
-and one row per plan operator per partition of DataFusion's metrics in `DIR/metrics/<id>.parquet`.
+the run under `DIR`: one row of resolved settings, wall-clock timings, and peak resident set size
+in `DIR/runs/<id>.parquet`, and one row per plan operator per partition of DataFusion's metrics in
+`DIR/metrics/<id>.parquet`.
 `--run-id ID` names the run; without it a UUID is generated and printed. Both tables are Parquet
 whatever the output format, and each run adds one file, so `DIR/runs` and `DIR/metrics` read as
 tables of every run with datafusion-cli, DuckDB, or pandas. See

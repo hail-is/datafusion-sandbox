@@ -48,6 +48,7 @@ pub mod generated;
 pub mod locus;
 pub mod ordered_frame;
 pub mod pipeline;
+pub mod process;
 pub mod run_metrics;
 pub mod sink;
 pub mod sorted_table;
