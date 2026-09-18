@@ -778,7 +778,9 @@ fn interval_merge_explains_the_partitioned_sink_and_analyze_performs_the_writes(
 /// A measured write writes the rows a plain write does and records the run beside them, in two
 /// Parquet tables named by the run id. The run record's settings columns are the run's resolved
 /// settings and its durations are positive, the whole run taking at least as long as execution.
-/// Every metric the plan reported has a column, so the outcome names none.
+/// Its peak resident set size is positive and, being the whole process's, no smaller than the
+/// output it wrote holds in memory. Every metric the plan reported has a column, so the outcome
+/// names none.
 #[test]
 fn a_measured_write_writes_the_output_and_its_run_record() {
     let dir = tempfile::tempdir().unwrap();
@@ -840,6 +842,19 @@ fn a_measured_write_writes_the_output_and_its_run_record() {
     let execute_ns = u64_values(&record, "execute_ns")[0].unwrap();
     assert!(execute_ns > 0, "{record:?}");
     assert!(run_ns >= execute_ns, "{record:?}");
+    let peak_rss_bytes = u64_values(&record, "peak_rss_bytes")[0].unwrap();
+    let output_bytes: usize = read_back(
+        measured.output_path.to_str().unwrap(),
+        FixtureFormat::Parquet,
+    )
+    .iter()
+    .map(RecordBatch::get_array_memory_size)
+    .sum();
+    assert!(peak_rss_bytes > 0, "{record:?}");
+    assert!(
+        peak_rss_bytes >= u64::try_from(output_bytes).unwrap(),
+        "peak rss {peak_rss_bytes} smaller than the output's {output_bytes} bytes"
+    );
 }
 
 /// The run metrics of a measured write list the operators the explained write lists, in the same

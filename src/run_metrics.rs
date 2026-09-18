@@ -65,6 +65,10 @@ pub struct RunRecord {
     pub run_ns: u64,
     /// Wall-clock nanoseconds the physical plan's execution alone took.
     pub execute_ns: u64,
+    /// The process's peak resident set size in bytes, over its lifetime up to the plan's
+    /// completion. A whole-process figure: it counts scan buffers and the pages the allocator
+    /// keeps resident, whatever the allocator.
+    pub peak_rss_bytes: u64,
 }
 
 /// The schema of the run record table: one row per run.
@@ -86,6 +90,7 @@ pub fn run_record_schema() -> SchemaRef {
         Field::new("rows_written", DataType::UInt64, false),
         Field::new("run_ns", DataType::UInt64, false),
         Field::new("execute_ns", DataType::UInt64, false),
+        Field::new("peak_rss_bytes", DataType::UInt64, false),
     ]))
 }
 
@@ -113,6 +118,7 @@ pub fn run_record_batch(record: &RunRecord) -> Result<RecordBatch> {
         Arc::new(UInt64Array::from(vec![record.rows_written])),
         Arc::new(UInt64Array::from(vec![record.run_ns])),
         Arc::new(UInt64Array::from(vec![record.execute_ns])),
+        Arc::new(UInt64Array::from(vec![record.peak_rss_bytes])),
     ];
     Ok(RecordBatch::try_new(run_record_schema(), columns)?)
 }

@@ -75,7 +75,9 @@ fn failing_binary_exits_nonzero_and_prints_the_error_on_stderr() {
 
 /// `--write --metrics` performs the write, prints the run id under the formulation line, and
 /// records the run in two Parquet tables that read back with that id. Every metric the plan
-/// reported has a column, so no warning line follows the row count.
+/// reported has a column, so no warning line follows the row count. The binary is one combiner
+/// run per process, so the run record's peak resident set size is the run's own, and it is no
+/// smaller than the output the run held in memory.
 #[test]
 fn a_measured_write_prints_the_run_id_and_records_both_tables() {
     let dataset = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
@@ -109,7 +111,7 @@ fn a_measured_write_prints_the_run_id_and_records_both_tables() {
     assert!(output_path.exists());
     for table in ["runs", "metrics"] {
         let path = format!("{metrics_directory}/{table}/cli-run.parquet");
-        let batches = read_parquet(&path);
+        let batches = read_file(&path, &InputFormat::PARQUET);
         let run_ids: Vec<String> = batches
             .iter()
             .flat_map(|batch| {
@@ -123,6 +125,23 @@ fn a_measured_write_prints_the_run_id_and_records_both_tables() {
             "{path}: {run_ids:?}"
         );
     }
+    let record = read_file(
+        &format!("{metrics_directory}/runs/cli-run.parquet"),
+        &InputFormat::PARQUET,
+    );
+    let peak_rss_bytes: u64 =
+        array_value_to_string(record[0].column_by_name("peak_rss_bytes").unwrap(), 0)
+            .unwrap()
+            .parse()
+            .unwrap();
+    let output_bytes: usize = read_file(output_path.to_str().unwrap(), &InputFormat::VORTEX)
+        .iter()
+        .map(RecordBatch::get_array_memory_size)
+        .sum();
+    assert!(
+        peak_rss_bytes >= u64::try_from(output_bytes).unwrap(),
+        "peak rss {peak_rss_bytes} smaller than the output's {output_bytes} bytes"
+    );
 }
 
 #[test]
@@ -137,10 +156,12 @@ fn metrics_without_a_write_is_rejected_before_any_run() {
     assert!(stderr.contains("--write"), "stderr:\n{stderr}");
 }
 
-fn read_parquet(path: &str) -> Vec<RecordBatch> {
+/// Reads the one file at `path` on disk, written in `input_format`, back into batches.
+fn read_file(path: &str, input_format: &InputFormat) -> Vec<RecordBatch> {
     let path = path.to_string();
+    let input_format = input_format.clone();
     pipeline::run(
-        move |ctx| async move { fixture::read_file(&ctx, &path, &InputFormat::PARQUET, None).await },
+        move |ctx| async move { fixture::read_file(&ctx, &path, &input_format, None).await },
         PipelineOptions::single_threaded(),
     )
     .unwrap()

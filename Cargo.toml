@@ -21,6 +21,8 @@ vortex = { git = "https://github.com/patrick-schultz/vortex", branch = "file-sta
 tokio = { version = "1.0", features = ["rt-multi-thread"] }
 futures = "0.3"
 futures-util = "0.3"
+# `getrusage`, for the run record's peak resident set size.
+libc = "0.2"
 tempfile = "3.27.0"
 uuid = { version = "1", features = ["v4"] }
 
