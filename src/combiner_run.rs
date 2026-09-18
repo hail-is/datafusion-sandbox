@@ -14,7 +14,8 @@ use crate::{
 use datafusion::{
     arrow::{record_batch::RecordBatch, util::pretty::pretty_format_batches},
     datasource::listing::ListingTableUrl,
-    error::Result,
+    error::{DataFusionError, Result},
+    object_store::{self, ObjectStoreExt},
     physical_plan::ExecutionPlan,
     prelude::{DataFrame, SessionContext},
 };
@@ -109,9 +110,11 @@ impl CombinerRun {
     ///
     /// # Errors
     ///
-    /// Returns an error if a path is on a store the pipeline cannot serve, the input dataset
-    /// cannot be resolved, the formulation cannot be planned or executed, or the requested output
-    /// cannot be written.
+    /// Returns an error if a path is on a store the pipeline cannot serve, a measured write's run
+    /// id already has a run record under its metrics directory, the input dataset cannot be
+    /// resolved, the formulation cannot be planned or executed, or the requested output cannot be
+    /// written. A measured write that fails records nothing: the refusal of a repeated id comes
+    /// before dataset discovery, and the tables are written only after the data write succeeds.
     pub fn execute(self) -> Result<Outcome> {
         let started_at = SystemTime::now();
         let started = Instant::now();
@@ -137,6 +140,14 @@ impl CombinerRun {
 
         pipeline::run(
             move |ctx| async move {
+                if let Action::MeasuredWrite {
+                    metrics_directory,
+                    run_id,
+                    ..
+                } = &action
+                {
+                    refuse_recorded_run(&ctx, metrics_directory, run_id).await?;
+                }
                 let table_path = ListingTableUrl::parse(&input_path)?;
                 let dataset = Dataset::discover(
                     &ctx,
@@ -243,8 +254,50 @@ async fn measure_write(
     })
 }
 
-/// Records a measured write: writes `record` and the run metrics of `plan` under
-/// `metrics_directory`, as Parquet, and hands back the outcome. A failure writes neither table.
+/// Whether `run_id` already has a run record under `metrics_directory`, on whichever object
+/// store the session serves the directory from.
+///
+/// The run record is what marks a run as recorded: a measured write writes it last, so a run
+/// whose run metrics failed to write has no record, and its id may be retried.
+///
+/// # Errors
+///
+/// Returns an error if the metrics directory is on a store the session does not serve, or the
+/// store cannot answer.
+pub(crate) async fn run_is_recorded(
+    ctx: &SessionContext,
+    metrics_directory: &str,
+    run_id: &str,
+) -> Result<bool> {
+    let url = ListingTableUrl::parse(run_table_path(metrics_directory, RUNS_TABLE, run_id))?;
+    let store = ctx.runtime_env().object_store(&url)?;
+    match store.head(url.prefix()).await {
+        Ok(_) => Ok(true),
+        Err(object_store::Error::NotFound { .. }) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Fails a measured write of `run_id` under `metrics_directory` when the id already has a run
+/// record there, so that a repeated id cannot replace a recorded run. See ADR 0016.
+async fn refuse_recorded_run(
+    ctx: &SessionContext,
+    metrics_directory: &str,
+    run_id: &str,
+) -> Result<()> {
+    if run_is_recorded(ctx, metrics_directory, run_id).await? {
+        return Err(DataFusionError::Configuration(format!(
+            "run id '{run_id}' already has a run record at '{}'; a measured write does not replace a recorded run",
+            run_table_path(metrics_directory, RUNS_TABLE, run_id)
+        )));
+    }
+    Ok(())
+}
+
+/// Records a measured write: writes the run metrics of `plan` and then `record` under
+/// `metrics_directory`, as Parquet, and hands back the outcome. The run record goes last because
+/// its presence is what [`run_is_recorded`] checks: a failure between the two writes leaves run
+/// metrics without a record, which a retry of the same id replaces rather than being refused.
 async fn record_run(
     ctx: &SessionContext,
     metrics_directory: &str,
@@ -254,14 +307,14 @@ async fn record_run(
     let metrics = run_metrics::run_metrics_batch(&record.run_id, plan)?;
     write_table(
         ctx,
-        run_metrics::run_record_batch(record)?,
-        &run_table_path(metrics_directory, RUNS_TABLE, &record.run_id),
+        metrics.batch,
+        &run_table_path(metrics_directory, METRICS_TABLE, &record.run_id),
     )
     .await?;
     write_table(
         ctx,
-        metrics.batch,
-        &run_table_path(metrics_directory, METRICS_TABLE, &record.run_id),
+        run_metrics::run_record_batch(record)?,
+        &run_table_path(metrics_directory, RUNS_TABLE, &record.run_id),
     )
     .await?;
     Ok(Outcome::Measured {

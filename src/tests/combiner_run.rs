@@ -1,7 +1,7 @@
 use crate::fixture;
 
 use crate::{
-    combiner_run::{Action, CombinerRun, Outcome, WriteTarget},
+    combiner_run::{self, Action, CombinerRun, Outcome, WriteTarget},
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
     locus::{Locus, LocusOrdering, LocusRepresentation},
@@ -21,7 +21,7 @@ use datafusion::{
         record_batch::RecordBatch,
         util::display::array_value_to_string,
     },
-    error::Result,
+    error::{DataFusionError, Result},
     parquet::{
         basic::Compression,
         file::{
@@ -30,6 +30,7 @@ use datafusion::{
         },
     },
 };
+use object_store::{ObjectStoreExt, PutPayload, path::Path as ObjectPath};
 use std::{num::NonZeroUsize, path::Path, sync::Arc, time::SystemTime};
 
 use fixture::{FixtureFormat, SAMPLES};
@@ -1013,6 +1014,121 @@ fn measured_grouped_merge(dir: &Path, run_id: &str) -> MeasuredGroupedMerge {
     )
     .unwrap();
     measured
+}
+
+/// A measured write refuses a run id that already has a run record under its metrics directory,
+/// before it discovers the dataset or writes anything: the second output path is never written,
+/// and the first run's two files are byte-for-byte what they were.
+#[test]
+fn refuses_a_run_id_that_already_has_a_run_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let measured = measured_grouped_merge(dir.path(), "run-a");
+    let record_path = format!("{}/runs/run-a.parquet", measured.metrics_directory);
+    let metrics_path = format!("{}/metrics/run-a.parquet", measured.metrics_directory);
+    let record_bytes = std::fs::read(&record_path).unwrap();
+    let metrics_bytes = std::fs::read(&metrics_path).unwrap();
+    let second_output = dir.path().join("second.parquet");
+
+    let err = run(
+        grouped_merge(2),
+        measured.input.table_path(),
+        measured.input.input_format(),
+        Action::MeasuredWrite {
+            write: WriteTarget {
+                output_path: second_output.to_str().unwrap().to_string(),
+                output_format: OutputFormat::PARQUET,
+            },
+            metrics_directory: measured.metrics_directory.clone(),
+            run_id: "run-a".to_string(),
+        },
+        Some(three_samples()),
+        None,
+    )
+    .unwrap_err();
+
+    let message = err.to_string();
+    assert!(message.contains("run id 'run-a'"), "{message}");
+    assert!(message.contains(&record_path), "{message}");
+    assert!(
+        !second_output.exists(),
+        "refused write wrote {}",
+        second_output.display()
+    );
+    assert_eq!(std::fs::read(&record_path).unwrap(), record_bytes);
+    assert_eq!(std::fs::read(&metrics_path).unwrap(), metrics_bytes);
+}
+
+/// The check behind the refusal asks the metrics directory's own store, so it holds on an
+/// in-memory store: a run id is recorded once `runs/<id>.parquet` exists under the directory,
+/// whatever the object holds, and not before, and not for another id.
+#[test]
+fn run_is_recorded_asks_the_metrics_directory_store() {
+    let store = fixture::MemoryStore::new("history");
+    let recorded = pipeline::run(
+        move |ctx| {
+            store.register(&ctx);
+            async move {
+                let metrics_directory = "memory://history/benchmarks/";
+                let before =
+                    combiner_run::run_is_recorded(&ctx, metrics_directory, "run-a").await?;
+                store
+                    .store()
+                    .put(
+                        &ObjectPath::from("benchmarks/runs/run-a.parquet"),
+                        PutPayload::from_static(b"not a parquet file"),
+                    )
+                    .await?;
+                Ok((
+                    before,
+                    combiner_run::run_is_recorded(&ctx, metrics_directory, "run-a").await?,
+                    combiner_run::run_is_recorded(&ctx, metrics_directory, "run-b").await?,
+                ))
+            }
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap();
+    assert_eq!(recorded, (false, true, false));
+}
+
+/// A measured write whose data write fails, here into a directory that is a regular file, records
+/// nothing: neither table's directory gets a file, so a partial run never unions into a history.
+#[test]
+fn a_failed_data_write_records_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let blocker = dir.path().join("blocker");
+    std::fs::write(&blocker, b"").unwrap();
+    let metrics_directory = dir.path().join("metrics");
+
+    let err = run(
+        grouped_merge(2),
+        input.table_path(),
+        input.input_format(),
+        Action::MeasuredWrite {
+            write: WriteTarget {
+                output_path: blocker.join("out.parquet").to_str().unwrap().to_string(),
+                output_format: OutputFormat::PARQUET,
+            },
+            metrics_directory: metrics_directory.to_str().unwrap().to_string(),
+            run_id: "run-a".to_string(),
+        },
+        Some(three_samples()),
+        None,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, DataFusionError::IoError(_)) && err.to_string().contains("blocker"),
+        "expected the sink's IO error, got {err}"
+    );
+    for table in ["runs", "metrics"] {
+        let files: Vec<_> = std::fs::read_dir(metrics_directory.join(table)).map_or_else(
+            |_| Vec::new(),
+            |entries| entries.map(|entry| entry.unwrap().path()).collect(),
+        );
+        assert!(files.is_empty(), "{table} holds {files:?}");
+    }
 }
 
 /// A measured write of the file-per-partition formulation records the partitioned sink at the

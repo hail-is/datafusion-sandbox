@@ -24,11 +24,11 @@ no private item of the parent. Test support becomes public library code, as `fix
 crate test or benchmark needs it. Nothing under `tests/` or `benches/` observes a plan, so plan
 observation stays inside the library.
 
-A crate test lives under `tests/` and is reserved for behavior that needs the built binary. The two CLI
-process tests in `tests/cli.rs` are the only crate tests. "Module test" and "crate test" describe where
-a test lives and what it can see. "Unit test" and "integration test" describe the claim a test makes.
-The combiner run module tests remain an integration suite because they exercise the stored-file
-pipeline end to end.
+A crate test lives under `tests/` and is reserved for behavior that needs the built binary. The tests
+that run the CLI as a process live in `tests/cli.rs`, and every crate test is of that kind. "Module
+test" and "crate test" describe where a test lives and what it can see. "Unit test" and "integration
+test" describe the claim a test makes. The combiner run module tests remain an integration suite
+because they exercise the stored-file pipeline end to end.
 
 Inline child test modules in the library remain permitted when a test must use private state. Such a
 module starts with a module doc explaining why private access is needed and naming the module surface
