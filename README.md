@@ -4,7 +4,7 @@ This repo is to help us start to experiment with implementing hail style pipelin
 - `data/`: Data files for use in benchmarks, or just ad hoc experimentation.
 - `src/lib.rs`: Definitions of dataframes, for use in benchmarks or ad hoc experimentation.
 - `src/main.rs`: A CLI dispatching to the pipelines in `src/`. Run using `cargo run -r -- <subcommand>`.
-- `notes/`: A place for notes on datafusion. Right now just has an explainer I had Claude generate on how aggregation works, and how it can take advantage of ordered inputs.
+- `notes/`: A place for notes on datafusion. Has an explainer I had Claude generate on how aggregation works, and how it can take advantage of ordered inputs, and a reference on what each recorded DataFusion metric measures.
 
 ### Setup
 1. Install `vx`
@@ -86,6 +86,9 @@ and one row per plan operator per partition of DataFusion's metrics in `DIR/metr
 whatever the output format, and each run adds one file, so `DIR/runs` and `DIR/metrics` read as
 tables of every run with datafusion-cli, DuckDB, or pandas. See
 [ADR 0016](docs/adr/0016-record-run-metrics-as-wide-parquet-tables.md).
+Several metric names mislead: a Parquet scan's `elapsed_compute` excludes decoding, for one.
+[What the run metrics measure](notes/datafusion-metrics.md) says what each column of the metrics
+table measures, read from the DataFusion source.
 ```
 cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --write data/combined.vortex --metrics data/runs --run-id grouped-8
 ```

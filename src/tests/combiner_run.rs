@@ -8,7 +8,10 @@ use crate::{
     pipeline::{self, PipelineOptions},
     tests::{
         plan_shape::exec_names,
-        support::{grouped_merge, interval_merge, string_values, timestamp_values, u64_values},
+        support::{
+            grouped_merge, interval_merge, rows_of_operator, string_values, timestamp_values,
+            u64_values,
+        },
     },
 };
 use datafusion::{
@@ -775,8 +778,7 @@ fn interval_merge_explains_the_partitioned_sink_and_analyze_performs_the_writes(
 /// A measured write writes the rows a plain write does and records the run beside them, in two
 /// Parquet tables named by the run id. The run record's settings columns are the run's resolved
 /// settings and its durations are positive, the whole run taking at least as long as execution.
-/// A metric the table has no column for, such as the scans' file counters, is named in the
-/// outcome rather than failing the run.
+/// Every metric the plan reported has a column, so the outcome names none.
 #[test]
 fn a_measured_write_writes_the_output_and_its_run_record() {
     let dir = tempfile::tempdir().unwrap();
@@ -792,10 +794,7 @@ fn a_measured_write_writes_the_output_and_its_run_record() {
         panic!("expected a measured write, got {:?}", measured.outcome);
     };
     assert_eq!(rows_written, 24);
-    assert!(
-        unrecorded_metrics.contains(&"files_opened".to_string()),
-        "{unrecorded_metrics:?}"
-    );
+    assert_eq!(unrecorded_metrics, Vec::<String>::new());
     let reader = SerializedFileReader::try_from(measured.output_path.as_path()).unwrap();
     assert_eq!(reader.metadata().file_metadata().num_rows(), 24);
 
@@ -1002,9 +1001,8 @@ fn measured_grouped_merge(dir: &Path, run_id: &str) -> MeasuredGroupedMerge {
 }
 
 /// A measured write of the file-per-partition formulation records the partitioned sink at the
-/// root and one row per interval for the union beneath it, and its tables are Parquet though the
-/// output is Vortex. The Vortex sink's own counters have no column yet and are named in the
-/// outcome.
+/// root, with the rows and bytes its Vortex sinks wrote, and one row per interval for the union
+/// beneath it, and its tables are Parquet though the output is Vortex.
 #[test]
 fn a_measured_interval_merge_records_a_row_per_interval() {
     let dir = tempfile::tempdir().unwrap();
@@ -1037,10 +1035,7 @@ fn a_measured_interval_merge_records_a_row_per_interval() {
         panic!("expected a measured write, got {outcome:?}");
     };
     assert_eq!(rows_written, 32);
-    assert!(
-        unrecorded_metrics.contains(&"rows_written".to_string()),
-        "{unrecorded_metrics:?}"
-    );
+    assert_eq!(unrecorded_metrics, Vec::<String>::new());
     assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 3);
 
     let record = read_back(
@@ -1071,6 +1066,18 @@ fn a_measured_interval_merge_records_a_row_per_interval() {
             .starts_with("PartitionedSinkExec: partitions=3, sink=VortexSink"),
         "{metrics:?}"
     );
+    // The partitioned sink reports its three sinks' counters together, as one global row.
+    assert_eq!(u64_values(&metrics, "partition")[0], None, "{metrics:?}");
+    assert_eq!(
+        u64_values(&metrics, "rows_written")[0],
+        Some(32),
+        "{metrics:?}"
+    );
+    assert!(
+        u64_values(&metrics, "bytes_written")[0].is_some_and(|bytes| bytes > 0),
+        "{metrics:?}"
+    );
+    assert_eq!(u64_values(&metrics, "node")[1], Some(1), "{metrics:?}");
     // The outer union, the first in pre-order, runs one partition per interval; the union of
     // each interval's sample scans beneath it runs one per sample.
     let operators = string_values(&metrics, "operator");
@@ -1086,6 +1093,326 @@ fn a_measured_interval_merge_records_a_row_per_interval() {
         .map(|(partition, _)| partition)
         .collect();
     assert_eq!(union_partitions, [Some(0), Some(1), Some(2)], "{metrics:?}");
+}
+
+/// A measured write of every formulation, reading each format and writing each format, reports
+/// no unrecorded metric: every metric the present operators record has a column.
+#[test]
+fn every_formulation_in_every_format_reports_no_unrecorded_metric() {
+    let dir = tempfile::tempdir().unwrap();
+    let metrics_directory = dir.path().join("metrics").to_str().unwrap().to_string();
+
+    for fixture_format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
+        let input = fixture::contig_position_disk_fixture(fixture_format);
+        for output_format in [OutputFormat::PARQUET, OutputFormat::VORTEX] {
+            for (formulation, expected) in [
+                (Formulation::CombineAllelesUnion, 8),
+                (Formulation::CombineRefsUnion, 32),
+                (grouped_merge(2), 32),
+                (interval_merge("1:3,2:2"), 32),
+            ] {
+                let run_id = format!(
+                    "{}-{}-{formulation}-{}",
+                    input.input_format().name(),
+                    output_format.name(),
+                    if formulation == Formulation::CombineAllelesUnion {
+                        "alleles"
+                    } else {
+                        "refs"
+                    }
+                );
+                let outcome = run(
+                    formulation,
+                    input.table_path(),
+                    input.input_format(),
+                    Action::MeasuredWrite {
+                        write: WriteTarget {
+                            output_path: dir.path().join(&run_id).to_str().unwrap().to_string(),
+                            output_format: output_format.clone(),
+                        },
+                        metrics_directory: metrics_directory.clone(),
+                        run_id: run_id.clone(),
+                    },
+                    None,
+                    None,
+                )
+                .unwrap();
+
+                let Outcome::Measured {
+                    rows_written,
+                    unrecorded_metrics,
+                } = outcome
+                else {
+                    panic!("{run_id}: expected a measured write, got {outcome:?}");
+                };
+                assert_eq!(rows_written, expected, "{run_id}");
+                assert_eq!(unrecorded_metrics, Vec::<String>::new(), "{run_id}");
+            }
+        }
+    }
+}
+
+/// A write's sink row carries the rows and bytes the sink wrote, whichever format it wrote:
+/// the sink reports them globally, so they sit on the root's row with no partition.
+#[test]
+fn a_write_of_either_format_records_the_rows_and_bytes_its_sink_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let metrics_directory = dir.path().join("metrics").to_str().unwrap().to_string();
+
+    for output_format in [OutputFormat::PARQUET, OutputFormat::VORTEX] {
+        let run_id = output_format.name();
+        let output_path = dir
+            .path()
+            .join(format!("combined.{}", output_format.extension()));
+        run(
+            Formulation::CombineRefsUnion,
+            input.table_path(),
+            input.input_format(),
+            Action::MeasuredWrite {
+                write: WriteTarget {
+                    output_path: output_path.to_str().unwrap().to_string(),
+                    output_format: output_format.clone(),
+                },
+                metrics_directory: metrics_directory.clone(),
+                run_id: run_id.to_string(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+        let metrics = read_back(
+            &format!("{metrics_directory}/metrics/{run_id}.parquet"),
+            FixtureFormat::Parquet,
+        );
+        let metrics = concat_batches(&metrics[0].schema(), &metrics).unwrap();
+        assert_eq!(
+            u64_values(&metrics, "node")[0],
+            Some(0),
+            "{run_id}: {metrics:?}"
+        );
+        assert_eq!(
+            string_values(&metrics, "operator")[0],
+            "DataSinkExec",
+            "{run_id}"
+        );
+        assert_eq!(
+            u64_values(&metrics, "partition")[0],
+            None,
+            "{run_id}: {metrics:?}"
+        );
+        assert_eq!(
+            u64_values(&metrics, "rows_written")[0],
+            Some(32),
+            "{run_id}: {metrics:?}"
+        );
+        let bytes_written = u64_values(&metrics, "bytes_written")[0];
+        let file_size = std::fs::metadata(&output_path).unwrap().len();
+        assert!(
+            bytes_written.is_some_and(|bytes| bytes > 0 && bytes <= file_size),
+            "{run_id}: {bytes_written:?} bytes written to a file of {file_size}"
+        );
+    }
+}
+
+/// A Parquet scan over several files in one partition yields one row for that partition, with
+/// the per-file metrics summed: its row groups considered for pruning count every file's row
+/// groups. The scan's global counter sits on a second row with no partition.
+#[test]
+fn a_parquet_scan_over_several_files_yields_one_row_per_partition_with_per_file_metrics_summed() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Parquet);
+    let metrics_directory = dir.path().join("metrics").to_str().unwrap().to_string();
+    run(
+        Formulation::CombineRefsUnion,
+        input.table_path(),
+        input.input_format(),
+        Action::MeasuredWrite {
+            write: WriteTarget {
+                output_path: dir
+                    .path()
+                    .join("combined.parquet")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                output_format: OutputFormat::PARQUET,
+            },
+            metrics_directory: metrics_directory.clone(),
+            run_id: "scan".to_string(),
+        },
+        None,
+        None,
+    )
+    .unwrap();
+
+    let metrics = read_back(
+        &format!("{metrics_directory}/metrics/scan.parquet"),
+        FixtureFormat::Parquet,
+    );
+    let metrics = concat_batches(&metrics[0].schema(), &metrics).unwrap();
+    let nodes = u64_values(&metrics, "node");
+    let partitions = u64_values(&metrics, "partition");
+    let scan_rows = rows_of_operator(&metrics, "DataSourceExec");
+    let mut scan_nodes: Vec<Option<u64>> = scan_rows.iter().map(|&row| nodes[row]).collect();
+    scan_nodes.dedup();
+    assert_eq!(scan_nodes.len(), SAMPLES.len(), "{metrics:?}");
+    for node in scan_nodes {
+        let rows: Vec<usize> = scan_rows
+            .iter()
+            .copied()
+            .filter(|&row| nodes[row] == node)
+            .collect();
+        let partitioned: Vec<Option<u64>> = rows.iter().map(|&row| partitions[row]).collect();
+        assert_eq!(partitioned, [None, Some(0)], "node {node:?}: {metrics:?}");
+        let (global, scanned) = (rows[0], rows[1]);
+        assert_eq!(
+            u64_values(&metrics, "num_predicate_creation_errors")[global],
+            Some(0)
+        );
+        assert_eq!(u64_values(&metrics, "files_opened")[global], None);
+        let files = u64::try_from(fixture::sample_rows().len() / 2).unwrap();
+        assert_eq!(u64_values(&metrics, "files_opened")[scanned], Some(files));
+        assert_eq!(
+            u64_values(&metrics, "row_groups_pruned_statistics_total")[scanned],
+            Some(row_groups_under(&std::path::PathBuf::from(
+                input.table_path()
+            ))),
+            "{metrics:?}"
+        );
+        assert_eq!(
+            u64_values(&metrics, "row_groups_pruned_statistics_pruned")[scanned],
+            Some(0)
+        );
+        assert_eq!(
+            u64_values(&metrics, "files_ranges_pruned_statistics_total")[scanned],
+            Some(files)
+        );
+        let bytes_scanned = u64_values(&metrics, "bytes_scanned")[scanned];
+        assert!(bytes_scanned.is_some_and(|bytes| bytes > 0), "{metrics:?}");
+        assert_eq!(
+            u64_values(&metrics, "scan_efficiency_ratio_num")[scanned],
+            bytes_scanned
+        );
+        assert!(
+            u64_values(&metrics, "metadata_load_time")[scanned].is_some_and(|nanos| nanos > 0),
+            "{metrics:?}"
+        );
+        assert_eq!(u64_values(&metrics, "rows_written")[scanned], None);
+    }
+}
+
+/// The number of row groups in the Parquet files of one sample under `dataset`: what a scan of
+/// that sample considers for pruning, summed over its files.
+fn row_groups_under(dataset: &Path) -> u64 {
+    let sample = std::fs::read_dir(dataset)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.is_dir())
+        .unwrap();
+    std::fs::read_dir(sample)
+        .unwrap()
+        .map(|entry| {
+            let reader = SerializedFileReader::try_from(entry.unwrap().path().as_path()).unwrap();
+            u64::try_from(reader.metadata().num_row_groups()).unwrap()
+        })
+        .sum()
+}
+
+/// The allele combiner's plan records its aggregate's, repartition's, and window's metrics with
+/// none unrecorded: the aggregates report their spill counters and group-by timers on every
+/// partition, and the repartitions their fetch and send timers. Peak memory used stays null: the
+/// aggregate streams `DataFusion` picks for the distinct do not report it, only its fallback
+/// stream does. When this assertion fails, `DataFusion` has started reporting it, and the
+/// `run_metrics` module doc that says otherwise is due for an update.
+#[test]
+fn the_allele_combiner_records_its_aggregate_and_repartition_metrics() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let metrics_directory = dir.path().join("metrics").to_str().unwrap().to_string();
+    let outcome = run(
+        Formulation::CombineAllelesUnion,
+        input.table_path(),
+        input.input_format(),
+        Action::MeasuredWrite {
+            write: WriteTarget {
+                output_path: dir
+                    .path()
+                    .join("alleles.vortex")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                output_format: OutputFormat::VORTEX,
+            },
+            metrics_directory: metrics_directory.clone(),
+            run_id: "alleles".to_string(),
+        },
+        None,
+        None,
+    )
+    .unwrap();
+
+    let Outcome::Measured {
+        unrecorded_metrics, ..
+    } = outcome
+    else {
+        panic!("expected a measured write, got {outcome:?}");
+    };
+    assert_eq!(unrecorded_metrics, Vec::<String>::new());
+    let metrics = read_back(
+        &format!("{metrics_directory}/metrics/alleles.parquet"),
+        FixtureFormat::Parquet,
+    );
+    let metrics = concat_batches(&metrics[0].schema(), &metrics).unwrap();
+    let aggregates = rows_of_operator(&metrics, "AggregateExec");
+    assert!(!aggregates.is_empty(), "{metrics:?}");
+    for row in aggregates {
+        assert!(
+            u64_values(&metrics, "partition")[row].is_some(),
+            "{metrics:?}"
+        );
+        for column in [
+            "spill_count",
+            "spilled_bytes",
+            "spilled_rows",
+            "time_calculating_group_ids",
+            "aggregation_time",
+            "emitting_time",
+        ] {
+            assert!(
+                u64_values(&metrics, column)[row].is_some(),
+                "{column} on row {row}: {metrics:?}"
+            );
+        }
+        assert_eq!(u64_values(&metrics, "fetch_time")[row], None, "{metrics:?}");
+        assert_eq!(
+            u64_values(&metrics, "peak_mem_used")[row],
+            None,
+            "{metrics:?}"
+        );
+    }
+    let repartitions = rows_of_operator(&metrics, "RepartitionExec");
+    assert!(!repartitions.is_empty(), "{metrics:?}");
+    assert!(
+        repartitions
+            .iter()
+            .any(|&row| u64_values(&metrics, "fetch_time")[row].is_some_and(|nanos| nanos > 0)),
+        "{metrics:?}"
+    );
+    assert!(
+        repartitions
+            .iter()
+            .all(|&row| u64_values(&metrics, "output_rows")[row].is_some()),
+        "{metrics:?}"
+    );
+    let windows = rows_of_operator(&metrics, "BoundedWindowAggExec");
+    assert!(!windows.is_empty(), "{metrics:?}");
+    assert!(
+        windows
+            .iter()
+            .all(|&row| u64_values(&metrics, "output_batches")[row].is_some()),
+        "{metrics:?}"
+    );
 }
 
 /// Every row of `batches` as its column values rendered in order.

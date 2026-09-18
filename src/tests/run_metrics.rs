@@ -6,13 +6,18 @@ use crate::{
     pipeline::{self, PipelineOptions},
     run_metrics::{self, RunRecord},
     sink::{self, CollectingSink, DataSinkTarget},
-    tests::support::{string_values, timestamp_values, u64_values},
+    tests::support::{rows_of_operator, string_values, timestamp_values, u64_values},
 };
 
 use datafusion::{
-    arrow::{array::Array, record_batch::RecordBatch, util::display::array_value_to_string},
+    arrow::{
+        array::Array,
+        datatypes::{DataType, TimeUnit},
+        record_batch::RecordBatch,
+        util::display::array_value_to_string,
+    },
     error::Result,
-    prelude::{DataFrame, SessionContext, col, lit},
+    prelude::{DataFrame, JoinType, SessionContext, col, lit},
 };
 
 use std::{
@@ -66,6 +71,113 @@ fn the_run_record_batch_carries_the_facts_it_is_given() {
     );
     assert!(batch.column_by_name("split_points").unwrap().is_null(0));
     assert!(!batch.column_by_name("compression").unwrap().is_null(0));
+}
+
+/// The run metrics table has a column for every metric the operators present in a current
+/// formulation's plan record: the six baseline metrics, the file stream's on every scan, the
+/// Parquet scan's, the Vortex scan's counter, the repartition timers, the aggregate's, and the
+/// sink's. Pruning metrics flatten to a pruned and a total column, ratios to a numerator and a
+/// denominator. Every count and time is an integer; only the two timestamps are timestamps.
+#[test]
+fn the_run_metrics_schema_has_a_column_for_every_metric_the_present_operators_report() {
+    let schema = run_metrics::run_metrics_schema();
+
+    let columns: Vec<(&str, &DataType)> = schema
+        .fields()
+        .iter()
+        .map(|field| (field.name().as_str(), field.data_type()))
+        .collect();
+    let timestamp = DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()));
+    let mut expected: Vec<(&str, &DataType)> = vec![
+        ("run_id", &DataType::Utf8),
+        ("node", &DataType::UInt64),
+        ("parent", &DataType::UInt64),
+        ("depth", &DataType::UInt64),
+        ("operator", &DataType::Utf8),
+        ("display", &DataType::Utf8),
+        ("partition", &DataType::UInt64),
+    ];
+    let tree_columns = expected.len();
+    expected.extend([
+        ("output_rows", &DataType::UInt64),
+        ("output_batches", &DataType::UInt64),
+        ("output_bytes", &DataType::UInt64),
+        ("elapsed_compute", &DataType::UInt64),
+        ("start_timestamp", &timestamp),
+        ("end_timestamp", &timestamp),
+    ]);
+    expected.extend(
+        [
+            // File stream, on every scan.
+            "files_opened",
+            "files_processed",
+            "file_open_errors",
+            "file_scan_errors",
+            "batches_split",
+            "time_elapsed_opening",
+            "time_elapsed_scanning_until_data",
+            "time_elapsed_scanning_total",
+            "time_elapsed_processing",
+            // Parquet scan.
+            "bytes_scanned",
+            "metadata_load_time",
+            "pushdown_rows_pruned",
+            "pushdown_rows_matched",
+            "predicate_evaluation_errors",
+            "row_pushdown_eval_time",
+            "statistics_eval_time",
+            "bloom_filter_eval_time",
+            "page_index_eval_time",
+            "predicate_cache_inner_records",
+            "predicate_cache_records",
+            "row_groups_pruned_dynamic_filter",
+            "page_index_pages_skipped_by_fully_matched",
+            "page_index_load_skipped",
+            "files_ranges_pruned_statistics_pruned",
+            "files_ranges_pruned_statistics_total",
+            "row_groups_pruned_bloom_filter_pruned",
+            "row_groups_pruned_bloom_filter_total",
+            "limit_pruned_row_groups_pruned",
+            "limit_pruned_row_groups_total",
+            "row_groups_pruned_statistics_pruned",
+            "row_groups_pruned_statistics_total",
+            "page_index_pages_pruned_pruned",
+            "page_index_pages_pruned_total",
+            "page_index_rows_pruned_pruned",
+            "page_index_rows_pruned_total",
+            "scan_efficiency_ratio_num",
+            "scan_efficiency_ratio_den",
+            "output_rows_skew_num",
+            "output_rows_skew_den",
+            // Vortex scan.
+            "num_predicate_creation_errors",
+            // Repartition.
+            "fetch_time",
+            "repartition_time",
+            "send_time",
+            // Aggregate.
+            "peak_mem_used",
+            "spill_count",
+            "spilled_bytes",
+            "spilled_rows",
+            "skipped_aggregation_rows",
+            "time_calculating_group_ids",
+            "aggregate_arguments_time",
+            "aggregation_time",
+            "emitting_time",
+            "reduction_factor_num",
+            "reduction_factor_den",
+            // Sink.
+            "rows_written",
+            "bytes_written",
+        ]
+        .into_iter()
+        .map(|name| (name, &DataType::UInt64)),
+    );
+    assert_eq!(columns, expected);
+    for field in schema.fields().iter().skip(tree_columns) {
+        assert!(field.is_nullable(), "{} is not nullable", field.name());
+    }
 }
 
 /// One row's place in the plan tree: operator, node, parent, depth, partition.
@@ -166,11 +278,13 @@ fn the_run_metrics_batch_holds_one_row_per_operator_per_partition() {
     }
 }
 
-/// A metric the schema has no column for is dropped and its name reported once, and the operator
-/// that reported it still gets its baseline row. An aggregate records metrics beyond the baseline,
-/// its spill counters among them.
+/// An aggregate's own metrics land beside the baseline, none unrecorded: its spill counters as
+/// integers and its reduction factor as a numerator and denominator pair, one row per partition.
+/// The partial aggregate beneath the final one reduces the 1000 input rows to at most the 10
+/// buckets in each of its partitions, so its numerators are its output rows and its denominators
+/// sum to the input.
 #[test]
-fn an_unknown_metric_is_reported_and_not_recorded() {
+fn an_aggregate_records_its_spill_counters_and_reduction_factor() {
     let executed = execute(|ctx| {
         make_range_table(ctx, 1000, 128)?
             .aggregate(vec![(col("idx") % lit(10)).alias("bucket")], vec![])
@@ -178,11 +292,72 @@ fn an_unknown_metric_is_reported_and_not_recorded() {
 
     let metrics = run_metrics::run_metrics_batch("run-2", &executed.plan).unwrap();
 
-    assert!(
-        metrics.unrecorded.contains(&"spill_count".to_string()),
-        "{:?}",
-        metrics.unrecorded
+    assert_eq!(metrics.unrecorded, Vec::<String>::new());
+    let batch = &metrics.batch;
+    let nodes = u64_values(batch, "node");
+    let aggregates = rows_of_operator(batch, "AggregateExec");
+    let mut aggregate_nodes: Vec<u64> = aggregates.iter().map(|&row| nodes[row].unwrap()).collect();
+    aggregate_nodes.dedup();
+    assert_eq!(aggregate_nodes.len(), 2, "{batch:?}");
+    for &row in &aggregates {
+        assert_eq!(u64_values(batch, "spill_count")[row], Some(0), "{batch:?}");
+        assert_eq!(
+            u64_values(batch, "spilled_bytes")[row],
+            Some(0),
+            "{batch:?}"
+        );
+        assert_eq!(u64_values(batch, "spilled_rows")[row], Some(0), "{batch:?}");
+        assert!(u64_values(batch, "partition")[row].is_some(), "{batch:?}");
+        assert_eq!(u64_values(batch, "files_opened")[row], None, "{batch:?}");
+    }
+    let partial = aggregate_nodes[1];
+    let sum_over_partial = |column: &str| -> u64 {
+        u64_values(batch, column)
+            .iter()
+            .zip(&nodes)
+            .filter(|(_, node)| **node == Some(partial))
+            .map(|(value, _)| value.unwrap_or_default())
+            .sum()
+    };
+    let partial_partitions =
+        u64::try_from(nodes.iter().filter(|node| **node == Some(partial)).count()).unwrap();
+    assert_eq!(sum_over_partial("reduction_factor_den"), 1000, "{batch:?}");
+    assert_eq!(
+        sum_over_partial("reduction_factor_num"),
+        sum_over_partial("output_rows"),
+        "{batch:?}"
     );
+    assert!(
+        sum_over_partial("output_rows") <= 10 * partial_partitions,
+        "{batch:?}"
+    );
+    assert_eq!(
+        u64_values(batch, "reduction_factor_num")[aggregates[0]],
+        None,
+        "the final aggregate reports no reduction factor: {batch:?}"
+    );
+}
+
+/// A metric the schema has no column for is dropped and its name reported once, and the operator
+/// that reported it still gets its baseline row. A hash join records its build and probe
+/// metrics, which no formulation's plan has.
+#[test]
+fn an_unknown_metric_is_reported_and_not_recorded() {
+    let executed = execute(|ctx| {
+        let left = make_range_table(ctx, 100, 128)?;
+        let right = make_range_table(ctx, 50, 128)?.select(vec![col("idx").alias("other")])?;
+        left.join(right, JoinType::Inner, &["idx"], &["other"], None)
+    });
+
+    let metrics = run_metrics::run_metrics_batch("run-3", &executed.plan).unwrap();
+
+    for name in ["build_time", "join_time", "build_input_rows"] {
+        assert!(
+            metrics.unrecorded.contains(&name.to_string()),
+            "{name}: {:?}",
+            metrics.unrecorded
+        );
+    }
     assert!(metrics.unrecorded.is_sorted(), "{:?}", metrics.unrecorded);
     let mut deduplicated = metrics.unrecorded.clone();
     deduplicated.dedup();
@@ -201,31 +376,23 @@ fn an_unknown_metric_is_reported_and_not_recorded() {
             metrics.unrecorded
         );
     }
-    assert_eq!(
-        metrics
-            .batch
+    let batch = &metrics.batch;
+    assert!(
+        batch
             .schema()
             .fields()
             .iter()
-            .filter(|f| f.name() == "spill_count")
-            .count(),
-        0
+            .all(|f| f.name() != "build_time"),
+        "{batch:?}"
     );
-    // The final aggregate runs one partition per target partition; its rows sum to the buckets.
-    let batch = &metrics.batch;
     let operators = string_values(batch, "operator");
-    let nodes = u64_values(batch, "node");
-    let final_aggregate = operators
+    let joined: u64 = u64_values(batch, "output_rows")
         .iter()
-        .position(|operator| operator == "AggregateExec")
-        .map_or_else(|| panic!("{batch:?}"), |row| nodes[row]);
-    let output_rows: u64 = u64_values(batch, "output_rows")
-        .iter()
-        .zip(&nodes)
-        .filter(|(_, node)| **node == final_aggregate)
+        .zip(&operators)
+        .filter(|(_, operator)| *operator == "HashJoinExec")
         .map(|(rows, _)| rows.unwrap_or_default())
         .sum();
-    assert_eq!(output_rows, 10, "{batch:?}");
+    assert_eq!(joined, 50, "{batch:?}");
 }
 
 /// Runs the frame `build` returns into a collecting sink on the pipeline runner and hands back
