@@ -45,6 +45,21 @@ pub(super) fn u64_values(batch: &RecordBatch, name: &str) -> Vec<Option<u64>> {
         .collect()
 }
 
+/// The rows of the run metrics batch `batch` whose operator is `operator`, in order.
+///
+/// # Panics
+///
+/// Panics if `batch` has no `operator` column.
+#[must_use]
+pub(super) fn rows_of_operator(batch: &RecordBatch, operator: &str) -> Vec<usize> {
+    string_values(batch, "operator")
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| *name == operator)
+        .map(|(row, _)| row)
+        .collect()
+}
+
 /// The values of the nanosecond timestamp column `name`, null included.
 ///
 /// # Panics
