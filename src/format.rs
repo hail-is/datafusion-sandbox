@@ -40,6 +40,15 @@ impl InputFormat {
     pub const PARQUET: Self = Self(InputRepr::Parquet);
     pub const VORTEX: Self = Self(InputRepr::Vortex);
 
+    /// The name of this format: `parquet` or `vortex`.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self.0 {
+            InputRepr::Parquet => "parquet",
+            InputRepr::Vortex => "vortex",
+        }
+    }
+
     /// The `DataFusion` reader for files in this format.
     #[must_use]
     pub fn read_format(&self) -> Arc<dyn FileFormat> {
@@ -92,6 +101,27 @@ impl OutputFormat {
             }
         }
         Ok(self)
+    }
+
+    /// The name of this format: `parquet` or `vortex`.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self.0 {
+            OutputRepr::Parquet { .. } => "parquet",
+            OutputRepr::Vortex { .. } => "vortex",
+        }
+    }
+
+    /// The compression mode this format writes with, as a caller would spell it, or `None` when
+    /// the format's default applies.
+    #[must_use]
+    pub fn compression(&self) -> Option<&str> {
+        match &self.0 {
+            OutputRepr::Parquet { compression } => compression.as_deref(),
+            OutputRepr::Vortex { compact } => {
+                compact.map(|compact| if compact { "compact" } else { "standard" })
+            }
+        }
     }
 
     /// The extension of every file this format writes. It carries no compression suffix because
@@ -321,7 +351,7 @@ fn single_file_sink_config(
 
 impl fmt::Display for OutputFormat {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.extension())
+        formatter.write_str(self.name())
     }
 }
 

@@ -10,7 +10,13 @@
     )
 )]
 
-use datafusion_sandbox::fixture::{self, FixtureFormat};
+use datafusion_sandbox::{
+    fixture::{self, FixtureFormat},
+    format::InputFormat,
+    pipeline::{self, PipelineOptions},
+};
+
+use datafusion::arrow::{record_batch::RecordBatch, util::display::array_value_to_string};
 
 use std::process::Command;
 
@@ -65,4 +71,84 @@ fn failing_binary_exits_nonzero_and_prints_the_error_on_stderr() {
         stderr.contains("output path 'combined.vortex' has extension '.vortex', which contradicts output format 'parquet'"),
         "stderr:\n{stderr}"
     );
+}
+
+/// `--write --metrics` performs the write, prints the run id under the formulation line, and
+/// records the run in two Parquet tables that read back with that id. A metric the tables have
+/// no column for is printed as a warning line.
+#[test]
+fn a_measured_write_prints_the_run_id_and_records_both_tables() {
+    let dataset = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let dir = tempfile::tempdir().unwrap();
+    let output_path = dir.path().join("combined.vortex");
+    let metrics_directory = dir.path().join("metrics").to_str().unwrap().to_string();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args([
+            "--threads",
+            "1",
+            "combine-refs",
+            dataset.table_path(),
+            "--write",
+            output_path.to_str().unwrap(),
+            "--metrics",
+            &metrics_directory,
+            "--run-id",
+            "cli-run",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("formulation: union\nrun id: cli-run\n32\n"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("warning: metric 'files_opened' has no column"),
+        "stdout:\n{stdout}"
+    );
+    assert!(output_path.exists());
+    for table in ["runs", "metrics"] {
+        let path = format!("{metrics_directory}/{table}/cli-run.parquet");
+        let batches = read_parquet(&path);
+        let run_ids: Vec<String> = batches
+            .iter()
+            .flat_map(|batch| {
+                let column = batch.column_by_name("run_id").unwrap();
+                (0..batch.num_rows()).map(|row| array_value_to_string(column, row).unwrap())
+            })
+            .collect();
+        assert!(!run_ids.is_empty(), "{path} is empty");
+        assert!(
+            run_ids.iter().all(|run_id| run_id == "cli-run"),
+            "{path}: {run_ids:?}"
+        );
+    }
+}
+
+#[test]
+fn metrics_without_a_write_is_rejected_before_any_run() {
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args(["combine-refs", "missing", "--metrics", "runs"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--write"), "stderr:\n{stderr}");
+}
+
+fn read_parquet(path: &str) -> Vec<RecordBatch> {
+    let path = path.to_string();
+    pipeline::run(
+        move |ctx| async move { fixture::read_file(&ctx, &path, &InputFormat::PARQUET, None).await },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap()
 }

@@ -18,15 +18,31 @@ One execution of a combiner against a dataset, from resolved settings through to
 _Avoid_: invocation, command
 
 **Action**:
-What a caller asks a combiner run to do with its combined rows: write them, collect them for display,
-render the plan, or execute and render the analyzed plan. The Action determines the run's Outcome.
+What a caller asks a combiner run to do with its combined rows: write them, write them and record
+the run, collect them for display, render the plan, or execute and render the analyzed plan. The
+Action determines the run's Outcome.
 _Avoid_: mode (taken by **Compression mode**), ending, sink (the operator the rows end in, which
 the action chooses; a separate term)
 
+**Measured write**:
+The action that writes a formulation's rows and records how its plan ran: a run record and the
+run metrics, beside the output. The rows written are the rows a plain write writes. See
+[ADR 0016](docs/adr/0016-record-run-metrics-as-wide-parquet-tables.md).
+_Avoid_: profiled write, benchmark run, instrumented write
+
 **Outcome**:
 What a pipeline hands back after it runs: rows written, collected batches, or a plan rendered as
-text.
+text. A measured write's outcome also names what it could not record.
 _Avoid_: result (too broad), output (ambiguous with a written artifact)
+
+**Run record**:
+The row describing one combiner run: its resolved settings and its whole-run measurements.
+_Avoid_: run row, run metadata, config row
+
+**Run metrics**:
+The per-operator, per-partition counters and timers a plan accumulated while executing, recorded
+as one table. Distinct from the run record, which describes the run rather than its plan.
+_Avoid_: profile, trace, stats, analyze output
 
 **Sink**:
 The operator a combiner run's rows end in, and the plan's only consumer: a file sink when the

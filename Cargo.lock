@@ -1761,6 +1761,7 @@ dependencies = [
  "snmalloc-rs",
  "tempfile",
  "tokio",
+ "uuid",
  "vortex",
  "vortex-datafusion",
 ]
