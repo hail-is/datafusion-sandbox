@@ -5,6 +5,7 @@ use crate::fixture::{self, DatasetFixture, FixtureFormat, SAMPLES, block_on};
 use crate::{
     dataset::Dataset,
     formulation::Formulation,
+    generated::make_range_table,
     locus::LocusRepresentation,
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
@@ -12,7 +13,10 @@ use crate::{
 };
 
 use datafusion::{
-    arrow::array::{Array, UInt64Array},
+    arrow::{
+        array::{Array, UInt64Array},
+        record_batch::RecordBatch,
+    },
     catalog::Session,
     datasource::sink::DataSinkExec,
     error::{DataFusionError, Result},
@@ -21,10 +25,11 @@ use datafusion::{
         ChildrenPropertiesMode, Distribution, ExecutionPlan, ExecutionPlanProperties,
         ReplaceChildrenOptions,
         coalesce_partitions::CoalescePartitionsExec,
+        projection::ProjectionExec,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
         union::UnionExec,
     },
-    prelude::SessionContext,
+    prelude::{SessionContext, col, lit},
 };
 
 use std::{
@@ -34,6 +39,47 @@ use std::{
 
 /// The number of rows every fixture dataset holds across its samples.
 const FIXTURE_ROWS: usize = 32;
+
+/// Executing a sink frame through the seam yields the rows the sink wrote and the plan that wrote
+/// them: its root is the sink, and an operator beneath it holds the baseline metrics it
+/// accumulated while running. A generated table and a collecting sink keep the test off every
+/// store.
+#[test]
+fn executing_a_sink_frame_retains_the_plan_it_ran() {
+    let (executed, collected) = pipeline::run(
+        |ctx| async move {
+            let frame = make_range_table(&ctx, 1000, 128)?
+                .select(vec![(col("idx") * lit(2)).alias("doubled")])?;
+            let sink = Arc::new(CollectingSink::new(Arc::clone(frame.schema().inner())));
+            let target = Arc::new(DataSinkTarget::new(sink.clone()));
+            let executed =
+                sink::execute_and_retain(sink::run_into(frame, "collect", None, target)?).await?;
+            Ok((executed, sink.take()))
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap();
+
+    assert_eq!(executed.rows_written, 1000);
+    assert_eq!(
+        collected.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        1000
+    );
+    let shape = PlanShape::of(&executed.plan);
+    assert!(executed.plan.is::<DataSinkExec>(), "{shape}");
+    let projections = shape.nodes_of::<ProjectionExec>();
+    let [projection] = projections.as_slice() else {
+        panic!("expected one projection beneath the sink:\n{shape}");
+    };
+    let metrics = projection
+        .metrics()
+        .unwrap_or_else(|| panic!("the projection reports no metrics:\n{shape}"));
+    assert_eq!(metrics.output_rows(), Some(1000), "{shape}");
+    assert!(
+        metrics.elapsed_compute().is_some_and(|nanos| nanos > 0),
+        "{shape}"
+    );
+}
 
 #[test]
 fn the_drained_frame_returns_the_row_count() {
