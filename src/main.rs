@@ -15,7 +15,7 @@ use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::formulation::Formulation;
 use datafusion_sandbox::locus::SplitPoints;
 use datafusion_sandbox::ordered_frame::OutputLayout;
-use datafusion_sandbox::pipeline;
+use datafusion_sandbox::{pipeline, split_points};
 use std::{num::NonZeroUsize, path::Path};
 use uuid::Uuid;
 
@@ -45,12 +45,34 @@ fn parse_thread_count(value: &str) -> std::result::Result<NonZeroUsize, String> 
     }
 }
 
+fn parse_interval_count(value: &str) -> std::result::Result<NonZeroUsize, String> {
+    match value.parse::<usize>() {
+        Ok(intervals) if intervals >= 2 => NonZeroUsize::new(intervals)
+            .ok_or_else(|| "interval count must be at least 2".to_string()),
+        Ok(_) => Err("interval count must be at least 2".to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Combine reference data for the dataset's sample set under PATH.
     CombineRefs(CombineRefsArgs),
     /// Combine alleles for the dataset's sample set under PATH.
     CombineAlleles(CombinerArgs),
+    /// Compute row-balanced split points from a locus-sorted table.
+    BalanceSplitPoints(BalanceSplitPointsArgs),
+}
+
+#[derive(Args)]
+struct BalanceSplitPointsArgs {
+    path: String,
+    /// Number of locus intervals the printed split points define.
+    #[arg(long, value_name = "J", value_parser = parse_interval_count)]
+    intervals: NonZeroUsize,
+    /// Format of the input table.
+    #[arg(long, value_enum, default_value = "vortex")]
+    input_format: InputFormatArg,
 }
 
 #[derive(Args)]
@@ -279,6 +301,11 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
             args.combiner,
         ),
         Command::CombineAlleles(args) => (Formulation::CombineAllelesUnion, args),
+        Command::BalanceSplitPoints(_) => {
+            return Err(DataFusionError::Internal(
+                "balance-split-points was sent through the combiner resolver".to_string(),
+            ));
+        }
     };
     let CombinerArgs {
         path,
@@ -338,14 +365,51 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let run = resolve(cli)?;
-    println!("formulation: {}", run.formulation);
-    if let Action::MeasuredWrite { run_id, .. } = &run.action {
-        println!("run id: {run_id}");
+    let Cli { command, threads } = Cli::parse();
+    match command {
+        Command::BalanceSplitPoints(args) => {
+            let threads = threads.unwrap_or_else(pipeline::default_thread_count);
+            let input_format = args.input_format.format();
+            let path_is_directory = args.path.ends_with('/') || Path::new(&args.path).is_dir();
+            validate_input_path(&args.path, &input_format, path_is_directory)?;
+            let points =
+                split_points::row_balanced(args.path, input_format, args.intervals, threads)?;
+            println!("{points}");
+        }
+        command => {
+            let run = resolve(Cli { command, threads })?;
+            println!("formulation: {}", run.formulation);
+            if let Action::MeasuredWrite { run_id, .. } = &run.action {
+                println!("run id: {run_id}");
+            }
+            let outcome = run.execute()?;
+            println!("{}", outcome.render()?);
+        }
     }
-    let outcome = run.execute()?;
-    println!("{}", outcome.render()?);
+    Ok(())
+}
+
+/// Rejects a file path whose recognized extension contradicts the selected input format.
+fn validate_input_path(
+    input_path: &str,
+    input_format: &InputFormat,
+    path_is_directory: bool,
+) -> Result<()> {
+    if path_is_directory {
+        return Ok(());
+    }
+    let Some(extension) = Path::new(input_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    else {
+        return Ok(());
+    };
+    if matches!(extension, "parquet" | "vortex") && extension != input_format.name() {
+        return Err(DataFusionError::Configuration(format!(
+            "input path '{input_path}' has extension '.{extension}', which contradicts input format '{}'",
+            input_format.name()
+        )));
+    }
     Ok(())
 }
 
@@ -377,6 +441,63 @@ fn validate_output_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn balance_split_points_requires_at_least_two_intervals() {
+        for intervals in ["0", "1"] {
+            let error = Cli::try_parse_from([
+                "datafusion-sandbox",
+                "balance-split-points",
+                "combined.vortex",
+                "--intervals",
+                intervals,
+            ])
+            .err()
+            .unwrap();
+            let diagnostic = error.to_string();
+            assert!(
+                diagnostic.contains("interval count must be at least 2"),
+                "{intervals} diagnostic:\n{diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn balance_split_points_defaults_to_vortex_and_honors_threads() {
+        let cli = Cli::try_parse_from([
+            "datafusion-sandbox",
+            "--threads",
+            "3",
+            "balance-split-points",
+            "combined",
+            "--intervals",
+            "4",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.threads, NonZeroUsize::new(3));
+        let Command::BalanceSplitPoints(args) = cli.command else {
+            panic!("expected balance-split-points");
+        };
+        assert_eq!(args.path, "combined");
+        assert_eq!(args.intervals, NonZeroUsize::new(4).unwrap());
+        assert_eq!(args.input_format, InputFormatArg::Vortex);
+    }
+
+    #[test]
+    fn balance_split_points_rejects_a_contradictory_file_extension() {
+        let error = validate_input_path("combined.parquet", &InputFormat::VORTEX, false)
+            .expect_err("a Parquet extension must contradict the Vortex input format");
+
+        assert!(
+            error.to_string().contains(
+                "input path 'combined.parquet' has extension '.parquet', which contradicts input format 'vortex'"
+            ),
+            "{error}"
+        );
+        validate_input_path("combined.parquet", &InputFormat::VORTEX, true)
+            .expect("a directory path is not format inference");
+    }
 
     #[test]
     fn an_action_is_required() {

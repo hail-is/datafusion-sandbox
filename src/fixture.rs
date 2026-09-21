@@ -7,6 +7,9 @@
 //! - Parquet with contig-position loci
 //! - Parquet with packed loci
 //!
+//! Per-test owned in-memory inventory:
+//! - A locus-sorted table, one or more files, with caller-chosen loci, format, and representation
+//!
 //! Per-test owned disk inventory:
 //! - Vortex with contig-position loci
 //! - Vortex with packed loci
@@ -261,6 +264,121 @@ pub fn dataset_fixture(
 #[must_use]
 pub fn vortex_without_alleles_fixture() -> &'static Arc<DatasetFixture> {
     &VORTEX_WITHOUT_ALLELES
+}
+
+/// One caller-shaped locus-sorted table held in an in-memory object store.
+pub struct SortedTableFixture {
+    format: FixtureFormat,
+    representation: LocusRepresentation,
+    store: MemoryStore,
+    table_path: ListingTableUrl,
+    file_paths: Vec<ListingTableUrl>,
+}
+
+impl SortedTableFixture {
+    #[must_use]
+    pub const fn table_path(&self) -> &ListingTableUrl {
+        &self.table_path
+    }
+
+    /// One fixture file by its locus-order index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` does not name a fixture file.
+    #[must_use]
+    pub fn file_path(&self, index: usize) -> &ListingTableUrl {
+        self.file_paths
+            .get(index)
+            .unwrap_or_else(|| panic!("sorted-table fixture has no file {index}"))
+    }
+
+    #[must_use]
+    pub const fn input_format(&self) -> InputFormat {
+        self.format.datafusion_formats().1
+    }
+
+    #[must_use]
+    pub const fn representation(&self) -> LocusRepresentation {
+        self.representation
+    }
+
+    pub fn register(&self, ctx: &SessionContext) {
+        self.store.register(ctx);
+    }
+
+    #[must_use]
+    pub fn store(&self) -> &Arc<dyn ObjectStore> {
+        self.store.store()
+    }
+}
+
+/// Writes one sorted table whose file groups and repeated loci are chosen by the caller.
+///
+/// Files are named in reverse of their locus order so a successful directory read demonstrates
+/// that ordering statistics, not paths, established the scan order.
+///
+/// # Panics
+///
+/// Panics if `files` is empty, the function runs inside a Tokio runtime, a fixture path cannot be
+/// parsed, or writing a fixture file fails.
+#[must_use]
+pub fn sorted_table_fixture(
+    name: &str,
+    format: FixtureFormat,
+    representation: LocusRepresentation,
+    files: Vec<Vec<Locus>>,
+) -> SortedTableFixture {
+    assert!(
+        !files.is_empty(),
+        "a sorted-table fixture needs at least one file"
+    );
+    assert!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "build the sorted-table fixture before calling pipeline::run"
+    );
+    let store = MemoryStore::new(name);
+    let root = format!("{}fixtures/{name}/sorted", store.url().as_str());
+    let table_path = ListingTableUrl::parse(format!("{root}/"))
+        .unwrap_or_else(|error| panic!("parsing the {name} sorted-table fixture path: {error}"));
+    let (output_format, _) = format.datafusion_formats();
+    let file_count = files.len();
+    let file_paths = (0..file_count)
+        .map(|index| {
+            let reverse_index = file_count.checked_sub(index).unwrap();
+            ListingTableUrl::parse(format!(
+                "{root}/{reverse_index:04}.{}",
+                output_format.extension()
+            ))
+            .unwrap_or_else(|error| panic!("parsing a {name} sorted-table fixture file: {error}"))
+        })
+        .collect::<Vec<_>>();
+    let writes = file_paths.iter().cloned().zip(files).collect::<Vec<_>>();
+    let pipeline_store = store.clone();
+    pipeline::run(
+        move |ctx| async move {
+            pipeline_store.register(&ctx);
+            for (path, loci) in writes {
+                let batch = RecordBatch::try_new(
+                    Arc::new(Schema::new(representation.fields())),
+                    representation.locus_arrays(&loci),
+                )?;
+                output_format
+                    .write_unordered(ctx.read_batch(batch)?, path.as_str())
+                    .await?;
+            }
+            Ok(())
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap_or_else(|error| panic!("writing the {name} sorted-table fixture: {error}"));
+    SortedTableFixture {
+        format,
+        representation,
+        store,
+        table_path,
+        file_paths,
+    }
 }
 
 pub struct DiskDatasetFixture {

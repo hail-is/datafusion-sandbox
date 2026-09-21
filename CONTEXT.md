@@ -135,6 +135,13 @@ A locus at which one locus interval ends and the next begins. `j - 1` split poin
 increasing in the locus ordering, define `j` locus intervals.
 _Avoid_: boundary, breakpoint, cut point, partition key
 
+**Row-balanced split points**:
+The split points that cut a sorted table into locus intervals holding as near equal row counts as
+its loci allow: with `n` rows and `j` intervals, the `k`-th point is the locus of the row at index
+`floor(k * n / j)`. Whether they are found exactly from the rows or approximated from file
+statistics is a method, not a different kind of split point.
+_Avoid_: oracle split points, ideal split points, even split points
+
 **Locus interval**:
 A contiguous stretch of loci in the dataset's locus ordering, half-open: it includes its start and
 excludes its end. The locus intervals of a run partition the whole ordering, so every row falls in
