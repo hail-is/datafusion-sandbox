@@ -1,4 +1,5 @@
-//! Stored datasets and their declared locus orderings.
+//! Stored tables where a declared locus ordering meets their encoded files, including datasets
+//! with sample sets and standalone sorted tables.
 
 use crate::{
     format::InputFormat,
@@ -18,6 +19,7 @@ use datafusion::{
     prelude::*,
 };
 use futures_util::{StreamExt, TryStreamExt};
+use object_store::ObjectMeta;
 use std::{collections::BTreeSet, sync::Arc};
 
 /// A directory of per-sample tables, its format, declared locus ordering, and sample set.
@@ -171,16 +173,12 @@ impl Dataset {
     async fn read_sample(&self, ctx: &SessionContext, sample: &str) -> Result<DataFrame> {
         let sample_path =
             ListingTableUrl::parse(format!("{}s={sample}/", self.table_path.as_str()))?;
-        let state = ctx.state();
-        let store = ctx.runtime_env().object_store(&sample_path)?;
         let format = self.input_format.read_format();
-        let extension = format.get_ext();
-        let files = sample_path
-            .list_all_files(&state, store.as_ref(), &extension)
+        let files = list_files_by_extension(ctx, &sample_path, &self.input_format)
             .await?
-            .map_ok(PartitionedFile::new_from_meta)
-            .try_collect()
-            .await?;
+            .into_iter()
+            .map(PartitionedFile::new_from_meta)
+            .collect();
         let table = SortedTable::new(
             sample_path.object_store(),
             format,
@@ -258,6 +256,78 @@ impl Dataset {
             .retain(|sample| requested_sample_set.contains(sample.as_str()));
         Ok(restricted)
     }
+}
+
+/// Reads one file or one directory of files as a single sorted table under `locus_ordering`.
+///
+/// Unlike [`Dataset`], this function does not discover a sample set or attach a sample column. It
+/// trusts the files to form one sorted table and lets [`SortedTable`] recover their order from
+/// statistics.
+///
+/// # Errors
+///
+/// Returns an error if the path cannot be listed, contains no nonempty file of `input_format`, its
+/// schema has no supported locus representation, an ordering field is absent, or the table cannot
+/// be constructed.
+pub async fn read_sorted_table(
+    ctx: &SessionContext,
+    table_path: ListingTableUrl,
+    input_format: InputFormat,
+    locus_ordering: LocusOrdering,
+) -> Result<DataFrame> {
+    let state = ctx.state();
+    let store = ctx.runtime_env().object_store(&table_path)?;
+    let format = input_format.read_format();
+    let files = list_files_by_extension(ctx, &table_path, &input_format).await?;
+    let input_file = first_nonempty_file(&files).ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "no input files found in sorted table '{}'",
+            table_path.as_str()
+        ))
+    })?;
+    let schema = format
+        .infer_schema(&state, &store, std::slice::from_ref(input_file))
+        .await?;
+    let representation = LocusRepresentation::detect(&schema)?;
+    let stored_ordering = locus_ordering.expand(representation);
+    for column in stored_ordering.column_names() {
+        if schema.field_with_name(&column).is_err() {
+            return Err(DataFusionError::Plan(format!(
+                "locus ordering column '{column}' is missing from the sorted table schema"
+            )));
+        }
+    }
+    let table = SortedTable::new(
+        table_path.object_store(),
+        format,
+        files
+            .into_iter()
+            .map(PartitionedFile::new_from_meta)
+            .collect(),
+        schema,
+        stored_ordering.sort_expressions(),
+        None,
+    );
+    ctx.read_table(Arc::new(table))
+}
+
+async fn list_files_by_extension(
+    ctx: &SessionContext,
+    table_path: &ListingTableUrl,
+    input_format: &InputFormat,
+) -> Result<Vec<ObjectMeta>> {
+    let state = ctx.state();
+    let store = ctx.runtime_env().object_store(table_path)?;
+    let extension = input_format.read_format().get_ext();
+    table_path
+        .list_all_files(&state, store.as_ref(), &extension)
+        .await?
+        .try_collect()
+        .await
+}
+
+fn first_nonempty_file(files: &[ObjectMeta]) -> Option<&ObjectMeta> {
+    files.iter().find(|file| file.size > 0)
 }
 
 /// The union of nonempty `plans`, or the one plan itself.

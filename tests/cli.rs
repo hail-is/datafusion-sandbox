@@ -52,6 +52,59 @@ fn successful_binary_prints_the_formulation_and_a_rendered_table() {
 }
 
 #[test]
+fn balance_split_points_prints_pasteable_points_from_an_interval_merge_directory() {
+    let dataset = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let dir = tempfile::tempdir().unwrap();
+    let combined = dir.path().join("combined");
+
+    let write = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args([
+            "--threads",
+            "1",
+            "combine-refs",
+            dataset.table_path(),
+            "--formulation",
+            "interval-merge",
+            "--split-points",
+            "1:3,2:2",
+            "--write",
+            combined.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        write.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&write.stderr)
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args([
+            "--threads",
+            "1",
+            "balance-split-points",
+            combined.to_str().unwrap(),
+            "--intervals",
+            "4",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stderr, Vec::<u8>::new());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout, "1:2,1:4,2:2\n");
+    stdout
+        .trim_end()
+        .parse::<datafusion_sandbox::locus::SplitPoints>()
+        .unwrap();
+}
+
+#[test]
 fn failing_binary_exits_nonzero_and_prints_the_error_on_stderr() {
     let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
         .args([

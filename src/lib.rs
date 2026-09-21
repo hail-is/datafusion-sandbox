@@ -15,6 +15,7 @@
 //! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of
 //!   every partition.
 //! - [`sorted_table`] scans files as one ordered partition.
+//! - [`split_points`] computes exact row-balanced split points from a stored sorted table.
 //! - [`generated`] builds generated tables for tests and benchmarks.
 //!
 //! See the [project glossary](../CONTEXT.md) for domain vocabulary.
@@ -52,6 +53,7 @@ pub mod process;
 pub mod run_metrics;
 pub mod sink;
 pub mod sorted_table;
+pub mod split_points;
 
 #[cfg(test)]
 mod tests;
