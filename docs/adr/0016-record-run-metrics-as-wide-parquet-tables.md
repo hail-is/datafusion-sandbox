@@ -55,7 +55,8 @@ and explain-analyze is left as it was.
 Adding a metric means adding a column, and until it is added every run that reports the metric
 warns. The tracer bullet in issue #171 records the six baseline metrics and issue #172 adds the
 rest. The `run_metrics` module owns both schemas and the tree walk and knows nothing of datasets
-or storage, so its tests run against a generated-table plan in memory, per
+or storage. Its focused tests use generated-table plans, while its real-plan content tests read the
+plan returned by a write over an in-memory dataset fixture, per issue #182 and
 [ADR 0010](0010-keep-tests-on-in-memory-object-stores.md).
 
 Two guarantees protect the history a metrics directory accumulates (issue #174). A measured write

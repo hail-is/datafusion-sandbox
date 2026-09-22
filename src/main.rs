@@ -10,11 +10,12 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use datafusion::error::{DataFusionError, Result};
 
-use datafusion_sandbox::combiner_run::{Action, CombinerRun, WriteTarget};
+use datafusion_sandbox::combiner_run::{Action, CombinerRun};
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::formulation::Formulation;
 use datafusion_sandbox::locus::SplitPoints;
 use datafusion_sandbox::ordered_frame::OutputLayout;
+use datafusion_sandbox::write::WriteTarget;
 use datafusion_sandbox::{pipeline, split_points};
 use std::{num::NonZeroUsize, path::Path};
 use uuid::Uuid;

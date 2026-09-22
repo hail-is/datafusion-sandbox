@@ -2,8 +2,8 @@
 //!
 //! Every action ends in a sink whose required input ordering is the formulation's ordering. The
 //! requirement is what keeps a merge per sample group, or per locus interval, beneath the sink; a
-//! logical sort in the same place destroys it. The file sink is the format's; the two `DataSink`s
-//! here stand in for it when the action collects rows or only analyzes the plan. See
+//! logical sort in the same place destroys it. The file sink is the write module's; the two
+//! `DataSink`s here stand in for it when the action collects rows or only analyzes the plan. See
 //! [ADR 0014](../docs/adr/0014-hold-the-merge-tree-with-the-sinks-ordering-requirement.md).
 //!
 //! `DataFusion`'s own `DataSinkExec` merges its input to one partition before writing. The
@@ -11,13 +11,13 @@
 //! whose partitions are the locus intervals writes one file per interval from one plan. See
 //! [ADR 0015](../docs/adr/0015-write-one-file-per-partition-through-a-partitioned-sink.md).
 //!
-//! The [`SinkTarget`] implementations here are the ones needing no format: the collecting and
-//! draining sinks. A write's targets live in [`crate::format`], beside the writer factories and
-//! options they build a sink from.
+//! The [`SinkTarget`] implementations here are the format-free collecting and draining sinks. A
+//! write's file-sink targets live in [`crate::write`].
 //!
-//! [`execute_and_retain`] is how a sink frame runs: it builds the physical plan, executes it to
-//! completion, and hands the plan back with the rows written, so every operator's metrics are
-//! readable from it afterwards. A frame-level collect would drop the plan with the batches.
+//! [`execute_and_retain`] is how a sink frame runs: it builds the physical plan, times its
+//! execution to completion, and hands the plan back with the rows written, so every operator's
+//! metrics are readable from it afterwards. A frame-level collect would drop the plan with the
+//! batches.
 
 use crate::{locus::StoredOrdering, ordered_frame::OrderedFrame};
 
@@ -54,6 +54,7 @@ use futures_util::TryStreamExt;
 use std::{
     fmt,
     sync::{Arc, Mutex, PoisonError},
+    time::Instant,
 };
 
 /// What an insert plans to once its input and the ordering requirement are known.
@@ -102,18 +103,21 @@ pub fn run_into(
     Ok(DataFrame::new(state, plan))
 }
 
-/// What executing a sink frame yields: the rows the sink wrote, and the physical plan that wrote
-/// them. Every operator's metrics are readable from the plan.
+/// What executing a sink frame yields: the rows the sink wrote, the physical plan that wrote them,
+/// and the nanoseconds spent executing that plan. Every operator's metrics are readable from the
+/// plan.
 #[derive(Debug)]
 pub struct ExecutedSink {
     pub rows_written: u64,
     pub plan: Arc<dyn ExecutionPlan>,
+    pub execute_ns: u64,
 }
 
 /// Executes `frame`, a sink frame, to completion and keeps hold of the physical plan it ran.
 ///
 /// This is the one path a sink frame executes on. The plan is built and run the way a frame-level
-/// collect builds and runs it, on the frame's own session, and then kept rather than dropped.
+/// collect builds and runs it, on the frame's own session, and then kept rather than dropped. Its
+/// execution duration starts after physical-plan construction and ends when collection completes.
 ///
 /// # Errors
 ///
@@ -122,9 +126,15 @@ pub struct ExecutedSink {
 pub async fn execute_and_retain(frame: DataFrame) -> Result<ExecutedSink> {
     let task_ctx = Arc::new(frame.task_ctx());
     let plan = frame.create_physical_plan().await?;
+    let executing = Instant::now();
     let batches = physical_plan::collect(Arc::clone(&plan), task_ctx).await?;
+    let execute_ns = u64::try_from(executing.elapsed().as_nanos()).unwrap_or(u64::MAX);
     let rows_written = rows_written(&batches)?;
-    Ok(ExecutedSink { rows_written, plan })
+    Ok(ExecutedSink {
+        rows_written,
+        plan,
+        execute_ns,
+    })
 }
 
 /// The frame that runs `df` into a sink keeping every batch it receives, in arrival order.

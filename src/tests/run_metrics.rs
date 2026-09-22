@@ -1,12 +1,22 @@
-//! The run record and run metrics tables, filled from a generated-table plan that touches no
-//! store.
+//! The run record and run metrics tables, filled from generated plans and real formulations over
+//! in-memory object stores.
 
 use crate::{
+    dataset::Dataset,
+    fixture::{self, FixtureFormat, MemoryStore, SAMPLES},
+    format::OutputFormat,
+    formulation::Formulation,
     generated::make_range_table,
+    locus::LocusRepresentation,
+    ordered_frame::OutputLayout,
     pipeline::{self, PipelineOptions},
     run_metrics::{self, RunRecord},
     sink::{self, CollectingSink, DataSinkTarget},
-    tests::support::{rows_of_operator, string_values, timestamp_values, u64_values},
+    tests::support::{
+        grouped_merge, interval_merge, rows_of_operator, string_values, timestamp_values,
+        u64_values,
+    },
+    write::WriteTarget,
 };
 
 use datafusion::{
@@ -19,6 +29,7 @@ use datafusion::{
     error::Result,
     prelude::{DataFrame, JoinType, SessionContext, col, lit},
 };
+use object_store::{ObjectStoreExt, path::Path};
 
 use std::{
     sync::Arc,
@@ -395,6 +406,293 @@ fn an_unknown_metric_is_reported_and_not_recorded() {
         .map(|(rows, _)| rows.unwrap_or_default())
         .sum();
     assert_eq!(joined, 50, "{batch:?}");
+}
+
+/// A file-per-partition write reports its sinks together at the root, while the outer union has
+/// one metrics row per locus interval.
+#[test]
+fn an_interval_merge_records_a_row_per_interval() {
+    let wrote = write_formulation(
+        FixtureFormat::Vortex,
+        OutputFormat::VORTEX,
+        interval_merge("1:3,2:2"),
+        "metrics-intervals",
+    );
+    assert_eq!(wrote.executed.rows_written, 32);
+    let metrics = run_metrics::run_metrics_batch("run-b", &wrote.executed.plan).unwrap();
+    assert_eq!(metrics.unrecorded, Vec::<String>::new());
+    let batch = &metrics.batch;
+
+    assert!(
+        string_values(batch, "display")[0]
+            .starts_with("PartitionedSinkExec: partitions=3, sink=VortexSink"),
+        "{batch:?}"
+    );
+    assert_eq!(u64_values(batch, "partition")[0], None, "{batch:?}");
+    assert_eq!(u64_values(batch, "rows_written")[0], Some(32), "{batch:?}");
+    assert!(
+        u64_values(batch, "bytes_written")[0].is_some_and(|bytes| bytes > 0),
+        "{batch:?}"
+    );
+    assert_eq!(u64_values(batch, "node")[1], Some(1), "{batch:?}");
+
+    let operators = string_values(batch, "operator");
+    let nodes = u64_values(batch, "node");
+    let outer_union = operators
+        .iter()
+        .position(|operator| operator == "UnionExec")
+        .map_or_else(|| panic!("{batch:?}"), |row| nodes[row]);
+    let union_partitions: Vec<Option<u64>> = u64_values(batch, "partition")
+        .into_iter()
+        .zip(&nodes)
+        .filter(|(_, node)| **node == outer_union)
+        .map(|(partition, _)| partition)
+        .collect();
+    assert_eq!(union_partitions, [Some(0), Some(1), Some(2)], "{batch:?}");
+}
+
+#[test]
+fn every_formulation_in_every_format_reports_no_unrecorded_metric() {
+    for fixture_format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
+        for output_format in [OutputFormat::PARQUET, OutputFormat::VORTEX] {
+            for (formulation, expected, run_id_suffix) in [
+                (Formulation::CombineAllelesUnion, 8, "alleles"),
+                (Formulation::CombineRefsUnion, 32, "refs"),
+                (grouped_merge(2), 32, "grouped"),
+                (interval_merge("1:3,2:2"), 32, "intervals"),
+            ] {
+                let run_id = format!(
+                    "{}-{}-{run_id_suffix}",
+                    match fixture_format {
+                        FixtureFormat::Parquet => "parquet",
+                        FixtureFormat::Vortex => "vortex",
+                    },
+                    output_format.name(),
+                );
+                let wrote =
+                    write_formulation(fixture_format, output_format.clone(), formulation, &run_id);
+                let metrics =
+                    run_metrics::run_metrics_batch(&run_id, &wrote.executed.plan).unwrap();
+
+                assert_eq!(wrote.executed.rows_written, expected, "{run_id}");
+                assert_eq!(metrics.unrecorded, Vec::<String>::new(), "{run_id}");
+            }
+        }
+    }
+}
+
+/// A write's sink row carries the rows and bytes the sink wrote, whichever format it wrote.
+#[test]
+fn a_write_of_either_format_records_the_rows_and_bytes_its_sink_wrote() {
+    for output_format in [OutputFormat::PARQUET, OutputFormat::VORTEX] {
+        let run_id = output_format.name();
+        let wrote = write_formulation(
+            FixtureFormat::Vortex,
+            output_format,
+            Formulation::CombineRefsUnion,
+            run_id,
+        );
+        let metrics = run_metrics::run_metrics_batch(run_id, &wrote.executed.plan).unwrap();
+        let batch = &metrics.batch;
+
+        assert_eq!(u64_values(batch, "node")[0], Some(0), "{run_id}: {batch:?}");
+        assert_eq!(
+            string_values(batch, "operator")[0],
+            "DataSinkExec",
+            "{run_id}"
+        );
+        assert_eq!(
+            u64_values(batch, "partition")[0],
+            None,
+            "{run_id}: {batch:?}"
+        );
+        assert_eq!(
+            u64_values(batch, "rows_written")[0],
+            Some(32),
+            "{run_id}: {batch:?}"
+        );
+        let bytes_written = u64_values(batch, "bytes_written")[0];
+        let file_size = wrote.file_size.unwrap();
+        assert!(
+            bytes_written.is_some_and(|bytes| bytes > 0 && bytes <= file_size),
+            "{run_id}: {bytes_written:?} bytes written to a file of {file_size}"
+        );
+    }
+}
+
+/// A Parquet scan sums per-file metrics into the row for its one partition.
+#[test]
+fn a_parquet_scan_over_several_files_yields_one_row_per_partition_with_per_file_metrics_summed() {
+    let wrote = write_formulation(
+        FixtureFormat::Parquet,
+        OutputFormat::PARQUET,
+        Formulation::CombineRefsUnion,
+        "metrics-parquet-scan",
+    );
+    let metrics = run_metrics::run_metrics_batch("scan", &wrote.executed.plan).unwrap();
+    let batch = &metrics.batch;
+    let nodes = u64_values(batch, "node");
+    let partitions = u64_values(batch, "partition");
+    let scan_rows = rows_of_operator(batch, "DataSourceExec");
+    let mut scan_nodes: Vec<Option<u64>> = scan_rows.iter().map(|&row| nodes[row]).collect();
+    scan_nodes.dedup();
+    assert_eq!(scan_nodes.len(), SAMPLES.len(), "{batch:?}");
+    for node in scan_nodes {
+        let rows: Vec<usize> = scan_rows
+            .iter()
+            .copied()
+            .filter(|&row| nodes[row] == node)
+            .collect();
+        let partitioned: Vec<Option<u64>> = rows.iter().map(|&row| partitions[row]).collect();
+        assert_eq!(partitioned, [None, Some(0)], "node {node:?}: {batch:?}");
+        let (global, scanned) = (rows[0], rows[1]);
+        assert_eq!(
+            u64_values(batch, "num_predicate_creation_errors")[global],
+            Some(0)
+        );
+        assert_eq!(u64_values(batch, "files_opened")[global], None);
+        let files = u64::try_from(fixture::sample_rows().len() / 2).unwrap();
+        assert_eq!(u64_values(batch, "files_opened")[scanned], Some(files));
+        assert_eq!(
+            u64_values(batch, "row_groups_pruned_statistics_total")[scanned],
+            Some(files),
+            "{batch:?}"
+        );
+        assert_eq!(
+            u64_values(batch, "row_groups_pruned_statistics_pruned")[scanned],
+            Some(0)
+        );
+        assert_eq!(
+            u64_values(batch, "files_ranges_pruned_statistics_total")[scanned],
+            Some(files)
+        );
+        let bytes_scanned = u64_values(batch, "bytes_scanned")[scanned];
+        assert!(bytes_scanned.is_some_and(|bytes| bytes > 0), "{batch:?}");
+        assert_eq!(
+            u64_values(batch, "scan_efficiency_ratio_num")[scanned],
+            bytes_scanned
+        );
+        assert!(
+            u64_values(batch, "metadata_load_time")[scanned].is_some_and(|nanos| nanos > 0),
+            "{batch:?}"
+        );
+        assert_eq!(u64_values(batch, "rows_written")[scanned], None);
+    }
+}
+
+/// The allele combiner records aggregate, repartition, and window metrics with none unrecorded.
+#[test]
+fn the_allele_combiner_records_its_aggregate_and_repartition_metrics() {
+    let wrote = write_formulation(
+        FixtureFormat::Vortex,
+        OutputFormat::VORTEX,
+        Formulation::CombineAllelesUnion,
+        "metrics-alleles",
+    );
+    let metrics = run_metrics::run_metrics_batch("alleles", &wrote.executed.plan).unwrap();
+    assert_eq!(metrics.unrecorded, Vec::<String>::new());
+    let batch = &metrics.batch;
+
+    let aggregates = rows_of_operator(batch, "AggregateExec");
+    assert!(!aggregates.is_empty(), "{batch:?}");
+    for row in aggregates {
+        assert!(u64_values(batch, "partition")[row].is_some(), "{batch:?}");
+        for column in [
+            "spill_count",
+            "spilled_bytes",
+            "spilled_rows",
+            "time_calculating_group_ids",
+            "aggregation_time",
+            "emitting_time",
+        ] {
+            assert!(
+                u64_values(batch, column)[row].is_some(),
+                "{column} on row {row}: {batch:?}"
+            );
+        }
+        assert_eq!(u64_values(batch, "fetch_time")[row], None, "{batch:?}");
+        assert_eq!(u64_values(batch, "peak_mem_used")[row], None, "{batch:?}");
+    }
+    let repartitions = rows_of_operator(batch, "RepartitionExec");
+    assert!(!repartitions.is_empty(), "{batch:?}");
+    assert!(
+        repartitions
+            .iter()
+            .any(|&row| u64_values(batch, "fetch_time")[row].is_some_and(|nanos| nanos > 0)),
+        "{batch:?}"
+    );
+    assert!(
+        repartitions
+            .iter()
+            .all(|&row| u64_values(batch, "output_rows")[row].is_some()),
+        "{batch:?}"
+    );
+    let windows = rows_of_operator(batch, "BoundedWindowAggExec");
+    assert!(!windows.is_empty(), "{batch:?}");
+    assert!(
+        windows
+            .iter()
+            .all(|&row| u64_values(batch, "output_batches")[row].is_some()),
+        "{batch:?}"
+    );
+}
+
+struct FormulationWrite {
+    executed: sink::ExecutedSink,
+    file_size: Option<u64>,
+}
+
+fn write_formulation(
+    fixture_format: FixtureFormat,
+    output_format: OutputFormat,
+    formulation: Formulation,
+    store_name: &str,
+) -> FormulationWrite {
+    let input = Arc::clone(fixture::dataset_fixture(
+        fixture_format,
+        LocusRepresentation::ContigPosition,
+    ));
+    let output = MemoryStore::new(store_name);
+    let extension = output_format.extension();
+    let single_file = formulation.output_layout() == OutputLayout::SingleFile;
+    let object_path = single_file.then(|| Path::from(format!("combined.{extension}")));
+    let output_path = if single_file {
+        format!("{}combined.{extension}", output.url().as_str())
+    } else {
+        format!("{}combined", output.url().as_str())
+    };
+    let target = WriteTarget {
+        output_path,
+        output_format,
+    };
+
+    pipeline::run(
+        move |ctx| async move {
+            input.register(&ctx);
+            output.register(&ctx);
+            let dataset = Dataset::discover(
+                &ctx,
+                input.table_path().clone(),
+                input.input_format(),
+                formulation.required_ordering(),
+                None,
+            )
+            .await?;
+            let executed = target
+                .write(formulation.plan(&ctx, &dataset).await?)
+                .await?;
+            let file_size = match object_path {
+                Some(path) => Some(output.store().head(&path).await?.size),
+                None => None,
+            };
+            Ok(FormulationWrite {
+                executed,
+                file_size,
+            })
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap()
 }
 
 /// Runs the frame `build` returns into a collecting sink on the pipeline runner and hands back

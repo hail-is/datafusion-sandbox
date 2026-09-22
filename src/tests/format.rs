@@ -1,51 +1,107 @@
-#![expect(
-    clippy::as_conversions,
-    reason = "the in-memory object's test-controlled length fits in u64"
-)]
-
 use crate::{
+    dataset::Dataset,
+    fixture::{self, FixtureFormat, MemoryStore},
     format::OutputFormat,
+    formulation::Formulation,
     generated::make_range_table,
+    locus::LocusRepresentation,
     pipeline::{self, PipelineOptions},
+    write::WriteTarget,
 };
-use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
-use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
+use object_store::{ObjectStoreExt, path::Path};
 use std::sync::Arc;
 
 #[test]
-fn parquet_writes_rows_and_returns_their_count() {
-    assert_writes_rows(&OutputFormat::PARQUET, "parquet");
+fn uncompressed_parquet_is_larger_than_zstd_parquet() {
+    let uncompressed = written_size(
+        OutputFormat::PARQUET
+            .with_compression("uncompressed")
+            .unwrap(),
+        "parquet-uncompressed",
+    );
+    let compressed = written_size(
+        OutputFormat::PARQUET.with_compression("zstd(7)").unwrap(),
+        "parquet-zstd",
+    );
+
+    assert!(uncompressed > compressed, "{uncompressed} <= {compressed}");
 }
 
 #[test]
-fn vortex_writes_rows_and_returns_their_count() {
-    assert_writes_rows(&OutputFormat::VORTEX, "vortex");
+fn compact_and_standard_vortex_have_different_file_sizes() {
+    let standard = combined_refs_size(
+        OutputFormat::VORTEX.with_compression("standard").unwrap(),
+        "vortex-standard",
+    );
+    let compact = combined_refs_size(
+        OutputFormat::VORTEX.with_compression("compact").unwrap(),
+        "vortex-compact",
+    );
+
+    assert_ne!(standard, compact, "standard and compact file sizes match");
 }
 
-fn assert_writes_rows(format: &'static OutputFormat, extension: &'static str) {
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let object_path = Path::from(format!("rows.{extension}"));
+fn combined_refs_size(output_format: OutputFormat, store_name: &str) -> u64 {
+    let input = Arc::clone(fixture::dataset_fixture(
+        FixtureFormat::Vortex,
+        LocusRepresentation::ContigPosition,
+    ));
+    let output = MemoryStore::new(store_name);
+    let target = WriteTarget {
+        output_path: format!("{}combined.vortex", output.url().as_str()),
+        output_format,
+    };
 
-    let (rows_written, metadata, bytes) = pipeline::run(
-        move |ctx: SessionContext| async move {
-            let store_url = ObjectStoreUrl::parse("memory://out")?;
-            ctx.register_object_store(store_url.as_ref(), Arc::clone(&store));
-            let df = make_range_table(&ctx, 1000, 128)?;
-            let rows_written = format
-                .write_unordered(df, &format!("memory://out/rows.{extension}"))
+    pipeline::run(
+        move |ctx| async move {
+            input.register(&ctx);
+            output.register(&ctx);
+            let formulation = Formulation::CombineRefsUnion;
+            let dataset = Dataset::discover(
+                &ctx,
+                input.table_path().clone(),
+                input.input_format(),
+                formulation.required_ordering(),
+                None,
+            )
+            .await?;
+            let executed = target
+                .write(formulation.plan(&ctx, &dataset).await?)
                 .await?;
-            let metadata = store.head(&object_path).await?;
-            let bytes = store.get(&object_path).await?.bytes().await?;
-            Ok((rows_written, metadata, bytes))
+            assert_eq!(executed.rows_written, 32);
+            Ok(output
+                .store()
+                .head(&Path::from("combined.vortex"))
+                .await?
+                .size)
         },
         PipelineOptions::single_threaded(),
     )
-    .unwrap();
+    .unwrap()
+}
 
-    assert_eq!(rows_written, 1000);
-    assert!(metadata.size > 0);
-    assert_eq!(bytes.len() as u64, metadata.size);
+fn written_size(output_format: OutputFormat, store_name: &str) -> u64 {
+    let store = MemoryStore::new(store_name);
+    let extension = output_format.extension();
+    let object_path = Path::from(format!("rows.{extension}"));
+    let target = WriteTarget {
+        output_path: format!("{}rows.{extension}", store.url().as_str()),
+        output_format,
+    };
+
+    pipeline::run(
+        move |ctx| async move {
+            store.register(&ctx);
+            let executed = target
+                .write_unordered(make_range_table(&ctx, 10_000, 128)?)
+                .await?;
+            assert_eq!(executed.rows_written, 10_000);
+            Ok(store.store().head(&object_path).await?.size)
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap()
 }
 
 #[test]

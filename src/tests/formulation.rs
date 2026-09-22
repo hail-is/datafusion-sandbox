@@ -33,6 +33,7 @@ use crate::{
     pipeline::{self, PipelineOptions},
     sink,
     tests::{plan_shape::PlanShape, support::hostile_config},
+    write::WriteTarget,
 };
 use datafusion::{
     arrow::record_batch::RecordBatch,
@@ -316,12 +317,15 @@ fn file_sink_plan(
         };
         let ordering = ordered.ordering.clone();
         let path = output_path(&ordered, dataset);
-        let plan = output_format(dataset.format)
-            .sink_frame(ordered, &path)
-            .unwrap()
-            .create_physical_plan()
-            .await
-            .unwrap();
+        let plan = WriteTarget {
+            output_path: path,
+            output_format: output_format(dataset.format),
+        }
+        .sink_frame(ordered)
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
         (plan, ordering)
     })
 }

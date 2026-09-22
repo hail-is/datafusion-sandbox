@@ -6,6 +6,7 @@
 use crate::format::OutputFormat;
 use crate::generated::make_range_table;
 use crate::pipeline::{self, PipelineOptions};
+use crate::write::WriteTarget;
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::{DataFrame, col, lit};
@@ -64,7 +65,13 @@ fn runs_a_pipeline_that_writes_output() {
     let rows_written = pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            OutputFormat::VORTEX.write_unordered(df, &output_path).await
+            let executed = WriteTarget {
+                output_path,
+                output_format: OutputFormat::VORTEX,
+            }
+            .write_unordered(df)
+            .await?;
+            Ok(executed.rows_written)
         },
         PipelineOptions::single_threaded(),
     )
@@ -84,9 +91,12 @@ fn runs_a_pipeline_that_writes_parquet_output() {
     pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            OutputFormat::PARQUET
-                .write_unordered(df, &output_path)
-                .await
+            WriteTarget {
+                output_path,
+                output_format: OutputFormat::PARQUET,
+            }
+            .write_unordered(df)
+            .await
         },
         PipelineOptions::single_threaded(),
     )
@@ -122,7 +132,12 @@ fn surfaces_errors_from_plans_that_fail_at_execution() {
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?
                 .select(vec![(lit(1) / (col("idx") - lit(1))).alias("boom")])?;
-            OutputFormat::VORTEX.write_unordered(df, &output_path).await
+            WriteTarget {
+                output_path,
+                output_format: OutputFormat::VORTEX,
+            }
+            .write_unordered(df)
+            .await
         },
         PipelineOptions::single_threaded(),
     )
@@ -218,7 +233,12 @@ fn runs_with_one_thread() {
     pipeline::run(
         move |ctx| async move {
             let df = make_range_table(&ctx, 1000, 128)?;
-            OutputFormat::VORTEX.write_unordered(df, &output_path).await
+            WriteTarget {
+                output_path,
+                output_format: OutputFormat::VORTEX,
+            }
+            .write_unordered(df)
+            .await
         },
         PipelineOptions::single_threaded(),
     )
