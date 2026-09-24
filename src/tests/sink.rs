@@ -61,6 +61,7 @@ fn executing_a_sink_frame_retains_the_plan_it_ran() {
     .unwrap();
 
     assert_eq!(executed.rows_written, 1000);
+    assert!(executed.execute_ns > 0);
     assert_eq!(
         collected.iter().map(RecordBatch::num_rows).sum::<usize>(),
         1000

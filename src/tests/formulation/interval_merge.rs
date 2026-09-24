@@ -17,6 +17,7 @@ use crate::tests::{
     plan_shape::PlanShape,
     support::{hostile_config, interval_merge},
 };
+use crate::write::WriteTarget;
 
 use datafusion::{
     arrow::record_batch::RecordBatch,
@@ -371,10 +372,18 @@ fn write_partitioned(
             };
             let schema = Arc::clone(ordered.frame.schema().inner());
             let directory = format!("{}{suffix}", output_path(&ordered, &dataset));
-            let rows_written = output_format.write(ordered, &directory).await?;
+            let target = WriteTarget {
+                output_path: directory.clone(),
+                output_format,
+            };
+            let rows_written = target.write(ordered).await?.rows_written;
 
             let paths: Vec<String> = (0..file_count)
-                .map(|index| output_format.partition_file_path(&directory, index, file_count))
+                .map(|index| {
+                    target
+                        .output_format
+                        .partition_file_path(&directory, index, file_count)
+                })
                 .collect();
             let store = dataset.fixture.store();
             let mut listed: Vec<Path> = store

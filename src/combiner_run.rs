@@ -9,6 +9,7 @@ use crate::{
     process,
     run_metrics::{self, RunRecord},
     sink,
+    write::WriteTarget,
 };
 
 use datafusion::{
@@ -24,13 +25,6 @@ use std::{
     sync::Arc,
     time::{Instant, SystemTime},
 };
-
-/// Where a write puts its rows.
-#[derive(Debug)]
-pub struct WriteTarget {
-    pub output_path: String,
-    pub output_format: OutputFormat,
-}
 
 /// What to do with the combined rows.
 ///
@@ -170,17 +164,16 @@ impl CombinerRun {
 
                 match action {
                     Action::Write(target) => Ok(Outcome::RowsWritten(
-                        target
-                            .output_format
-                            .write(ordered, &target.output_path)
-                            .await?,
+                        target.write(ordered).await?.rows_written,
                     )),
                     Action::MeasuredWrite {
                         write,
                         metrics_directory,
                         run_id,
                     } => {
-                        let measured = measure_write(ordered, &write, started).await?;
+                        let executed = write.write(ordered).await?;
+                        let run_ns = elapsed_ns(started);
+                        let peak_rss_bytes = process::peak_rss_bytes()?;
                         let record = RunRecord {
                             run_id,
                             started_at,
@@ -194,12 +187,12 @@ impl CombinerRun {
                             threads: threads.get(),
                             samples,
                             output_path: write.output_path,
-                            rows_written: measured.executed.rows_written,
-                            run_ns: measured.run_ns,
-                            execute_ns: measured.execute_ns,
-                            peak_rss_bytes: measured.peak_rss_bytes,
+                            rows_written: executed.rows_written,
+                            run_ns,
+                            execute_ns: executed.execute_ns,
+                            peak_rss_bytes,
                         };
-                        record_run(&ctx, &metrics_directory, &record, &measured.executed.plan).await
+                        record_run(&ctx, &metrics_directory, &record, &executed.plan).await
                     }
                     Action::Collect => {
                         let (frame, sink) = sink::collect(ordered)?;
@@ -221,38 +214,6 @@ impl CombinerRun {
 const RUNS_TABLE: &str = "runs";
 /// The subdirectory of a metrics directory holding the run metrics table.
 const METRICS_TABLE: &str = "metrics";
-
-/// A write executed through the retaining seam, with the whole-run measurements a run record
-/// carries: the two wall-clock durations, of the whole run from `started` and of the plan's
-/// execution alone, and the process's peak resident set size as of the plan's completion.
-struct MeasuredWrite {
-    executed: sink::ExecutedSink,
-    run_ns: u64,
-    execute_ns: u64,
-    peak_rss_bytes: u64,
-}
-
-/// Performs `write` of `ordered` and measures it.
-async fn measure_write(
-    ordered: OrderedFrame,
-    write: &WriteTarget,
-    started: Instant,
-) -> Result<MeasuredWrite> {
-    let frame = write
-        .output_format
-        .sink_frame(ordered, &write.output_path)?;
-    let executing = Instant::now();
-    let executed = sink::execute_and_retain(frame).await?;
-    let execute_ns = elapsed_ns(executing);
-    let run_ns = elapsed_ns(started);
-    let peak_rss_bytes = process::peak_rss_bytes()?;
-    Ok(MeasuredWrite {
-        executed,
-        run_ns,
-        execute_ns,
-        peak_rss_bytes,
-    })
-}
 
 /// Whether `run_id` already has a run record under `metrics_directory`, on whichever object
 /// store the session serves the directory from.
@@ -333,9 +294,12 @@ fn run_table_path(metrics_directory: &str, table: &str, run_id: &str) -> String 
 
 /// Writes `batch` as one Parquet file at `path`.
 async fn write_table(ctx: &SessionContext, batch: RecordBatch, path: &str) -> Result<()> {
-    OutputFormat::PARQUET
-        .write_unordered(ctx.read_batch(batch)?, path)
-        .await?;
+    WriteTarget {
+        output_path: path.to_string(),
+        output_format: OutputFormat::PARQUET,
+    }
+    .write_unordered(ctx.read_batch(batch)?)
+    .await?;
     Ok(())
 }
 
@@ -348,9 +312,7 @@ fn elapsed_ns(since: Instant) -> u64 {
 /// or a draining run without a write.
 fn sink_frame(ordered: OrderedFrame, write: Option<WriteTarget>) -> Result<DataFrame> {
     match write {
-        Some(target) => target
-            .output_format
-            .sink_frame(ordered, &target.output_path),
+        Some(target) => target.sink_frame(ordered),
         None => sink::drain(ordered),
     }
 }

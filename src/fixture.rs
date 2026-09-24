@@ -62,6 +62,7 @@ pub use memory_store::MemoryStore;
 use crate::format::{InputFormat, OutputFormat};
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::pipeline::{self, PipelineOptions};
+use crate::write::WriteTarget;
 use datafusion::{
     arrow::{
         array::{Array, ArrayRef, StringArray},
@@ -363,9 +364,12 @@ pub fn sorted_table_fixture(
                     Arc::new(Schema::new(representation.fields())),
                     representation.locus_arrays(&loci),
                 )?;
-                output_format
-                    .write_unordered(ctx.read_batch(batch)?, path.as_str())
-                    .await?;
+                WriteTarget {
+                    output_path: path.to_string(),
+                    output_format: output_format.clone(),
+                }
+                .write_unordered(ctx.read_batch(batch)?)
+                .await?;
             }
             Ok(())
         },
@@ -483,7 +487,12 @@ fn build_in_memory_fixture_without_alleles(name: &'static str) -> Arc<DatasetFix
             async move {
                 let path = format!("{root}/s=sample-a/a.vortex");
                 let df = ctx.read_batch(batch)?;
-                OutputFormat::VORTEX.write_unordered(df, &path).await?;
+                WriteTarget {
+                    output_path: path,
+                    output_format: OutputFormat::VORTEX,
+                }
+                .write_unordered(df)
+                .await?;
                 Ok(())
             }
         },
@@ -579,7 +588,11 @@ fn build_sample_tables(
                         output_format.extension()
                     );
                     let df = ctx.read_batch(sample_batch(rows, representation))?;
-                    writes.push(async move { output_format.write_unordered(df, &path).await });
+                    let target = WriteTarget {
+                        output_path: path,
+                        output_format: output_format.clone(),
+                    };
+                    writes.push(async move { target.write_unordered(df).await });
                 }
             }
             join_all(writes)

@@ -5,7 +5,7 @@
 //! - [`dataset`] describes and reads stored datasets.
 //! - [`file_order`] recovers the order of a sorted table's files from their statistics.
 //! - [`fixture`] builds small stored datasets for tests.
-//! - [`format`] reads and writes supported file formats.
+//! - [`mod@format`] describes supported input and output file formats.
 //! - [`formulation`] builds the alternative combiner plans under comparison.
 //! - [`locus`] describes the supported stored locus representations, split points, and locus
 //!   intervals.
@@ -16,6 +16,7 @@
 //!   every partition.
 //! - [`sorted_table`] scans files as one ordered partition.
 //! - [`split_points`] computes exact row-balanced split points from a stored sorted table.
+//! - [`mod@write`] builds and executes file writes.
 //! - [`generated`] builds generated tables for tests and benchmarks.
 //!
 //! See the [project glossary](../CONTEXT.md) for domain vocabulary.
@@ -54,6 +55,7 @@ pub mod run_metrics;
 pub mod sink;
 pub mod sorted_table;
 pub mod split_points;
+pub mod write;
 
 #[cfg(test)]
 mod tests;

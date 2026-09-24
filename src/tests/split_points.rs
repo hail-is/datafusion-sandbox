@@ -7,6 +7,7 @@ use crate::{
     locus::{Locus, LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
     split_points::{row_balanced_from_frame, row_balanced_plan},
+    write::WriteTarget,
 };
 
 use datafusion::{
@@ -284,7 +285,12 @@ fn row_balanced_plan_is_one_ordered_scan_window_and_filter() {
             };
             let directory = format!("{}row-balanced-plan-input", fixture.table_path().as_str());
             let ordered = formulation.plan(&ctx, &dataset).await?;
-            OutputFormat::PARQUET.write(ordered, &directory).await?;
+            WriteTarget {
+                output_path: directory.clone(),
+                output_format: OutputFormat::PARQUET,
+            }
+            .write(ordered)
+            .await?;
             let frame = read_sorted_table(
                 &ctx,
                 datafusion::datasource::listing::ListingTableUrl::parse(directory)?,

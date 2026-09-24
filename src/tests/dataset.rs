@@ -11,6 +11,7 @@ use crate::{
     format::{InputFormat, OutputFormat},
     locus::{Locus, LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
+    write::WriteTarget,
 };
 use datafusion::{
     arrow::{
@@ -418,7 +419,12 @@ fn infers_the_schema_from_one_input_file() {
                 for (name, batch) in [("a.vortex", int_batch), ("b.vortex", string_batch)] {
                     let path = format!("{root}/s=sample-a/{name}");
                     let df = ctx.read_batch(batch)?;
-                    OutputFormat::VORTEX.write_unordered(df, &path).await?;
+                    WriteTarget {
+                        output_path: path,
+                        output_format: OutputFormat::VORTEX,
+                    }
+                    .write_unordered(df)
+                    .await?;
                 }
 
                 let dataset = Dataset::discover(
