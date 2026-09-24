@@ -33,7 +33,9 @@
 //! Store handles:
 //! - `MemoryStore`, an empty in-memory object store a test registers on its own
 //!   session. Every shared dataset fixture holds one. The sorted-table planning
-//!   tests build metadata-only tables over one with nothing in it.
+//!   tests build metadata-only tables over one with nothing in it. One built by
+//!   `MemoryStore::failing_writes_under` fails every write under a prefix, for
+//!   tests of what a failed write leaves behind.
 //!
 //! Row helpers, for tests that filter a fixture and check what comes back:
 //! - `sample_rows`, the rows above as one sample's expected result.
@@ -43,6 +45,8 @@
 //! - `decode_rows`, the locus, alleles, and sample of each row a plan returned.
 //! - `file_stems`, the documented fixture stems named by scanned object-store paths.
 //! - `read_file`, the rows of one file a test wrote, on any registered store.
+//! - `read_recorded_run`, the two tables a measured write recorded for one run id
+//!   under a metrics directory, each as one batch if the run has a file there.
 
 #![expect(
     clippy::as_conversions,
@@ -55,18 +59,21 @@
     reason = "invalid fixture definitions and setup failures are test harness bugs"
 )]
 
+mod failing_writes;
 mod memory_store;
 
 pub use memory_store::MemoryStore;
 
 use crate::format::{InputFormat, OutputFormat};
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
+use crate::metrics_directory::MetricsDirectory;
 use crate::pipeline::{self, PipelineOptions};
+use crate::run_metrics;
 use crate::write::WriteTarget;
 use datafusion::{
     arrow::{
         array::{Array, ArrayRef, StringArray},
-        compute::cast,
+        compute::{cast, concat_batches},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
     },
@@ -75,7 +82,7 @@ use datafusion::{
     prelude::*,
 };
 use futures::{TryStreamExt, future::join_all};
-use object_store::{ObjectMeta, ObjectStore};
+use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
 
 use std::{
     future::Future,
@@ -755,4 +762,57 @@ pub async fn read_file(
     ctx.read_table(Arc::new(ListingTable::try_new(config)?))?
         .collect()
         .await
+}
+
+/// One run's two tables as read back from a metrics directory, each the run's one file as one
+/// batch in the table's schema, or `None` when the run has no file in that table.
+#[derive(Debug)]
+pub struct RecordedRun {
+    pub record: Option<RecordBatch>,
+    pub metrics: Option<RecordBatch>,
+}
+
+/// Reads back what `directory` holds for `run_id` through `ctx`, on whichever registered store
+/// serves the directory.
+///
+/// # Errors
+///
+/// Returns an error if the directory's store is not registered or cannot answer, or a file there
+/// cannot be read in its table's schema.
+pub async fn read_recorded_run(
+    ctx: &SessionContext,
+    directory: &MetricsDirectory,
+    run_id: &str,
+) -> datafusion::error::Result<RecordedRun> {
+    Ok(RecordedRun {
+        record: read_run_table(
+            ctx,
+            &directory.run_record_path(run_id),
+            run_metrics::run_record_schema(),
+        )
+        .await?,
+        metrics: read_run_table(
+            ctx,
+            &directory.run_metrics_path(run_id),
+            run_metrics::run_metrics_schema(),
+        )
+        .await?,
+    })
+}
+
+/// The one Parquet file at `path` as one batch of `schema`, or `None` if there is no file.
+async fn read_run_table(
+    ctx: &SessionContext,
+    path: &str,
+    schema: SchemaRef,
+) -> datafusion::error::Result<Option<RecordBatch>> {
+    let url = ListingTableUrl::parse(path)?;
+    let store = ctx.runtime_env().object_store(&url)?;
+    match store.head(url.prefix()).await {
+        Ok(_) => {}
+        Err(object_store::Error::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let batches = read_file(ctx, path, &InputFormat::PARQUET, Some(Arc::clone(&schema))).await?;
+    Ok(Some(concat_batches(&schema, &batches)?))
 }

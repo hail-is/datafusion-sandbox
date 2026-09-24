@@ -1,5 +1,7 @@
+use super::failing_writes::FailingWrites;
+
 use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
-use object_store::{ObjectStore, memory::InMemory};
+use object_store::{ObjectStore, memory::InMemory, path::Path};
 use std::sync::Arc;
 
 /// A fresh in-memory object store and the URL a session reaches it by.
@@ -22,12 +24,26 @@ impl MemoryStore {
     /// Panics if `name` is not a valid URL authority.
     #[must_use]
     pub fn new(name: &str) -> Self {
+        Self::with_store(name, Arc::new(InMemory::new()))
+    }
+
+    /// An empty store at `memory://{name}` on which every write under `prefix`, a path within
+    /// the store such as `metrics/runs`, fails, and every other operation succeeds as on
+    /// [`MemoryStore::new`]. A test puts its dataset, output, and metrics directory on one such
+    /// store to make exactly one of their writes fail.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` is not a valid URL authority.
+    #[must_use]
+    pub fn failing_writes_under(name: &str, prefix: &str) -> Self {
+        Self::with_store(name, Arc::new(FailingWrites::new(Path::from(prefix))))
+    }
+
+    fn with_store(name: &str, store: Arc<dyn ObjectStore>) -> Self {
         let url = ObjectStoreUrl::parse(format!("memory://{name}"))
             .unwrap_or_else(|error| panic!("parsing the {name} memory store URL: {error}"));
-        Self {
-            url,
-            store: Arc::new(InMemory::new()),
-        }
+        Self { url, store }
     }
 
     /// The URL to construct tables against and to register under.

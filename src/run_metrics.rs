@@ -3,8 +3,9 @@
 //! This module owns both schemas and the two pure functions that fill them: [`run_record_batch`]
 //! turns the facts of one combiner run into its one-row run record, and [`run_metrics_batch`]
 //! turns an executed plan into its run metrics, one row per operator per partition. Neither knows
-//! about datasets, formulations, or storage; the combiner run supplies the facts and the plan and
-//! writes the batches where they go. See
+//! about datasets, formulations, or storage. A formulation and a write target describe their
+//! settings as a [`FormulationRecord`] and a [`WriteRecord`], the combiner run supplies the other
+//! facts and the plan, and the metrics directory writes the batches where they go. See
 //! [ADR 0016](../docs/adr/0016-record-run-metrics-as-wide-parquet-tables.md) for why the tables
 //! are wide and why an unknown metric is dropped rather than failing the run.
 //!
@@ -46,20 +47,13 @@ use std::{
 pub struct RunRecord {
     pub run_id: String,
     pub started_at: SystemTime,
-    pub formulation: String,
-    /// The sample group count of a grouped merge; `None` for every other formulation.
-    pub groups: Option<usize>,
-    /// The split points of an interval merge as the caller spelled them; `None` for every other
-    /// formulation.
-    pub split_points: Option<String>,
+    pub formulation: FormulationRecord,
     pub dataset_path: String,
     pub input_format: String,
-    pub output_format: String,
-    pub compression: Option<String>,
+    pub write: WriteRecord,
     pub threads: usize,
     /// The size of the sample set the run covered.
     pub samples: usize,
-    pub output_path: String,
     pub rows_written: u64,
     /// Wall-clock nanoseconds from resolved settings to the completed write.
     pub run_ns: u64,
@@ -71,27 +65,150 @@ pub struct RunRecord {
     pub peak_rss_bytes: u64,
 }
 
+/// The settings of a formulation the run record holds. A formulation describes itself as one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FormulationRecord {
+    pub name: String,
+    /// The sample group count of a grouped merge; `None` for every other formulation.
+    pub groups: Option<usize>,
+    /// The split points of an interval merge as the caller spelled them; `None` for every other
+    /// formulation.
+    pub split_points: Option<String>,
+}
+
+/// The settings of a write target the run record holds. A write target describes itself as one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriteRecord {
+    pub output_path: String,
+    pub output_format: String,
+    /// The compression mode as a caller would spell it; `None` when the format's default applies.
+    pub compression: Option<String>,
+}
+
+/// One column of the run record table: its name and how to read its one cell from a record.
+struct RecordColumn {
+    name: &'static str,
+    cell: RecordCell,
+}
+
+/// How a run record column reads its cell, which fixes the column's type and whether it may be
+/// null: only the optional variants make a nullable column.
+enum RecordCell {
+    String(fn(&RunRecord) -> &str),
+    OptionalString(fn(&RunRecord) -> Option<&str>),
+    UInt64(fn(&RunRecord) -> u64),
+    OptionalUInt64(fn(&RunRecord) -> Option<u64>),
+    Timestamp(fn(&RunRecord) -> SystemTime),
+}
+
+/// The run record table's columns, in schema order. The schema and the batch both derive from
+/// this table, so adding a field to the record is adding one line here.
+const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
+    RecordColumn {
+        name: "run_id",
+        cell: RecordCell::String(|record| &record.run_id),
+    },
+    RecordColumn {
+        name: "started_at",
+        cell: RecordCell::Timestamp(|record| record.started_at),
+    },
+    RecordColumn {
+        name: "formulation",
+        cell: RecordCell::String(|record| &record.formulation.name),
+    },
+    RecordColumn {
+        name: "groups",
+        cell: RecordCell::OptionalUInt64(|record| record.formulation.groups.map(to_u64)),
+    },
+    RecordColumn {
+        name: "split_points",
+        cell: RecordCell::OptionalString(|record| record.formulation.split_points.as_deref()),
+    },
+    RecordColumn {
+        name: "dataset_path",
+        cell: RecordCell::String(|record| &record.dataset_path),
+    },
+    RecordColumn {
+        name: "input_format",
+        cell: RecordCell::String(|record| &record.input_format),
+    },
+    RecordColumn {
+        name: "output_format",
+        cell: RecordCell::String(|record| &record.write.output_format),
+    },
+    RecordColumn {
+        name: "compression",
+        cell: RecordCell::OptionalString(|record| record.write.compression.as_deref()),
+    },
+    RecordColumn {
+        name: "threads",
+        cell: RecordCell::UInt64(|record| to_u64(record.threads)),
+    },
+    RecordColumn {
+        name: "samples",
+        cell: RecordCell::UInt64(|record| to_u64(record.samples)),
+    },
+    RecordColumn {
+        name: "output_path",
+        cell: RecordCell::String(|record| &record.write.output_path),
+    },
+    RecordColumn {
+        name: "rows_written",
+        cell: RecordCell::UInt64(|record| record.rows_written),
+    },
+    RecordColumn {
+        name: "run_ns",
+        cell: RecordCell::UInt64(|record| record.run_ns),
+    },
+    RecordColumn {
+        name: "execute_ns",
+        cell: RecordCell::UInt64(|record| record.execute_ns),
+    },
+    RecordColumn {
+        name: "peak_rss_bytes",
+        cell: RecordCell::UInt64(|record| record.peak_rss_bytes),
+    },
+];
+
+impl RecordCell {
+    fn data_type(&self) -> DataType {
+        match self {
+            Self::String(_) | Self::OptionalString(_) => DataType::Utf8,
+            Self::UInt64(_) | Self::OptionalUInt64(_) => DataType::UInt64,
+            Self::Timestamp(_) => timestamp_type(),
+        }
+    }
+
+    const fn nullable(&self) -> bool {
+        match self {
+            Self::OptionalString(_) | Self::OptionalUInt64(_) => true,
+            Self::String(_) | Self::UInt64(_) | Self::Timestamp(_) => false,
+        }
+    }
+
+    /// The one-cell column this reads from `record`.
+    fn array(&self, record: &RunRecord) -> Result<ArrayRef> {
+        Ok(match self {
+            Self::String(cell) => Arc::new(StringArray::from(vec![cell(record)])),
+            Self::OptionalString(cell) => Arc::new(StringArray::from(vec![cell(record)])),
+            Self::UInt64(cell) => Arc::new(UInt64Array::from(vec![cell(record)])),
+            Self::OptionalUInt64(cell) => Arc::new(UInt64Array::from(vec![cell(record)])),
+            Self::Timestamp(cell) => {
+                Arc::new(timestamp_array(vec![Some(timestamp_nanos(cell(record))?)]))
+            }
+        })
+    }
+}
+
 /// The schema of the run record table: one row per run.
 #[must_use]
 pub fn run_record_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new("run_id", DataType::Utf8, false),
-        Field::new("started_at", timestamp_type(), false),
-        Field::new("formulation", DataType::Utf8, false),
-        Field::new("groups", DataType::UInt64, true),
-        Field::new("split_points", DataType::Utf8, true),
-        Field::new("dataset_path", DataType::Utf8, false),
-        Field::new("input_format", DataType::Utf8, false),
-        Field::new("output_format", DataType::Utf8, false),
-        Field::new("compression", DataType::Utf8, true),
-        Field::new("threads", DataType::UInt64, false),
-        Field::new("samples", DataType::UInt64, false),
-        Field::new("output_path", DataType::Utf8, false),
-        Field::new("rows_written", DataType::UInt64, false),
-        Field::new("run_ns", DataType::UInt64, false),
-        Field::new("execute_ns", DataType::UInt64, false),
-        Field::new("peak_rss_bytes", DataType::UInt64, false),
-    ]))
+    Arc::new(Schema::new(
+        RUN_RECORD_COLUMNS
+            .iter()
+            .map(|column| Field::new(column.name, column.cell.data_type(), column.cell.nullable()))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// The one-row batch of the run record table holding `record`.
@@ -101,25 +218,10 @@ pub fn run_record_schema() -> SchemaRef {
 /// Returns an error if the start time precedes the Unix epoch or does not fit a nanosecond
 /// timestamp, or if the batch cannot be assembled.
 pub fn run_record_batch(record: &RunRecord) -> Result<RecordBatch> {
-    let started_at = timestamp_nanos(record.started_at)?;
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from(vec![record.run_id.as_str()])),
-        Arc::new(timestamp_array(vec![Some(started_at)])),
-        Arc::new(StringArray::from(vec![record.formulation.as_str()])),
-        Arc::new(UInt64Array::from(vec![record.groups.map(to_u64)])),
-        Arc::new(StringArray::from(vec![record.split_points.as_deref()])),
-        Arc::new(StringArray::from(vec![record.dataset_path.as_str()])),
-        Arc::new(StringArray::from(vec![record.input_format.as_str()])),
-        Arc::new(StringArray::from(vec![record.output_format.as_str()])),
-        Arc::new(StringArray::from(vec![record.compression.as_deref()])),
-        Arc::new(UInt64Array::from(vec![to_u64(record.threads)])),
-        Arc::new(UInt64Array::from(vec![to_u64(record.samples)])),
-        Arc::new(StringArray::from(vec![record.output_path.as_str()])),
-        Arc::new(UInt64Array::from(vec![record.rows_written])),
-        Arc::new(UInt64Array::from(vec![record.run_ns])),
-        Arc::new(UInt64Array::from(vec![record.execute_ns])),
-        Arc::new(UInt64Array::from(vec![record.peak_rss_bytes])),
-    ];
+    let columns = RUN_RECORD_COLUMNS
+        .iter()
+        .map(|column| column.cell.array(record))
+        .collect::<Result<Vec<_>>>()?;
     Ok(RecordBatch::try_new(run_record_schema(), columns)?)
 }
 

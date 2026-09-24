@@ -6,6 +6,7 @@ mod file_order;
 mod format;
 mod formulation;
 mod locus;
+mod metrics_directory;
 mod pipeline;
 mod plan_shape;
 mod process;

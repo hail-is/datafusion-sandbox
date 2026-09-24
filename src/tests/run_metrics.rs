@@ -10,11 +10,11 @@ use crate::{
     locus::LocusRepresentation,
     ordered_frame::OutputLayout,
     pipeline::{self, PipelineOptions},
-    run_metrics::{self, RunRecord},
+    run_metrics::{self, FormulationRecord, RunRecord, WriteRecord},
     sink::{self, CollectingSink, DataSinkTarget},
     tests::support::{
-        grouped_merge, interval_merge, rows_of_operator, string_values, timestamp_values,
-        u64_values,
+        grouped_merge, interval_merge, rows_of_operator, run_record, string_values,
+        timestamp_values, u64_values,
     },
     write::WriteTarget,
 };
@@ -23,8 +23,6 @@ use datafusion::{
     arrow::{
         array::Array,
         datatypes::{DataType, TimeUnit},
-        record_batch::RecordBatch,
-        util::display::array_value_to_string,
     },
     error::Result,
     prelude::{DataFrame, JoinType, SessionContext, col, lit},
@@ -36,21 +34,68 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+/// The run record table's columns, in order, with their types and whether they may be null: the
+/// settings a formulation or a write target may leave unset are the only nullable ones.
 #[test]
-fn the_run_record_batch_carries_the_facts_it_is_given() {
+fn the_run_record_schema_names_its_columns_in_order() {
+    let schema = run_metrics::run_record_schema();
+
+    let columns: Vec<(&str, &DataType, bool)> = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            (
+                field.name().as_str(),
+                field.data_type(),
+                field.is_nullable(),
+            )
+        })
+        .collect();
+    let timestamp = DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()));
+    assert_eq!(
+        columns,
+        [
+            ("run_id", &DataType::Utf8, false),
+            ("started_at", &timestamp, false),
+            ("formulation", &DataType::Utf8, false),
+            ("groups", &DataType::UInt64, true),
+            ("split_points", &DataType::Utf8, true),
+            ("dataset_path", &DataType::Utf8, false),
+            ("input_format", &DataType::Utf8, false),
+            ("output_format", &DataType::Utf8, false),
+            ("compression", &DataType::Utf8, true),
+            ("threads", &DataType::UInt64, false),
+            ("samples", &DataType::UInt64, false),
+            ("output_path", &DataType::Utf8, false),
+            ("rows_written", &DataType::UInt64, false),
+            ("run_ns", &DataType::UInt64, false),
+            ("execute_ns", &DataType::UInt64, false),
+            ("peak_rss_bytes", &DataType::UInt64, false),
+        ]
+    );
+}
+
+/// A record with a distinct value in every field lands each value in the column of the field's
+/// name, so no two columns can have swapped accessors unnoticed.
+#[test]
+fn each_run_record_field_lands_in_the_column_of_its_name() {
     let record = RunRecord {
         run_id: "run-1".to_string(),
         started_at: SystemTime::UNIX_EPOCH + Duration::from_nanos(1_700_000_000_123_456_789),
-        formulation: "grouped-merge".to_string(),
-        groups: Some(3),
-        split_points: None,
+        formulation: FormulationRecord {
+            name: "grouped-merge".to_string(),
+            groups: Some(3),
+            split_points: Some("1:5,2:1".to_string()),
+        },
         dataset_path: "gs://bucket/refs".to_string(),
         input_format: "vortex".to_string(),
-        output_format: "parquet".to_string(),
-        compression: Some("zstd(3)".to_string()),
+        write: WriteRecord {
+            output_path: "gs://bucket/combined.parquet".to_string(),
+            output_format: "parquet".to_string(),
+            compression: Some("zstd(3)".to_string()),
+        },
         threads: 4,
         samples: 50,
-        output_path: "gs://bucket/combined.parquet".to_string(),
         rows_written: 123_456,
         run_ns: 2_000_000_000,
         execute_ns: 1_500_000_000,
@@ -61,29 +106,51 @@ fn the_run_record_batch_carries_the_facts_it_is_given() {
 
     assert_eq!(batch.schema(), run_metrics::run_record_schema());
     assert_eq!(batch.num_rows(), 1);
-    assert_eq!(
-        cells(&batch, 0),
-        [
-            "run-1",
-            "2023-11-14T22:13:20.123456789Z",
-            "grouped-merge",
-            "3",
-            "",
-            "gs://bucket/refs",
-            "vortex",
-            "parquet",
-            "zstd(3)",
-            "4",
-            "50",
-            "gs://bucket/combined.parquet",
-            "123456",
-            "2000000000",
-            "1500000000",
-            "3221225472",
-        ]
-    );
-    assert!(batch.column_by_name("split_points").unwrap().is_null(0));
-    assert!(!batch.column_by_name("compression").unwrap().is_null(0));
+    for (column, expected) in [
+        ("run_id", "run-1"),
+        ("started_at", "2023-11-14T22:13:20.123456789Z"),
+        ("formulation", "grouped-merge"),
+        ("groups", "3"),
+        ("split_points", "1:5,2:1"),
+        ("dataset_path", "gs://bucket/refs"),
+        ("input_format", "vortex"),
+        ("output_format", "parquet"),
+        ("compression", "zstd(3)"),
+        ("threads", "4"),
+        ("samples", "50"),
+        ("output_path", "gs://bucket/combined.parquet"),
+        ("rows_written", "123456"),
+        ("run_ns", "2000000000"),
+        ("execute_ns", "1500000000"),
+        ("peak_rss_bytes", "3221225472"),
+    ] {
+        assert_eq!(string_values(&batch, column), [expected], "{column}");
+    }
+}
+
+/// A formulation without a group count or split points and a format at its default compression
+/// leave those three columns null.
+#[test]
+fn unset_run_record_settings_are_null() {
+    let record = RunRecord {
+        formulation: FormulationRecord {
+            name: "union".to_string(),
+            groups: None,
+            split_points: None,
+        },
+        write: WriteRecord {
+            compression: None,
+            ..run_record("run-1").write
+        },
+        ..run_record("run-1")
+    };
+
+    let batch = run_metrics::run_record_batch(&record).unwrap();
+
+    for column in ["groups", "split_points", "compression"] {
+        assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");
+    }
+    assert_eq!(string_values(&batch, "formulation"), ["union"]);
 }
 
 /// The run metrics table has a column for every metric the operators present in a current
@@ -195,15 +262,6 @@ fn the_run_metrics_schema_has_a_column_for_every_metric_the_present_operators_re
 
 /// One row's place in the plan tree: operator, node, parent, depth, partition.
 type TreeRow = (String, u64, Option<u64>, u64, Option<u64>);
-
-/// Row `row` of `batch` rendered cell by cell, a null rendering as the empty string.
-fn cells(batch: &RecordBatch, row: usize) -> Vec<String> {
-    batch
-        .columns()
-        .iter()
-        .map(|column| array_value_to_string(column, row).unwrap())
-        .collect()
-}
 
 /// A union of two generated tables under a collecting sink yields one row per operator per
 /// partition: the sink, which reports no metrics, is one row of nulls; the coalesce above the

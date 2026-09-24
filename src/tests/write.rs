@@ -8,6 +8,7 @@ use crate::{
     generated::make_range_table,
     locus::LocusRepresentation,
     pipeline::{self, PipelineOptions},
+    run_metrics::WriteRecord,
     write::WriteTarget,
 };
 
@@ -15,6 +16,46 @@ use datafusion::datasource::listing::ListingTableUrl;
 use futures_util::TryStreamExt;
 use object_store::{ObjectStoreExt, path::Path};
 use std::sync::Arc;
+
+/// A write target describes its recorded settings: its output path, its format's name, and its
+/// compression as the caller spelled it, or none at the format's default.
+#[test]
+fn a_write_target_describes_its_recorded_settings() {
+    let record = |output_path: &str, output_format: &str, compression: Option<&str>| WriteRecord {
+        output_path: output_path.to_string(),
+        output_format: output_format.to_string(),
+        compression: compression.map(ToString::to_string),
+    };
+
+    for (output_path, output_format, expected) in [
+        (
+            "gs://bucket/out.parquet",
+            OutputFormat::PARQUET,
+            record("gs://bucket/out.parquet", "parquet", None),
+        ),
+        (
+            "out.parquet",
+            OutputFormat::PARQUET.with_compression("zstd(3)").unwrap(),
+            record("out.parquet", "parquet", Some("zstd(3)")),
+        ),
+        (
+            "out.vortex",
+            OutputFormat::VORTEX,
+            record("out.vortex", "vortex", None),
+        ),
+        (
+            "out.vortex",
+            OutputFormat::VORTEX.with_compression("compact").unwrap(),
+            record("out.vortex", "vortex", Some("compact")),
+        ),
+    ] {
+        let target = WriteTarget {
+            output_path: output_path.to_string(),
+            output_format,
+        };
+        assert_eq!(WriteRecord::from(&target), expected, "{target:?}");
+    }
+}
 
 #[test]
 fn an_ordered_write_uses_its_frames_single_file_layout() {

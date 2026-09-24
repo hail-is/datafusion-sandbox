@@ -8,6 +8,7 @@ use crate::{
     format::OutputFormat,
     locus::StoredOrdering,
     ordered_frame::{OrderedFrame, OutputLayout},
+    run_metrics::WriteRecord,
     sink::{self, ExecutedSink, PartitionedSinkExec, SinkTarget},
 };
 
@@ -89,6 +90,16 @@ impl WriteTarget {
             }),
         };
         sink::run_into(frame, &self.output_path, ordering, target)
+    }
+}
+
+impl From<&WriteTarget> for WriteRecord {
+    fn from(target: &WriteTarget) -> Self {
+        Self {
+            output_path: target.output_path.clone(),
+            output_format: target.output_format.name().to_string(),
+            compression: target.output_format.compression().map(str::to_string),
+        }
     }
 }
 

@@ -2,12 +2,13 @@
 
 use crate::{
     dataset::Dataset,
-    format::{InputFormat, OutputFormat},
+    format::InputFormat,
     formulation::Formulation,
+    metrics_directory::MetricsDirectory,
     ordered_frame::OrderedFrame,
     pipeline::{self, PipelineOptions},
     process,
-    run_metrics::{self, RunRecord},
+    run_metrics::RunRecord,
     sink,
     write::WriteTarget,
 };
@@ -15,14 +16,11 @@ use crate::{
 use datafusion::{
     arrow::{record_batch::RecordBatch, util::pretty::pretty_format_batches},
     datasource::listing::ListingTableUrl,
-    error::{DataFusionError, Result},
-    object_store::{self, ObjectStoreExt},
-    physical_plan::ExecutionPlan,
+    error::Result,
     prelude::{DataFrame, SessionContext},
 };
 use std::{
     num::NonZeroUsize,
-    sync::Arc,
     time::{Instant, SystemTime},
 };
 
@@ -36,13 +34,11 @@ use std::{
 pub enum Action {
     /// Write the rows to the target.
     Write(WriteTarget),
-    /// Write the rows to the target and record the run: its run record at
-    /// `<metrics_directory>/runs/<run_id>.parquet` and its run metrics at
-    /// `<metrics_directory>/metrics/<run_id>.parquet`, both Parquet whatever the output format.
+    /// Write the rows to the target and record the run as `run_id` under the metrics directory.
     /// See ADR 0016.
     MeasuredWrite {
         write: WriteTarget,
-        metrics_directory: String,
+        metrics_directory: MetricsDirectory,
         run_id: String,
     },
     /// Collect the rows in memory.
@@ -76,7 +72,7 @@ impl Action {
 
     /// The directory a measured write records the run under, if this action is one.
     #[must_use]
-    pub fn metrics_directory(&self) -> Option<&str> {
+    pub const fn metrics_directory(&self) -> Option<&MetricsDirectory> {
         match self {
             Self::MeasuredWrite {
                 metrics_directory, ..
@@ -104,14 +100,45 @@ impl CombinerRun {
     ///
     /// # Errors
     ///
-    /// Returns an error if a path is on a store the pipeline cannot serve, a measured write's run
-    /// id already has a run record under its metrics directory, the input dataset cannot be
-    /// resolved, the formulation cannot be planned or executed, or the requested output cannot be
-    /// written. A measured write that fails records nothing: the refusal of a repeated id comes
-    /// before dataset discovery, and the tables are written only after the data write succeeds.
+    /// Returns an error if a path is on a store the pipeline cannot serve, or for any reason
+    /// [`CombinerRun::execute_in`] gives.
     pub fn execute(self) -> Result<Outcome> {
-        let started_at = SystemTime::now();
-        let started = Instant::now();
+        let started = Started::now();
+        let options = PipelineOptions::for_paths(
+            self.threads,
+            [
+                Some(self.input_path.as_str()),
+                self.action.output_path(),
+                self.action.metrics_directory().map(MetricsDirectory::path),
+            ]
+            .into_iter()
+            .flatten(),
+        )?;
+        pipeline::run(
+            move |ctx| async move { self.run(&ctx, started).await },
+            options,
+        )
+    }
+
+    /// Executes the run on `ctx`, inside a pipeline whose session serves every path the run
+    /// names. A measured write's run record times the run from this call.
+    ///
+    /// The caller builds the session, so the record describes the run rather than the session:
+    /// its `run_ns` leaves out the runtime and session setup that [`CombinerRun::execute`]
+    /// includes, and its `threads` is the run's thread count, whatever the session runs on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a measured write's run id already has a run record under its metrics
+    /// directory, the input dataset cannot be resolved, the formulation cannot be planned or
+    /// executed, or the requested output cannot be written. A measured write that fails records
+    /// nothing: the refusal of a repeated id comes before dataset discovery, and the run is
+    /// recorded only after the data write succeeds.
+    pub async fn execute_in(self, ctx: &SessionContext) -> Result<Outcome> {
+        self.run(ctx, Started::now()).await
+    }
+
+    async fn run(self, ctx: &SessionContext, started: Started) -> Result<Outcome> {
         let Self {
             formulation,
             input_path,
@@ -121,186 +148,108 @@ impl CombinerRun {
             row_limit,
             threads,
         } = self;
-        let options = PipelineOptions::for_paths(
-            threads,
-            [
-                Some(input_path.as_str()),
-                action.output_path(),
-                action.metrics_directory(),
-            ]
-            .into_iter()
-            .flatten(),
-        )?;
+        let rows = || {
+            plan_rows(
+                ctx,
+                &formulation,
+                &input_path,
+                &input_format,
+                sample_set.as_deref(),
+                row_limit,
+            )
+        };
 
-        pipeline::run(
-            move |ctx| async move {
-                if let Action::MeasuredWrite {
-                    metrics_directory,
+        match action {
+            Action::Write(target) => Ok(Outcome::RowsWritten(
+                target.write(rows().await?.0).await?.rows_written,
+            )),
+            Action::MeasuredWrite {
+                write,
+                metrics_directory,
+                run_id,
+            } => {
+                let run = metrics_directory.unrecorded(ctx, &run_id).await?;
+                let (ordered, samples) = rows().await?;
+                let executed = write.write(ordered).await?;
+                let run_ns = elapsed_ns(started.instant);
+                let peak_rss_bytes = process::peak_rss_bytes()?;
+                let record = RunRecord {
                     run_id,
-                    ..
-                } = &action
-                {
-                    refuse_recorded_run(&ctx, metrics_directory, run_id).await?;
-                }
-                let table_path = ListingTableUrl::parse(&input_path)?;
-                let dataset = Dataset::discover(
-                    &ctx,
-                    table_path,
-                    input_format.clone(),
-                    formulation.required_ordering(),
-                    None,
-                )
-                .await?;
-                let dataset = match sample_set {
-                    Some(sample_set) => dataset.restrict_to(&sample_set)?,
-                    None => dataset,
+                    started_at: started.at,
+                    formulation: (&formulation).into(),
+                    dataset_path: input_path,
+                    input_format: input_format.name().to_string(),
+                    write: (&write).into(),
+                    threads: threads.get(),
+                    samples,
+                    rows_written: executed.rows_written,
+                    run_ns,
+                    execute_ns: executed.execute_ns,
+                    peak_rss_bytes,
                 };
-                let samples = dataset.sample_set().len();
-                let ordered = formulation.plan(&ctx, &dataset).await?;
-                let ordered = match row_limit {
-                    Some(limit) => ordered.limit(limit)?,
-                    None => ordered,
-                };
-
-                match action {
-                    Action::Write(target) => Ok(Outcome::RowsWritten(
-                        target.write(ordered).await?.rows_written,
-                    )),
-                    Action::MeasuredWrite {
-                        write,
-                        metrics_directory,
-                        run_id,
-                    } => {
-                        let executed = write.write(ordered).await?;
-                        let run_ns = elapsed_ns(started);
-                        let peak_rss_bytes = process::peak_rss_bytes()?;
-                        let record = RunRecord {
-                            run_id,
-                            started_at,
-                            formulation: formulation.to_string(),
-                            groups: formulation.groups().map(NonZeroUsize::get),
-                            split_points: formulation.split_points().map(ToString::to_string),
-                            dataset_path: input_path,
-                            input_format: input_format.name().to_string(),
-                            output_format: write.output_format.name().to_string(),
-                            compression: write.output_format.compression().map(str::to_string),
-                            threads: threads.get(),
-                            samples,
-                            output_path: write.output_path,
-                            rows_written: executed.rows_written,
-                            run_ns,
-                            execute_ns: executed.execute_ns,
-                            peak_rss_bytes,
-                        };
-                        record_run(&ctx, &metrics_directory, &record, &executed.plan).await
-                    }
-                    Action::Collect => {
-                        let (frame, sink) = sink::collect(ordered)?;
-                        frame.collect().await?;
-                        Ok(Outcome::Batches(sink.take()))
-                    }
-                    Action::Explain { write } => explain(sink_frame(ordered, write)?, false).await,
-                    Action::ExplainAnalyze { write } => {
-                        explain(sink_frame(ordered, write)?, true).await
-                    }
-                }
-            },
-            options,
-        )
+                Ok(Outcome::Measured {
+                    rows_written: executed.rows_written,
+                    unrecorded_metrics: run.record(ctx, &record, &executed.plan).await?,
+                })
+            }
+            Action::Collect => {
+                let (frame, sink) = sink::collect(rows().await?.0)?;
+                frame.collect().await?;
+                Ok(Outcome::Batches(sink.take()))
+            }
+            Action::Explain { write } => explain(sink_frame(rows().await?.0, write)?, false).await,
+            Action::ExplainAnalyze { write } => {
+                explain(sink_frame(rows().await?.0, write)?, true).await
+            }
+        }
     }
 }
 
-/// The subdirectory of a metrics directory holding the run record table.
-const RUNS_TABLE: &str = "runs";
-/// The subdirectory of a metrics directory holding the run metrics table.
-const METRICS_TABLE: &str = "metrics";
+/// When a run started, by the wall clock it records and the monotonic clock it times with.
+#[derive(Clone, Copy)]
+struct Started {
+    at: SystemTime,
+    instant: Instant,
+}
 
-/// Whether `run_id` already has a run record under `metrics_directory`, on whichever object
-/// store the session serves the directory from.
-///
-/// The run record is what marks a run as recorded: a measured write writes it last, so a run
-/// whose run metrics failed to write has no record, and its id may be retried.
-///
-/// # Errors
-///
-/// Returns an error if the metrics directory is on a store the session does not serve, or the
-/// store cannot answer.
-pub(crate) async fn run_is_recorded(
-    ctx: &SessionContext,
-    metrics_directory: &str,
-    run_id: &str,
-) -> Result<bool> {
-    let url = ListingTableUrl::parse(run_table_path(metrics_directory, RUNS_TABLE, run_id))?;
-    let store = ctx.runtime_env().object_store(&url)?;
-    match store.head(url.prefix()).await {
-        Ok(_) => Ok(true),
-        Err(object_store::Error::NotFound { .. }) => Ok(false),
-        Err(error) => Err(error.into()),
+impl Started {
+    fn now() -> Self {
+        Self {
+            at: SystemTime::now(),
+            instant: Instant::now(),
+        }
     }
 }
 
-/// Fails a measured write of `run_id` under `metrics_directory` when the id already has a run
-/// record there, so that a repeated id cannot replace a recorded run. See ADR 0016.
-async fn refuse_recorded_run(
+/// The formulation's rows over the dataset at `input_path`, restricted to `sample_set` and
+/// limited to `row_limit` rows when given, and the size of the sample set they cover.
+async fn plan_rows(
     ctx: &SessionContext,
-    metrics_directory: &str,
-    run_id: &str,
-) -> Result<()> {
-    if run_is_recorded(ctx, metrics_directory, run_id).await? {
-        return Err(DataFusionError::Configuration(format!(
-            "run id '{run_id}' already has a run record at '{}'; a measured write does not replace a recorded run",
-            run_table_path(metrics_directory, RUNS_TABLE, run_id)
-        )));
-    }
-    Ok(())
-}
-
-/// Records a measured write: writes the run metrics of `plan` and then `record` under
-/// `metrics_directory`, as Parquet, and hands back the outcome. The run record goes last because
-/// its presence is what [`run_is_recorded`] checks: a failure between the two writes leaves run
-/// metrics without a record, which a retry of the same id replaces rather than being refused.
-async fn record_run(
-    ctx: &SessionContext,
-    metrics_directory: &str,
-    record: &RunRecord,
-    plan: &Arc<dyn ExecutionPlan>,
-) -> Result<Outcome> {
-    let metrics = run_metrics::run_metrics_batch(&record.run_id, plan)?;
-    write_table(
+    formulation: &Formulation,
+    input_path: &str,
+    input_format: &InputFormat,
+    sample_set: Option<&[String]>,
+    row_limit: Option<usize>,
+) -> Result<(OrderedFrame, usize)> {
+    let dataset = Dataset::discover(
         ctx,
-        metrics.batch,
-        &run_table_path(metrics_directory, METRICS_TABLE, &record.run_id),
+        ListingTableUrl::parse(input_path)?,
+        input_format.clone(),
+        formulation.required_ordering(),
+        None,
     )
     .await?;
-    write_table(
-        ctx,
-        run_metrics::run_record_batch(record)?,
-        &run_table_path(metrics_directory, RUNS_TABLE, &record.run_id),
-    )
-    .await?;
-    Ok(Outcome::Measured {
-        rows_written: record.rows_written,
-        unrecorded_metrics: metrics.unrecorded,
-    })
-}
-
-/// The path of the run `run_id`'s file in the table `table` under `metrics_directory`.
-fn run_table_path(metrics_directory: &str, table: &str, run_id: &str) -> String {
-    format!(
-        "{}/{table}/{run_id}.parquet",
-        metrics_directory.trim_end_matches('/')
-    )
-}
-
-/// Writes `batch` as one Parquet file at `path`.
-async fn write_table(ctx: &SessionContext, batch: RecordBatch, path: &str) -> Result<()> {
-    WriteTarget {
-        output_path: path.to_string(),
-        output_format: OutputFormat::PARQUET,
-    }
-    .write_unordered(ctx.read_batch(batch)?)
-    .await?;
-    Ok(())
+    let dataset = match sample_set {
+        Some(sample_set) => dataset.restrict_to(sample_set)?,
+        None => dataset,
+    };
+    let samples = dataset.sample_set().len();
+    let ordered = formulation.plan(ctx, &dataset).await?;
+    let ordered = match row_limit {
+        Some(limit) => ordered.limit(limit)?,
+        None => ordered,
+    };
+    Ok((ordered, samples))
 }
 
 /// Wall-clock nanoseconds since `since`, saturating at `u64::MAX`.
