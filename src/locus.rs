@@ -54,6 +54,28 @@ impl LocusOrdering {
             representation,
         }
     }
+
+    /// Detects the locus representation of `schema` and expands this ordering under it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `schema` has no supported locus representation or lacks a stored
+    /// ordering column.
+    pub fn validate_against(
+        &self,
+        schema: &SchemaRef,
+    ) -> Result<(LocusRepresentation, StoredOrdering)> {
+        let representation = LocusRepresentation::detect(schema)?;
+        let stored_ordering = self.expand(representation);
+        for column in stored_ordering.column_names() {
+            if schema.field_with_name(&column).is_err() {
+                return Err(DataFusionError::Plan(format!(
+                    "locus ordering column '{column}' is missing from the schema"
+                )));
+            }
+        }
+        Ok((representation, stored_ordering))
+    }
 }
 
 /// A locus ordering expanded into the fields used by one stored representation.

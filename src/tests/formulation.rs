@@ -25,7 +25,6 @@ mod interval_merge;
 use crate::fixture;
 
 use crate::{
-    dataset::Dataset,
     format::OutputFormat,
     formulation::Formulation,
     locus::{LocusOrdering, LocusRepresentation, StoredOrdering},
@@ -33,6 +32,7 @@ use crate::{
     pipeline::{self, PipelineOptions},
     run_metrics::FormulationRecord,
     sink,
+    stored::dataset::Dataset,
     tests::{
         plan_shape::PlanShape,
         support::{grouped_merge, hostile_config, interval_merge},

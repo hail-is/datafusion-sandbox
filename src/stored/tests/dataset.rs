@@ -3,14 +3,14 @@
     reason = "the test controls the concrete array types erased behind ArrayRef"
 )]
 
-use super::plan_shape::PlanShape;
 use crate::fixture::{self, block_on};
+use crate::tests::plan_shape::PlanShape;
 
 use crate::{
-    dataset::{Dataset, read_sorted_table},
     format::{InputFormat, OutputFormat},
     locus::{Locus, LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
+    stored::dataset::Dataset,
     write::WriteTarget,
 };
 use datafusion::{
@@ -29,106 +29,6 @@ use datafusion::{
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
 use std::sync::Arc;
-
-#[test]
-fn read_sorted_table_reads_a_file_and_a_directory_in_locus_order() {
-    for (format, format_name) in [
-        (fixture::FixtureFormat::Parquet, "parquet"),
-        (fixture::FixtureFormat::Vortex, "vortex"),
-    ] {
-        for (representation, representation_name) in [
-            (LocusRepresentation::ContigPosition, "contig-position"),
-            (LocusRepresentation::Packed, "packed"),
-        ] {
-            let first = vec![Locus::new(1, 1).unwrap(), Locus::new(1, 2).unwrap()];
-            let second = vec![Locus::new(1, 3).unwrap(), Locus::new(2, 1).unwrap()];
-            let fixture = fixture::sorted_table_fixture(
-                &format!("sorted-table-{format_name}-{representation_name}"),
-                format,
-                representation,
-                vec![first.clone(), second.clone()],
-            );
-
-            pipeline::run(
-                move |ctx| {
-                    fixture.register(&ctx);
-                    async move {
-                        for (path, expected) in [
-                            (fixture.file_path(0).clone(), first.clone()),
-                            (fixture.table_path().clone(), [first, second].concat()),
-                        ] {
-                            let frame = read_sorted_table(
-                                &ctx,
-                                path,
-                                fixture.input_format(),
-                                LocusOrdering::locus(),
-                            )
-                            .await?;
-                            let actual = frame
-                                .collect()
-                                .await?
-                                .iter()
-                                .map(|batch| representation.loci(batch))
-                                .collect::<Result<Vec<_>>>()?
-                                .into_iter()
-                                .flatten()
-                                .collect::<Vec<_>>();
-                            assert_eq!(actual, expected, "{format_name} {representation_name}");
-                        }
-                        Ok(())
-                    }
-                },
-                PipelineOptions::single_threaded(),
-            )
-            .unwrap();
-        }
-    }
-}
-
-#[test]
-fn read_sorted_table_ignores_files_with_another_formats_extension() {
-    let expected = vec![Locus::new(1, 1).unwrap(), Locus::new(1, 2).unwrap()];
-    let fixture = fixture::sorted_table_fixture(
-        "sorted-table-extension-filter",
-        fixture::FixtureFormat::Vortex,
-        LocusRepresentation::Packed,
-        vec![expected.clone()],
-    );
-
-    pipeline::run(
-        move |ctx| {
-            fixture.register(&ctx);
-            async move {
-                let ignored =
-                    Path::from(format!("{}/ignored.parquet", fixture.table_path().prefix()));
-                fixture
-                    .store()
-                    .put(&ignored, b"not parquet".to_vec().into())
-                    .await?;
-                let frame = read_sorted_table(
-                    &ctx,
-                    fixture.table_path().clone(),
-                    fixture.input_format(),
-                    LocusOrdering::locus(),
-                )
-                .await?;
-                let actual = frame
-                    .collect()
-                    .await?
-                    .iter()
-                    .map(|batch| fixture.representation().loci(batch))
-                    .collect::<Result<Vec<_>>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>();
-                assert_eq!(actual, expected);
-                Ok(())
-            }
-        },
-        PipelineOptions::single_threaded(),
-    )
-    .unwrap();
-}
 
 #[test]
 fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {

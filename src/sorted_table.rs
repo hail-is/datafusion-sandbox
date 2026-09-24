@@ -28,7 +28,7 @@
 //! Deliberately excluded listing-table capabilities:
 //! - File-group repartitioning contradicts the single ordered partition, per ADR 0007.
 //! - Path-derived Hive columns are unnecessary; the caller supplies the attached scalar.
-//! - Listing and schema inference belong to the dataset, per ADR 0005.
+//! - Listing and schema inference belong to the caller, per ADR 0005.
 //! - Table writes go through the format's sink instead.
 //! - Footer sort order is not ordering evidence: our writers do not record it, Vortex
 //!   has no equivalent, and ADR 0011 already trusts the writer beyond that evidence.

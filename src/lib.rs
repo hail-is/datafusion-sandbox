@@ -2,7 +2,6 @@
 //!
 //! - [`combiner_run`] resolves and executes one combiner run.
 //! - [`cpu_runtime`] builds the runtime used for plan execution.
-//! - [`dataset`] describes and reads stored datasets.
 //! - [`file_order`] recovers the order of a sorted table's files from their statistics.
 //! - [`fixture`] builds small stored datasets for tests.
 //! - [`mod@format`] describes supported input and output file formats.
@@ -17,7 +16,8 @@
 //! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of
 //!   every partition.
 //! - [`sorted_table`] scans files as one ordered partition.
-//! - [`split_points`] computes exact row-balanced split points from a stored sorted table.
+//! - [`split_points`] computes exact row-balanced split points from a locus-sorted table.
+//! - [`stored`] reads stored tables under a locus ordering: datasets and locus-sorted tables.
 //! - [`mod@write`] builds and executes file writes.
 //! - [`generated`] builds generated tables for tests and benchmarks.
 //!
@@ -43,7 +43,6 @@ static ALLOCATOR: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
 pub mod combiner_run;
 pub mod cpu_runtime;
-pub mod dataset;
 pub mod file_order;
 pub mod fixture;
 pub mod format;
@@ -58,6 +57,7 @@ pub mod run_metrics;
 pub mod sink;
 pub mod sorted_table;
 pub mod split_points;
+pub mod stored;
 pub mod write;
 
 #[cfg(test)]

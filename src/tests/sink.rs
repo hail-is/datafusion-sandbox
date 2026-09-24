@@ -3,13 +3,13 @@
 use super::plan_shape::PlanShape;
 use crate::fixture::{self, DatasetFixture, FixtureFormat, SAMPLES, block_on};
 use crate::{
-    dataset::Dataset,
     formulation::Formulation,
     generated::make_range_table,
     locus::LocusRepresentation,
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
     sink::{self, CollectingSink, DataSinkTarget, PartitionedSinkExec, SinkTarget},
+    stored::dataset::Dataset,
 };
 
 use datafusion::{

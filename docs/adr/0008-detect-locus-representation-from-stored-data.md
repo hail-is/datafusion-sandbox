@@ -28,8 +28,8 @@ and datasets validate stored facts.
 write an ordinary UTF-8 array, because that is what both readers infer: DataFusion's Parquet format
 forces view types during schema inference by default, and vortex-arrow maps its UTF-8 dtype to a
 view type. The dataset test
-`inferred_schema_locus_fields_match_the_representation_fields` in `src/tests/dataset.rs` pins those
-upstream defaults for both formats and both representations.
+`inferred_schema_locus_fields_match_the_representation_fields` in `src/stored/tests/dataset.rs`
+pins those upstream defaults for both formats and both representations.
 
 Conversion belongs only to the Python generator. It packs the contig ordinal into the high 32 bits
 and the position into the low 32 bits, drops `contig` and `position`, and writes the result to a

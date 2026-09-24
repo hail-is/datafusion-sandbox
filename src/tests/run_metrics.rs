@@ -2,7 +2,6 @@
 //! in-memory object stores.
 
 use crate::{
-    dataset::Dataset,
     fixture::{self, FixtureFormat, MemoryStore, SAMPLES},
     format::OutputFormat,
     formulation::Formulation,
@@ -12,6 +11,7 @@ use crate::{
     pipeline::{self, PipelineOptions},
     run_metrics::{self, FormulationRecord, RunRecord, WriteRecord},
     sink::{self, CollectingSink, DataSinkTarget},
+    stored::dataset::Dataset,
     tests::support::{
         grouped_merge, interval_merge, rows_of_operator, run_record, string_values,
         timestamp_values, u64_values,

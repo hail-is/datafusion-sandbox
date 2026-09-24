@@ -9,10 +9,10 @@ mod combine_refs_union;
 mod tests;
 
 use crate::{
-    dataset::Dataset,
     locus::{LocusOrdering, SplitPoints},
     ordered_frame::{OrderedFrame, OutputLayout},
     run_metrics::FormulationRecord,
+    stored::dataset::Dataset,
 };
 
 use datafusion::{error::Result, prelude::*};

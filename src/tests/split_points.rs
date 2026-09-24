@@ -1,13 +1,9 @@
-use super::{plan_shape::PlanShape, support::hostile_config};
 use crate::{
-    dataset::{Dataset, read_sorted_table},
-    fixture::{self, FixtureFormat},
-    format::OutputFormat,
-    formulation::Formulation,
-    locus::{Locus, LocusOrdering, LocusRepresentation},
+    fixture::{self, FixtureFormat, SortedTableFixture},
+    format::InputFormat,
+    locus::{Locus, LocusRepresentation, SplitPoints},
     pipeline::{self, PipelineOptions},
-    split_points::{row_balanced_from_frame, row_balanced_plan},
-    write::WriteTarget,
+    split_points,
 };
 
 use datafusion::{
@@ -16,13 +12,12 @@ use datafusion::{
         record_batch::RecordBatch,
     },
     common::DataFusionError,
-    datasource::source::DataSourceExec,
-    physical_plan::{
-        coalesce_partitions::CoalescePartitionsExec, filter::FilterExec,
-        repartition::RepartitionExec, sorts::sort::SortExec, windows::BoundedWindowAggExec,
-    },
-    prelude::SessionContext,
+    datasource::listing::ListingTableUrl,
+    error::Result,
+    execution::object_store::ObjectStoreUrl,
+    parquet::arrow::ArrowWriter,
 };
+use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
 use std::{num::NonZeroUsize, sync::Arc};
 
 #[test]
@@ -51,32 +46,20 @@ fn row_balanced_chooses_the_loci_at_floor_indices() {
                     representation,
                     files,
                 );
-                pipeline::run(
-                    move |ctx| {
-                        fixture.register(&ctx);
-                        async move {
-                            let path = if layout == "file" {
-                                fixture.file_path(0).clone()
-                            } else {
-                                fixture.table_path().clone()
-                            };
-                            let frame = read_sorted_table(
-                                &ctx,
-                                path,
-                                fixture.input_format(),
-                                LocusOrdering::locus(),
-                            )
-                            .await?;
-                            let points =
-                                row_balanced_from_frame(frame, NonZeroUsize::new(4).unwrap())
-                                    .await?;
-                            assert_eq!(points.to_string(), "1:3,1:6,1:8");
-                            Ok(())
-                        }
-                    },
-                    PipelineOptions::single_threaded(),
-                )
-                .unwrap();
+                let path = if layout == "file" {
+                    fixture.file_path(0).clone()
+                } else {
+                    fixture.table_path().clone()
+                };
+                let input_format = fixture.input_format();
+
+                let points = row_balanced(fixture, path, input_format, 4).unwrap();
+
+                assert_eq!(
+                    points.to_string(),
+                    "1:3,1:6,1:8",
+                    "{format_name} {representation_name} {layout}"
+                );
             }
         }
     }
@@ -99,27 +82,9 @@ fn row_balanced_handles_several_row_and_interval_counts() {
             vec![loci],
         );
 
-        pipeline::run(
-            move |ctx| {
-                fixture.register(&ctx);
-                async move {
-                    let frame = read_sorted_table(
-                        &ctx,
-                        fixture.file_path(0).clone(),
-                        fixture.input_format(),
-                        LocusOrdering::locus(),
-                    )
-                    .await?;
-                    let points =
-                        row_balanced_from_frame(frame, NonZeroUsize::new(intervals).unwrap())
-                            .await?;
-                    assert_eq!(points.to_string(), expected, "{name}");
-                    Ok(())
-                }
-            },
-            PipelineOptions::single_threaded(),
-        )
-        .unwrap();
+        let points = row_balanced_over_table(fixture, intervals).unwrap();
+
+        assert_eq!(points.to_string(), expected, "{name}");
     }
 }
 
@@ -132,23 +97,8 @@ fn row_balanced_rejects_a_table_with_no_rows() {
         vec![Vec::new()],
     );
 
-    let error = pipeline::run(
-        move |ctx| {
-            fixture.register(&ctx);
-            async move {
-                let frame = read_sorted_table(
-                    &ctx,
-                    fixture.file_path(0).clone(),
-                    fixture.input_format(),
-                    LocusOrdering::locus(),
-                )
-                .await?;
-                row_balanced_from_frame(frame, NonZeroUsize::new(2).unwrap()).await
-            }
-        },
-        PipelineOptions::single_threaded(),
-    )
-    .expect_err("an empty table has no split-point row");
+    let error =
+        row_balanced_over_table(fixture, 2).expect_err("an empty table has no split-point row");
 
     assert!(matches!(error, DataFusionError::Configuration(_)));
     assert!(error.to_string().contains("table has no rows"), "{error}");
@@ -176,23 +126,8 @@ fn row_balanced_rejects_target_rows_on_the_same_locus() {
         vec![loci],
     );
 
-    let error = pipeline::run(
-        move |ctx| {
-            fixture.register(&ctx);
-            async move {
-                let frame = read_sorted_table(
-                    &ctx,
-                    fixture.file_path(0).clone(),
-                    fixture.input_format(),
-                    LocusOrdering::locus(),
-                )
-                .await?;
-                row_balanced_from_frame(frame, NonZeroUsize::new(4).unwrap()).await
-            }
-        },
-        PipelineOptions::single_threaded(),
-    )
-    .expect_err("two target rows at one locus cannot define distinct intervals");
+    let error = row_balanced_over_table(fixture, 4)
+        .expect_err("two target rows at one locus cannot define distinct intervals");
 
     assert!(matches!(error, DataFusionError::Configuration(_)));
     let message = error.to_string();
@@ -212,23 +147,8 @@ fn row_balanced_rejects_when_two_targets_name_the_same_row() {
         vec![vec![Locus::new(1, 1).unwrap(), Locus::new(1, 2).unwrap()]],
     );
 
-    let error = pipeline::run(
-        move |ctx| {
-            fixture.register(&ctx);
-            async move {
-                let frame = read_sorted_table(
-                    &ctx,
-                    fixture.file_path(0).clone(),
-                    fixture.input_format(),
-                    LocusOrdering::locus(),
-                )
-                .await?;
-                row_balanced_from_frame(frame, NonZeroUsize::new(4).unwrap()).await
-            }
-        },
-        PipelineOptions::single_threaded(),
-    )
-    .expect_err("one row cannot supply two strictly increasing split points");
+    let error = row_balanced_over_table(fixture, 4)
+        .expect_err("one row cannot supply two strictly increasing split points");
 
     assert!(matches!(error, DataFusionError::Configuration(_)));
     let message = error.to_string();
@@ -240,15 +160,61 @@ fn row_balanced_rejects_when_two_targets_name_the_same_row() {
 }
 
 #[test]
+fn row_balanced_rejects_a_vortex_path_read_as_parquet_before_computing() {
+    let fixture = fixture::sorted_table_fixture(
+        "row-balanced-format-mismatch",
+        FixtureFormat::Vortex,
+        LocusRepresentation::Packed,
+        vec![vec![Locus::new(1, 1).unwrap(), Locus::new(1, 2).unwrap()]],
+    );
+    let path = fixture.file_path(0).clone();
+    assert!(path.as_str().ends_with(".vortex"), "{}", path.as_str());
+
+    let error = row_balanced(fixture, path, InputFormat::PARQUET, 2)
+        .expect_err("a Vortex file is not a Parquet table");
+
+    assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
+    assert!(
+        error.to_string().contains("no input files found"),
+        "{error}"
+    );
+}
+
+#[test]
+fn row_balanced_rejects_fewer_than_two_intervals() {
+    let fixture = fixture::sorted_table_fixture(
+        "row-balanced-one-interval",
+        FixtureFormat::Vortex,
+        LocusRepresentation::Packed,
+        vec![vec![Locus::new(1, 1).unwrap(), Locus::new(1, 2).unwrap()]],
+    );
+
+    let error = row_balanced_over_table(fixture, 1).expect_err("one interval has no split point");
+
+    assert!(matches!(error, DataFusionError::Configuration(_)));
+    assert!(error.to_string().contains("at least 2"), "{error}");
+}
+
+#[test]
 fn row_balanced_rejects_a_contig_name_without_an_ordinal() {
     let error = pipeline::run(
         |ctx| async move {
+            let store = Arc::new(InMemory::new());
+            ctx.register_object_store(ObjectStoreUrl::parse("memory://")?.as_ref(), store.clone());
             let contigs: ArrayRef = Arc::new(StringViewArray::from(vec!["chr01", "chrX"]));
             let positions: ArrayRef = Arc::new(Int32Array::from(vec![1, 2]));
             let batch =
                 RecordBatch::try_from_iter(vec![("contig", contigs), ("position", positions)])?;
-            let frame = ctx.read_batch(batch)?;
-            row_balanced_from_frame(frame, NonZeroUsize::new(2).unwrap()).await
+            let mut bytes = Vec::new();
+            let mut writer = ArrowWriter::try_new(&mut bytes, batch.schema(), None)?;
+            writer.write(&batch)?;
+            writer.close()?;
+            store
+                .put(&Path::from("foreign-contig.parquet"), bytes.into())
+                .await?;
+            let table_path = ListingTableUrl::parse("memory:///foreign-contig.parquet")?;
+            let intervals = NonZeroUsize::new(2).unwrap();
+            split_points::row_balanced(&ctx, table_path, InputFormat::PARQUET, intervals).await
         },
         PipelineOptions::single_threaded(),
     )
@@ -261,59 +227,25 @@ fn row_balanced_rejects_a_contig_name_without_an_ordinal() {
     );
 }
 
-#[test]
-fn row_balanced_plan_is_one_ordered_scan_window_and_filter() {
-    let fixture = Arc::clone(fixture::dataset_fixture(
-        FixtureFormat::Parquet,
-        LocusRepresentation::Packed,
-    ));
+/// Computes split points over the fixture's whole table directory under its own format.
+fn row_balanced_over_table(fixture: SortedTableFixture, intervals: usize) -> Result<SplitPoints> {
+    let path = fixture.table_path().clone();
+    let input_format = fixture.input_format();
+    row_balanced(fixture, path, input_format, intervals)
+}
 
+fn row_balanced(
+    fixture: SortedTableFixture,
+    path: ListingTableUrl,
+    input_format: InputFormat,
+    intervals: usize,
+) -> Result<SplitPoints> {
+    let intervals = NonZeroUsize::new(intervals).unwrap();
     pipeline::run(
-        move |_| async move {
-            let ctx = SessionContext::new_with_config(hostile_config(8));
+        move |ctx| {
             fixture.register(&ctx);
-            let dataset = Dataset::discover(
-                &ctx,
-                fixture.table_path().clone(),
-                fixture.input_format(),
-                LocusOrdering::locus_then_alleles(),
-                None,
-            )
-            .await?;
-            let formulation = Formulation::CombineRefsIntervalMerge {
-                split_points: "1:3,2:2".parse()?,
-            };
-            let directory = format!("{}row-balanced-plan-input", fixture.table_path().as_str());
-            let ordered = formulation.plan(&ctx, &dataset).await?;
-            WriteTarget {
-                output_path: directory.clone(),
-                output_format: OutputFormat::PARQUET,
-            }
-            .write(ordered)
-            .await?;
-            let frame = read_sorted_table(
-                &ctx,
-                datafusion::datasource::listing::ListingTableUrl::parse(directory)?,
-                fixture.input_format(),
-                LocusOrdering::locus(),
-            )
-            .await?;
-            let (_, _, selected) = row_balanced_plan(frame, NonZeroUsize::new(4).unwrap()).await?;
-            let plan = selected.create_physical_plan().await?;
-            let shape = PlanShape::of(&plan);
-
-            assert_eq!(shape.nodes_of::<DataSourceExec>().len(), 1, "{shape}");
-            assert_eq!(shape.nodes_of::<BoundedWindowAggExec>().len(), 1, "{shape}");
-            assert_eq!(shape.nodes_of::<FilterExec>().len(), 1, "{shape}");
-            assert!(shape.nodes_of::<SortExec>().is_empty(), "{shape}");
-            assert!(
-                shape.nodes_of::<CoalescePartitionsExec>().is_empty(),
-                "{shape}"
-            );
-            assert!(shape.nodes_of::<RepartitionExec>().is_empty(), "{shape}");
-            Ok::<_, DataFusionError>(())
+            async move { split_points::row_balanced(&ctx, path, input_format, intervals).await }
         },
         PipelineOptions::single_threaded(),
     )
-    .unwrap();
 }

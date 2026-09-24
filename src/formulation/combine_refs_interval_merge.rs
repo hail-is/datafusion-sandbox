@@ -1,6 +1,6 @@
 use super::combine_refs_union;
-use crate::dataset::{Dataset, union_or_single};
 use crate::locus::{SplitPoints, StoredOrdering};
+use crate::stored::dataset::{Dataset, union_or_single};
 
 use datafusion::{error::Result, prelude::*};
 

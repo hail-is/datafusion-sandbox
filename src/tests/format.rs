@@ -1,11 +1,11 @@
 use crate::{
-    dataset::Dataset,
     fixture::{self, FixtureFormat, MemoryStore},
     format::OutputFormat,
     formulation::Formulation,
     generated::make_range_table,
     locus::LocusRepresentation,
     pipeline::{self, PipelineOptions},
+    stored::dataset::Dataset,
     write::WriteTarget,
 };
 

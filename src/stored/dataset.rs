@@ -1,6 +1,6 @@
-//! Stored tables where a declared locus ordering meets their encoded files, including datasets
-//! with sample sets and standalone sorted tables.
+//! Datasets: stored per-sample tables under a declared locus ordering and a sample set.
 
+use super::{list_files_by_extension, normalize_table_path};
 use crate::{
     format::InputFormat,
     locus::{LocusOrdering, LocusRepresentation, StoredOrdering},
@@ -18,8 +18,7 @@ use datafusion::{
     logical_expr::{LogicalPlan, logical_plan::Union},
     prelude::*,
 };
-use futures_util::{StreamExt, TryStreamExt};
-use object_store::ObjectMeta;
+use futures_util::StreamExt;
 use std::{collections::BTreeSet, sync::Arc};
 
 /// A directory of per-sample tables, its format, declared locus ordering, and sample set.
@@ -54,17 +53,15 @@ impl Dataset {
                 <ListingTableUrl as AsRef<str>>::as_ref(&table_path)
             )));
         }
-        let locus_representation = LocusRepresentation::detect(&schema)?;
-        let dataset = Self {
+        let (locus_representation, _) = locus_ordering.validate_against(&schema)?;
+        Ok(Self {
             table_path,
             input_format,
             locus_ordering,
             schema,
             sample_set,
             locus_representation,
-        };
-        dataset.stored_ordering()?;
-        Ok(dataset)
+        })
     }
 
     /// Discovers the sample directories immediately below `table_path` with one
@@ -184,25 +181,15 @@ impl Dataset {
             format,
             files,
             Arc::clone(&self.schema),
-            self.stored_ordering()?.sort_expressions(),
+            self.locus_ordering
+                .expand(self.locus_representation)
+                .sort_expressions(),
             Some(AttachedScalar {
                 field: Arc::new(Field::new("s", DataType::Utf8, false)),
                 value: ScalarValue::Utf8(Some(sample.to_string())),
             }),
         );
         ctx.read_table(Arc::new(table))
-    }
-
-    fn stored_ordering(&self) -> Result<StoredOrdering> {
-        let stored_ordering = self.locus_ordering.expand(self.locus_representation);
-        for column in stored_ordering.column_names() {
-            if self.schema.field_with_name(&column).is_err() {
-                return Err(DataFusionError::Plan(format!(
-                    "locus ordering column '{column}' is missing from the dataset schema"
-                )));
-            }
-        }
-        Ok(stored_ordering)
     }
 
     /// Checks that the dataset's locus ordering starts with the required ordering.
@@ -258,78 +245,6 @@ impl Dataset {
     }
 }
 
-/// Reads one file or one directory of files as a single sorted table under `locus_ordering`.
-///
-/// Unlike [`Dataset`], this function does not discover a sample set or attach a sample column. It
-/// trusts the files to form one sorted table and lets [`SortedTable`] recover their order from
-/// statistics.
-///
-/// # Errors
-///
-/// Returns an error if the path cannot be listed, contains no nonempty file of `input_format`, its
-/// schema has no supported locus representation, an ordering field is absent, or the table cannot
-/// be constructed.
-pub async fn read_sorted_table(
-    ctx: &SessionContext,
-    table_path: ListingTableUrl,
-    input_format: InputFormat,
-    locus_ordering: LocusOrdering,
-) -> Result<DataFrame> {
-    let state = ctx.state();
-    let store = ctx.runtime_env().object_store(&table_path)?;
-    let format = input_format.read_format();
-    let files = list_files_by_extension(ctx, &table_path, &input_format).await?;
-    let input_file = first_nonempty_file(&files).ok_or_else(|| {
-        DataFusionError::Plan(format!(
-            "no input files found in sorted table '{}'",
-            table_path.as_str()
-        ))
-    })?;
-    let schema = format
-        .infer_schema(&state, &store, std::slice::from_ref(input_file))
-        .await?;
-    let representation = LocusRepresentation::detect(&schema)?;
-    let stored_ordering = locus_ordering.expand(representation);
-    for column in stored_ordering.column_names() {
-        if schema.field_with_name(&column).is_err() {
-            return Err(DataFusionError::Plan(format!(
-                "locus ordering column '{column}' is missing from the sorted table schema"
-            )));
-        }
-    }
-    let table = SortedTable::new(
-        table_path.object_store(),
-        format,
-        files
-            .into_iter()
-            .map(PartitionedFile::new_from_meta)
-            .collect(),
-        schema,
-        stored_ordering.sort_expressions(),
-        None,
-    );
-    ctx.read_table(Arc::new(table))
-}
-
-async fn list_files_by_extension(
-    ctx: &SessionContext,
-    table_path: &ListingTableUrl,
-    input_format: &InputFormat,
-) -> Result<Vec<ObjectMeta>> {
-    let state = ctx.state();
-    let store = ctx.runtime_env().object_store(table_path)?;
-    let extension = input_format.read_format().get_ext();
-    table_path
-        .list_all_files(&state, store.as_ref(), &extension)
-        .await?
-        .try_collect()
-        .await
-}
-
-fn first_nonempty_file(files: &[ObjectMeta]) -> Option<&ObjectMeta> {
-    files.iter().find(|file| file.size > 0)
-}
-
 /// The union of nonempty `plans`, or the one plan itself.
 ///
 /// # Errors
@@ -344,12 +259,4 @@ pub fn union_or_single(ctx: &SessionContext, mut plans: Vec<LogicalPlan>) -> Res
         LogicalPlan::Union(Union::try_new(plans.into_iter().map(Arc::new).collect())?)
     };
     Ok(DataFrame::new(ctx.state(), plan))
-}
-
-fn normalize_table_path(mut table_path: ListingTableUrl) -> Result<ListingTableUrl> {
-    if !table_path.is_collection() {
-        let path = <ListingTableUrl as AsRef<str>>::as_ref(&table_path);
-        table_path = ListingTableUrl::parse(format!("{}/", path.trim_end_matches('/')))?;
-    }
-    Ok(table_path)
 }
