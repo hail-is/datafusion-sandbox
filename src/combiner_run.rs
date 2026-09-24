@@ -7,9 +7,10 @@ use crate::{
     ordered_frame::OrderedFrame,
     pipeline::{self, PipelineOptions},
     process,
-    run_metrics::RunRecord,
+    run_metrics::{FormulationRecord, ProbeRecord, RunRecord, WriteRecord},
     sink,
     stored::dataset::Dataset,
+    throughput_probe::{ProbeSettings, StopReason},
     write::WriteTarget,
 };
 
@@ -27,9 +28,9 @@ use std::{
 /// What to do with the combined rows.
 ///
 /// Every action runs the rows into a sink that requires the formulation's ordering: the file
-/// sink for a write, measured or not, a collecting sink for collect, and a draining sink for an
-/// explain without a write. The run supplies the ordering to each. See ADR 0014 for why the plan
-/// ends in a sink rather than a sort.
+/// sink for a write, measured or not, a collecting sink for collect, and a draining sink for a
+/// throughput probe and for an explain without a write. The run supplies the ordering to each.
+/// See ADR 0014 for why the plan ends in a sink rather than a sort.
 #[derive(Debug)]
 pub enum Action {
     /// Write the rows to the target.
@@ -40,6 +41,13 @@ pub enum Action {
         write: WriteTarget,
         metrics_directory: MetricsDirectory,
         run_id: String,
+    },
+    /// Drain the rows until the throughput probe's settings stop the run, and record it as
+    /// `run_id` under the metrics directory with its progress samples. See ADR 0017.
+    Probe {
+        metrics_directory: MetricsDirectory,
+        run_id: String,
+        settings: ProbeSettings,
     },
     /// Collect the rows in memory.
     Collect,
@@ -64,17 +72,21 @@ impl Action {
             | Self::ExplainAnalyze {
                 write: Some(target),
             } => Some(&target.output_path),
-            Self::Collect
+            Self::Probe { .. }
+            | Self::Collect
             | Self::Explain { write: None }
             | Self::ExplainAnalyze { write: None } => None,
         }
     }
 
-    /// The directory a measured write records the run under, if this action is one.
+    /// The directory a measured write or a probe records the run under, if this action is one.
     #[must_use]
     pub const fn metrics_directory(&self) -> Option<&MetricsDirectory> {
         match self {
             Self::MeasuredWrite {
+                metrics_directory, ..
+            }
+            | Self::Probe {
                 metrics_directory, ..
             } => Some(metrics_directory),
             Self::Write(_) | Self::Collect | Self::Explain { .. } | Self::ExplainAnalyze { .. } => {
@@ -121,7 +133,7 @@ impl CombinerRun {
     }
 
     /// Executes the run on `ctx`, inside a pipeline whose session serves every path the run
-    /// names. A measured write's run record times the run from this call.
+    /// names. A measured write's or a probe's run record times the run from this call.
     ///
     /// The caller builds the session, so the record describes the run rather than the session:
     /// its `run_ns` leaves out the runtime and session setup that [`CombinerRun::execute`]
@@ -129,11 +141,13 @@ impl CombinerRun {
     ///
     /// # Errors
     ///
-    /// Returns an error if a measured write's run id already has a run record under its metrics
-    /// directory, the input dataset cannot be resolved, the formulation cannot be planned or
-    /// executed, or the requested output cannot be written. A measured write that fails records
-    /// nothing: the refusal of a repeated id comes before dataset discovery, and the run is
-    /// recorded only after the data write succeeds.
+    /// Returns an error if a measured write's or a probe's run id already has a run record under
+    /// its metrics directory, the input dataset cannot be resolved, the formulation cannot be
+    /// planned or executed, or the requested output cannot be written. A measured write or a
+    /// probe that fails records nothing: the refusal of a repeated id comes before dataset
+    /// discovery, and the run is recorded only after the data write or the probe succeeds. A
+    /// probe also fails on a session the pipeline runner did not build, which has no IO runtime
+    /// to sample on.
     pub async fn execute_in(self, ctx: &SessionContext) -> Result<Outcome> {
         self.run(ctx, Started::now()).await
     }
@@ -148,6 +162,13 @@ impl CombinerRun {
             row_limit,
             threads,
         } = self;
+        let facts = RunFacts {
+            started,
+            formulation: (&formulation).into(),
+            dataset_path: input_path.clone(),
+            input_format: input_format.name().to_string(),
+            threads: threads.get(),
+        };
         let rows = || {
             plan_rows(
                 ctx,
@@ -171,25 +192,47 @@ impl CombinerRun {
                 let run = metrics_directory.unrecorded(ctx, &run_id).await?;
                 let (ordered, samples) = rows().await?;
                 let executed = write.write(ordered).await?;
-                let run_ns = elapsed_ns(started.instant);
-                let peak_rss_bytes = process::peak_rss_bytes()?;
-                let record = RunRecord {
+                let record = facts.record(
                     run_id,
-                    started_at: started.at,
-                    formulation: (&formulation).into(),
-                    dataset_path: input_path,
-                    input_format: input_format.name().to_string(),
-                    write: (&write).into(),
-                    threads: threads.get(),
                     samples,
-                    rows_written: executed.rows_written,
-                    run_ns,
-                    execute_ns: executed.execute_ns,
-                    peak_rss_bytes,
-                };
+                    Some((&write).into()),
+                    executed.rows_written,
+                    executed.execute_ns,
+                    None,
+                )?;
                 Ok(Outcome::Measured {
                     rows_written: executed.rows_written,
                     unrecorded_metrics: run.record(ctx, &record, &executed.plan).await?,
+                })
+            }
+            Action::Probe {
+                metrics_directory,
+                run_id,
+                settings,
+            } => {
+                let run = metrics_directory.unrecorded(ctx, &run_id).await?;
+                let (ordered, samples) = rows().await?;
+                let probed = sink::probe(sink::drain(ordered)?, &settings).await?;
+                let record = facts.record(
+                    run_id,
+                    samples,
+                    None,
+                    probed.rows_received,
+                    probed.execute_ns,
+                    Some(ProbeRecord {
+                        settings,
+                        decision: probed.decision.clone(),
+                        first_partition_end_ns: probed.first_partition_end_ns,
+                    }),
+                )?;
+                let unrecorded_metrics = run
+                    .record_probe(ctx, &record, &probed.plan, &probed.samples)
+                    .await?;
+                Ok(Outcome::Probed {
+                    rows_received: probed.rows_received,
+                    steady_state_throughput: probed.decision.steady_state_throughput,
+                    stop_reason: probed.decision.stop_reason,
+                    unrecorded_metrics,
                 })
             }
             Action::Collect => {
@@ -218,6 +261,46 @@ impl Started {
             at: SystemTime::now(),
             instant: Instant::now(),
         }
+    }
+}
+
+/// What a run record holds that a run knows before its action executes.
+struct RunFacts {
+    started: Started,
+    formulation: FormulationRecord,
+    dataset_path: String,
+    input_format: String,
+    threads: usize,
+}
+
+impl RunFacts {
+    /// The run record of `run_id`, a run over `samples` samples that ends now. Its action wrote
+    /// `write`, if any, wrote `rows_written` rows, or received them for a probe, and executed for
+    /// `execute_ns`. A probe's settings and decision are `probe`.
+    fn record(
+        self,
+        run_id: String,
+        samples: usize,
+        write: Option<WriteRecord>,
+        rows_written: u64,
+        execute_ns: u64,
+        probe: Option<ProbeRecord>,
+    ) -> Result<RunRecord> {
+        Ok(RunRecord {
+            run_id,
+            started_at: self.started.at,
+            formulation: self.formulation,
+            dataset_path: self.dataset_path,
+            input_format: self.input_format,
+            write,
+            threads: self.threads,
+            samples,
+            rows_written,
+            run_ns: elapsed_ns(self.started.instant),
+            execute_ns,
+            peak_rss_bytes: process::peak_rss_bytes()?,
+            probe,
+        })
     }
 }
 
@@ -282,6 +365,15 @@ pub enum Outcome {
         rows_written: u64,
         unrecorded_metrics: Vec<String>,
     },
+    /// The rows a probe's sink received before the stop, its steady-state throughput, why it
+    /// stopped, and the names of the metrics its plan reported that the run metrics table has no
+    /// column for, sorted and without repeats.
+    Probed {
+        rows_received: u64,
+        steady_state_throughput: Option<f64>,
+        stop_reason: StopReason,
+        unrecorded_metrics: Vec<String>,
+    },
     /// Record batches collected in memory.
     Batches(Vec<RecordBatch>),
     /// A plain or analyzed plan rendered as text.
@@ -290,7 +382,8 @@ pub enum Outcome {
 
 impl Outcome {
     /// Renders the outcome for display: a measured write's row count is followed by one warning
-    /// line per unrecorded metric.
+    /// line per unrecorded metric, and a probe's by its steady-state throughput and stop reason
+    /// before the warnings.
     ///
     /// # Errors
     ///
@@ -301,19 +394,46 @@ impl Outcome {
             Self::Measured {
                 rows_written,
                 unrecorded_metrics,
+            } => Ok(lines_with_warnings(
+                [rows_written.to_string()],
+                unrecorded_metrics,
+            )),
+            Self::Probed {
+                rows_received,
+                steady_state_throughput,
+                stop_reason,
+                unrecorded_metrics,
             } => {
-                let warnings = unrecorded_metrics.iter().map(|name| {
-                    format!(
-                        "warning: metric '{name}' has no column in the run metrics table and was not recorded"
-                    )
-                });
-                Ok(std::iter::once(rows_written.to_string())
-                    .chain(warnings)
-                    .collect::<Vec<_>>()
-                    .join("\n"))
+                let throughput = steady_state_throughput
+                    .map_or_else(|| "none".to_string(), |rate| format!("{rate:.1} rows/s"));
+                Ok(lines_with_warnings(
+                    [
+                        rows_received.to_string(),
+                        format!("steady-state throughput: {throughput}"),
+                        format!("stop reason: {}", stop_reason.name()),
+                    ],
+                    unrecorded_metrics,
+                ))
             }
             Self::Batches(batches) => Ok(pretty_format_batches(batches)?.to_string()),
             Self::Plan(plan) => Ok(plan.clone()),
         }
     }
+}
+
+/// `lines`, then one warning line per name in `unrecorded_metrics`, joined by newlines.
+fn lines_with_warnings(
+    lines: impl IntoIterator<Item = String>,
+    unrecorded_metrics: &[String],
+) -> String {
+    let warnings = unrecorded_metrics.iter().map(|name| {
+        format!(
+            "warning: metric '{name}' has no column in the run metrics table and was not recorded"
+        )
+    });
+    lines
+        .into_iter()
+        .chain(warnings)
+        .collect::<Vec<_>>()
+        .join("\n")
 }

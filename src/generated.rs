@@ -91,6 +91,53 @@ impl PartitionStream for IntRangeStream {
     }
 }
 
+/// An endless stream of the same batch, the integers from 1 through its size.
+#[derive(Debug)]
+struct RepeatingStream {
+    batch: RecordBatch,
+}
+
+impl PartitionStream for RepeatingStream {
+    fn schema(&self) -> &SchemaRef {
+        self.batch.schema_ref()
+    }
+
+    fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let stream = futures::stream::repeat_with({
+            let batch = self.batch.clone();
+            move || Ok(batch.clone())
+        });
+        Box::pin(RecordBatchStreamAdapter::new(self.batch.schema(), stream))
+    }
+}
+
+/// Builds a data frame over a table that never ends: an unbounded stream repeating the integers
+/// from 1 through `batch_size`, one batch at a time. A plan over it runs until it is stopped.
+///
+/// # Errors
+///
+/// Returns an error if `batch_size` is zero or too large, or `DataFusion` cannot read the
+/// generated table.
+pub fn make_unbounded_table(ctx: &SessionContext, batch_size: u32) -> Result<DataFrame> {
+    let last = i32::try_from(batch_size)
+        .ok()
+        .filter(|last| *last > 0)
+        .ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "unbounded table batch size must be between 1 and {}, not {batch_size}",
+                i32::MAX
+            ))
+        })?;
+    let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new("idx", DataType::Int32, false)]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(Int32Array::from_iter_values(1..=last))],
+    )?;
+    let partition: Arc<dyn PartitionStream> = Arc::new(RepeatingStream { batch });
+    let table = StreamingTable::try_new(schema, vec![partition])?.with_infinite_table(true);
+    ctx.read_table(Arc::new(table))
+}
+
 /// Builds a streaming table over the inclusive integer range `start..=end`.
 ///
 /// # Errors

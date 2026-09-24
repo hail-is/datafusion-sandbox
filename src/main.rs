@@ -21,8 +21,9 @@ use datafusion_sandbox::metrics_directory::MetricsDirectory;
 use datafusion_sandbox::ordered_frame::OutputLayout;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::split_points;
+use datafusion_sandbox::throughput_probe::ProbeSettings;
 use datafusion_sandbox::write::WriteTarget;
-use std::{num::NonZeroUsize, path::Path};
+use std::{num::NonZeroUsize, path::Path, time::Duration};
 use uuid::Uuid;
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
@@ -49,6 +50,16 @@ fn parse_thread_count(value: &str) -> std::result::Result<NonZeroUsize, String> 
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// A duration given in decimal seconds, which must be positive and finite.
+fn parse_seconds(value: &str) -> std::result::Result<Duration, String> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|seconds| *seconds > 0.0)
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        .ok_or_else(|| format!("expected a positive, finite number of seconds, got '{value}'"))
 }
 
 fn parse_interval_count(value: &str) -> std::result::Result<NonZeroUsize, String> {
@@ -165,18 +176,31 @@ struct CombinerArgs {
     )]
     compression: Option<String>,
     /// Record the run under DIR: its run record at DIR/runs/<ID>.parquet and its run metrics at
-    /// DIR/metrics/<ID>.parquet, both Parquet whatever the output format. DIR may be any path
-    /// --write accepts. Requires --write and performs it.
+    /// DIR/metrics/<ID>.parquet, and a probe's progress samples at DIR/progress/<ID>.parquet, all
+    /// Parquet whatever the output format. DIR may be any path --write accepts. Requires --write,
+    /// and performs it, or --probe.
     #[arg(
         long,
         value_name = "DIR",
-        requires = "write",
+        requires = "recorded_action",
         conflicts_with_all = ["show", "explain", "explain_analyze"]
     )]
     metrics: Option<String>,
     /// The id naming this run in the metrics tables. Defaults to a generated UUID.
     #[arg(long, value_name = "ID", requires = "metrics")]
     run_id: Option<String>,
+    /// With --probe, stop the probe, capped, once it has executed for SECONDS, in decimal
+    /// seconds. Defaults to 300.
+    // Every conflict of `--probe` is repeated here: clap drops a `requires` whose target
+    // conflicts with a present argument, so `--max-duration --limit` would otherwise parse.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        value_parser = parse_seconds,
+        requires = "probe",
+        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+    )]
+    max_duration: Option<Duration>,
     /// Return at most ROWS combined rows. Defaults to 20 with --show and unlimited otherwise.
     #[arg(long, value_name = "ROWS")]
     limit: Option<usize>,
@@ -241,13 +265,18 @@ impl OutputFormatArg {
 
 /// The action flags. At least one is required. `--explain` and `--explain-analyze` may combine
 /// with `--write`, in which case they render or analyze the write's plan; every other pair
-/// conflicts.
+/// conflicts. `--write` and `--probe` are the recorded actions, one of which `--metrics`
+/// requires.
 #[derive(Args)]
 #[group(required = true, multiple = true)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a clap switch, and `CliAction` resolves them to one action"
+)]
 struct ActionArgs {
     /// Write the combined rows to PATH. With --explain or --explain-analyze, the plan shown is
     /// the write's, and --explain-analyze performs the write.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", group = "recorded_action")]
     write: Option<String>,
     /// Print the combined rows.
     #[arg(long, conflicts_with_all = ["write", "explain", "explain_analyze"])]
@@ -258,6 +287,20 @@ struct ActionArgs {
     /// Execute the plan and print it with per-operator metrics.
     #[arg(long)]
     explain_analyze: bool,
+    /// Drain the combined rows as a throughput probe, taking a progress sample every 100 ms,
+    /// until a partition of the plan finishes or --max-duration passes. Records the run and its
+    /// progress samples under --metrics, which it requires, and prints its steady-state
+    /// throughput and stop reason.
+    // The explicit conflicts matter: clap drops a `requires` whose target conflicts with a
+    // present argument, so each conflict of `--metrics` is stated here too, and so is
+    // `--compression`, whose required `--write` conflicts with `--probe`.
+    #[arg(
+        long,
+        group = "recorded_action",
+        requires = "metrics",
+        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit", "compression"]
+    )]
+    probe: bool,
 }
 
 enum CliAction {
@@ -265,6 +308,7 @@ enum CliAction {
     Show,
     Explain { write: Option<String> },
     ExplainAnalyze { write: Option<String> },
+    Probe,
 }
 
 impl CliAction {
@@ -282,15 +326,17 @@ impl TryFrom<ActionArgs> for CliAction {
             show,
             explain,
             explain_analyze,
+            probe,
         } = args;
-        match (write, show, explain, explain_analyze) {
-            (Some(path), false, false, false) => Ok(Self::Write(path)),
-            (None, true, false, false) => Ok(Self::Show),
-            (write, false, true, false) => Ok(Self::Explain { write }),
-            (write, false, false, true) => Ok(Self::ExplainAnalyze { write }),
+        match (write, show, explain, explain_analyze, probe) {
+            (Some(path), false, false, false, false) => Ok(Self::Write(path)),
+            (None, true, false, false, false) => Ok(Self::Show),
+            (write, false, true, false, false) => Ok(Self::Explain { write }),
+            (write, false, false, true, false) => Ok(Self::ExplainAnalyze { write }),
+            (None, false, false, false, true) => Ok(Self::Probe),
             _ => Err(DataFusionError::Configuration(
-                "an action is required: --write, --show, --explain, or --explain-analyze, where \
-                 --explain and --explain-analyze may combine with --write"
+                "an action is required: --write, --show, --explain, --explain-analyze, or \
+                 --probe, where --explain and --explain-analyze may combine with --write"
                     .to_string(),
             )),
         }
@@ -320,6 +366,7 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
         compression,
         metrics,
         run_id,
+        max_duration,
         limit,
         sample_set,
     } = args;
@@ -350,6 +397,16 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
                 None => Action::Write(write),
             }
         }
+        CliAction::Probe => Action::Probe {
+            metrics_directory: MetricsDirectory::new(&metrics.ok_or_else(|| {
+                DataFusionError::Configuration("--probe requires --metrics".to_string())
+            })?),
+            run_id: run_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            settings: ProbeSettings {
+                max_duration: max_duration.unwrap_or_else(|| ProbeSettings::default().max_duration),
+                ..ProbeSettings::default()
+            },
+        },
         CliAction::Show => Action::Collect,
         CliAction::Explain { write } => Action::Explain {
             write: write.map(write_target).transpose()?,
@@ -393,7 +450,8 @@ fn main() -> Result<()> {
         command => {
             let run = resolve(Cli { command, threads })?;
             println!("formulation: {}", run.formulation);
-            if let Action::MeasuredWrite { run_id, .. } = &run.action {
+            if let Action::MeasuredWrite { run_id, .. } | Action::Probe { run_id, .. } = &run.action
+            {
                 println!("run id: {run_id}");
             }
             let outcome = run.execute()?;
@@ -515,7 +573,13 @@ mod tests {
             .unwrap();
         let diagnostic = error.to_string();
 
-        for action in ["--write", "--show", "--explain", "--explain-analyze"] {
+        for action in [
+            "--write",
+            "--show",
+            "--explain",
+            "--explain-analyze",
+            "--probe",
+        ] {
             assert!(diagnostic.contains(action), "diagnostic:\n{diagnostic}");
         }
     }
@@ -634,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn metrics_requires_a_write_action() {
+    fn metrics_requires_a_write_or_a_probe() {
         let error = Cli::try_parse_from([
             "datafusion-sandbox",
             "combine-refs",
@@ -651,6 +715,7 @@ mod tests {
             "diagnostic:\n{diagnostic}"
         );
         assert!(diagnostic.contains("--write"), "diagnostic:\n{diagnostic}");
+        assert!(diagnostic.contains("--probe"), "diagnostic:\n{diagnostic}");
     }
 
     /// `--metrics` conflicts with every other action outright, whether or not a `--write` is
@@ -1128,6 +1193,136 @@ mod tests {
             run.sample_set,
             Some(vec!["HG00308".to_string(), "HG00309".to_string()])
         );
+    }
+
+    #[test]
+    fn probe_requires_metrics() {
+        let diagnostic = combiner_diagnostic(&["--probe"]);
+
+        assert!(
+            diagnostic.contains("--metrics"),
+            "diagnostic:\n{diagnostic}"
+        );
+    }
+
+    /// `--probe` conflicts outright with `--limit`, which would change the plan it measures,
+    /// with every other action, `--write` included until a probe can write, and so with
+    /// `--compression`.
+    #[test]
+    fn probe_conflicts_with_limit_and_every_other_action() {
+        for args in [
+            vec!["--limit", "5"],
+            vec!["--compression", "snappy"],
+            vec!["--write", "out.vortex"],
+            vec!["--show"],
+            vec!["--explain"],
+            vec!["--explain-analyze"],
+        ] {
+            let diagnostic = combiner_diagnostic(
+                &["--probe", "--metrics", "runs"]
+                    .into_iter()
+                    .chain(args.iter().copied())
+                    .collect::<Vec<_>>(),
+            );
+
+            assert!(
+                diagnostic.contains("cannot be used with"),
+                "{args:?} diagnostic:\n{diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("--probe"),
+                "{args:?} diagnostic:\n{diagnostic}"
+            );
+        }
+    }
+
+    /// `--max-duration` requires `--probe`, and is rejected even beside an argument `--probe`
+    /// conflicts with, where clap would drop the requirement.
+    #[test]
+    fn max_duration_requires_a_probe() {
+        for args in [
+            vec!["--write", "out.vortex"],
+            vec!["--write", "out.vortex", "--limit", "5"],
+            vec!["--show"],
+            vec!["--explain"],
+            vec!["--explain-analyze"],
+        ] {
+            let diagnostic = combiner_diagnostic(
+                &["--max-duration", "5"]
+                    .into_iter()
+                    .chain(args.iter().copied())
+                    .collect::<Vec<_>>(),
+            );
+
+            assert!(
+                diagnostic.contains("--max-duration"),
+                "{args:?} diagnostic:\n{diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_with_metrics_resolves_to_a_drained_probe_with_the_default_settings() {
+        let run = resolve(parse_combiner(["--probe", "--metrics", "runs"])).unwrap();
+
+        let Action::Probe {
+            metrics_directory,
+            run_id,
+            settings,
+        } = run.action
+        else {
+            panic!("expected a probe, got {:?}", run.action);
+        };
+        assert_eq!(metrics_directory, MetricsDirectory::new("runs"));
+        assert!(Uuid::parse_str(&run_id).is_ok(), "run id {run_id:?}");
+        assert_eq!(settings, ProbeSettings::default());
+        assert_eq!(run.row_limit, None);
+    }
+
+    #[test]
+    fn a_probe_honors_its_run_id_and_maximum_duration_in_decimal_seconds() {
+        let run = resolve(parse_combiner([
+            "--probe",
+            "--metrics",
+            "runs",
+            "--run-id",
+            "sweep-4",
+            "--max-duration",
+            "2.5",
+        ]))
+        .unwrap();
+
+        let Action::Probe {
+            run_id, settings, ..
+        } = run.action
+        else {
+            panic!("expected a probe, got {:?}", run.action);
+        };
+        assert_eq!(run_id, "sweep-4");
+        assert_eq!(settings.max_duration, Duration::from_millis(2_500));
+        assert_eq!(settings.poll_period, ProbeSettings::default().poll_period);
+    }
+
+    #[test]
+    fn a_maximum_duration_is_a_positive_finite_number_of_seconds() {
+        assert_eq!(parse_seconds("300"), Ok(Duration::from_secs(300)));
+        assert_eq!(parse_seconds("0.25"), Ok(Duration::from_millis(250)));
+        for value in ["0", "-1", "inf", "NaN", "soon"] {
+            let error = parse_seconds(value).unwrap_err();
+            assert!(error.contains("positive"), "{value}: {error}");
+        }
+    }
+
+    /// The diagnostic of a `combine-refs` command line with `args` that fails to parse.
+    fn combiner_diagnostic(args: &[&str]) -> String {
+        Cli::try_parse_from(
+            ["datafusion-sandbox", "combine-refs", "input"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )
+        .err()
+        .unwrap()
+        .to_string()
     }
 
     fn parse_combiner<const N: usize>(args: [&str; N]) -> Cli {

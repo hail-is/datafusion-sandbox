@@ -14,4 +14,5 @@ mod sink;
 mod sorted_table;
 mod split_points;
 mod support;
+mod throughput_probe;
 mod write;

@@ -235,6 +235,101 @@ fn a_repeated_run_id_is_refused_before_the_write() {
     assert!(!second_output.exists());
 }
 
+/// `--probe --metrics` drains the plan, prints the run id under the formulation line and then
+/// the rows received, the steady-state throughput, and the stop reason, and records the run in
+/// three Parquet tables that read back with that id. The fixture finishes in well under the
+/// maximum duration, so the probe completes, and its progress samples end at every row.
+#[test]
+fn a_drained_probe_prints_its_estimate_and_records_three_tables() {
+    let dataset = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let dir = tempfile::tempdir().unwrap();
+    let metrics_directory = dir.path().join("metrics").to_str().unwrap().to_string();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args([
+            "--threads",
+            "1",
+            "combine-refs",
+            dataset.table_path(),
+            "--formulation",
+            "interval-merge",
+            "--split-points",
+            "1:3,2:2",
+            "--probe",
+            "--metrics",
+            &metrics_directory,
+            "--run-id",
+            "cli-probe",
+            "--max-duration",
+            "60",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    let [formulation, run_id, rows, throughput, stop_reason] = lines.as_slice() else {
+        panic!("stdout:\n{stdout}");
+    };
+    assert_eq!(
+        [*formulation, *run_id, *rows, *stop_reason],
+        [
+            "formulation: interval-merge",
+            "run id: cli-probe",
+            "32",
+            "stop reason: completed"
+        ]
+    );
+    let rate: f64 = throughput
+        .strip_prefix("steady-state throughput: ")
+        .and_then(|rest| rest.strip_suffix(" rows/s"))
+        .and_then(|rate| rate.parse().ok())
+        .unwrap_or_else(|| panic!("stdout:\n{stdout}"));
+    assert!(rate > 0.0, "stdout:\n{stdout}");
+
+    let recorded = read_recorded_run(&metrics_directory, "cli-probe");
+    let record = recorded.record.expect("a run record");
+    let metrics = recorded.metrics.expect("run metrics");
+    let samples = recorded.progress_samples.expect("progress samples");
+    for (table, batch) in [
+        ("runs", &record),
+        ("metrics", &metrics),
+        ("progress", &samples),
+    ] {
+        let run_ids = column_strings(batch, "run_id");
+        assert!(!run_ids.is_empty(), "{table} is empty");
+        assert!(
+            run_ids.iter().all(|run_id| run_id == "cli-probe"),
+            "{table}: {run_ids:?}"
+        );
+    }
+    for (column, expected) in [
+        ("action", "probe"),
+        ("stop_reason", "completed"),
+        ("rows_written", "32"),
+        ("max_duration_ns", "60000000000"),
+    ] {
+        assert_eq!(column_strings(&record, column), [expected], "{column}");
+    }
+    assert_eq!(
+        column_strings(&samples, "rows").last().map(String::as_str),
+        Some("32")
+    );
+}
+
+/// The values of the column `name` of `batch`, rendered.
+fn column_strings(batch: &RecordBatch, name: &str) -> Vec<String> {
+    let column = batch.column_by_name(name).unwrap();
+    (0..batch.num_rows())
+        .map(|row| array_value_to_string(column, row).unwrap())
+        .collect()
+}
+
 #[test]
 fn metrics_without_a_write_is_rejected_before_any_run() {
     let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))

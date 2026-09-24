@@ -45,8 +45,8 @@
 //! - `decode_rows`, the locus, alleles, and sample of each row a plan returned.
 //! - `file_stems`, the documented fixture stems named by scanned object-store paths.
 //! - `read_file`, the rows of one file a test wrote, on any registered store.
-//! - `read_recorded_run`, the two tables a measured write recorded for one run id
-//!   under a metrics directory, each as one batch if the run has a file there.
+//! - `read_recorded_run`, the tables a measured write or a throughput probe recorded for one
+//!   run id under a metrics directory, each as one batch if the run has a file there.
 
 #![expect(
     clippy::as_conversions,
@@ -764,12 +764,14 @@ pub async fn read_file(
         .await
 }
 
-/// One run's two tables as read back from a metrics directory, each the run's one file as one
-/// batch in the table's schema, or `None` when the run has no file in that table.
+/// One run's tables as read back from a metrics directory, each the run's one file as one batch
+/// in the table's schema, or `None` when the run has no file in that table.
 #[derive(Debug)]
 pub struct RecordedRun {
     pub record: Option<RecordBatch>,
     pub metrics: Option<RecordBatch>,
+    /// A throughput probe's progress samples; a measured write records none.
+    pub progress_samples: Option<RecordBatch>,
 }
 
 /// Reads back what `directory` holds for `run_id` through `ctx`, on whichever registered store
@@ -795,6 +797,12 @@ pub async fn read_recorded_run(
             ctx,
             &directory.run_metrics_path(run_id),
             run_metrics::run_metrics_schema(),
+        )
+        .await?,
+        progress_samples: read_run_table(
+            ctx,
+            &directory.progress_samples_path(run_id),
+            run_metrics::progress_samples_schema(),
         )
         .await?,
     })

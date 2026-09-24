@@ -141,16 +141,17 @@ pub(super) fn run_record(run_id: &str) -> RunRecord {
         },
         dataset_path: "gs://bucket/refs".to_string(),
         input_format: "vortex".to_string(),
-        write: WriteRecord {
+        write: Some(WriteRecord {
             output_path: "gs://bucket/combined.parquet".to_string(),
             output_format: "parquet".to_string(),
             compression: Some("snappy".to_string()),
-        },
+        }),
         threads: 1,
         samples: 4,
         rows_written: 32,
         run_ns: 2_000,
         execute_ns: 1_000,
         peak_rss_bytes: 1 << 20,
+        probe: None,
     }
 }

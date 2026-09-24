@@ -18,8 +18,17 @@
 //! execution to completion, and hands the plan back with the rows written, so every operator's
 //! metrics are readable from it afterwards. A frame-level collect would drop the plan with the
 //! batches.
+//!
+//! [`probe`] runs a sink frame the same way for a throughput probe, but only until the probe's
+//! decision stops it, taking progress samples on the IO runtime as it goes, and hands the plan
+//! back as it stood at the stop.
 
-use crate::{locus::StoredOrdering, ordered_frame::OrderedFrame};
+use crate::{
+    locus::StoredOrdering,
+    ordered_frame::OrderedFrame,
+    pipeline,
+    throughput_probe::{self, Decision, ProbeSettings, ProgressSample},
+};
 
 use datafusion::{
     arrow::{
@@ -29,7 +38,7 @@ use datafusion::{
         record_batch::RecordBatch,
     },
     catalog::{Session, TableProvider},
-    common::{DFSchema, tree_node::TreeNodeRecursion},
+    common::{DFSchema, runtime::JoinSet, tree_node::TreeNodeRecursion},
     datasource::{
         DefaultTableSource,
         sink::{DataSink, DataSinkExec},
@@ -45,16 +54,20 @@ use datafusion::{
         ExecutionPlanProperties, InputDistributionRequirements, Partitioning, PlanProperties,
         ReplaceChildrenOptions, SendableRecordBatchStream,
         execution_plan::{EvaluationType, SchedulingType},
-        metrics::MetricsSet,
+        metrics::{MetricValue, MetricsSet},
     },
     prelude::{DataFrame, Expr},
 };
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt, future};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::{self, MissedTickBehavior},
+};
 
 use std::{
     fmt,
     sync::{Arc, Mutex, PoisonError},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 /// What an insert plans to once its input and the ordering requirement are known.
@@ -128,13 +141,204 @@ pub async fn execute_and_retain(frame: DataFrame) -> Result<ExecutedSink> {
     let plan = frame.create_physical_plan().await?;
     let executing = Instant::now();
     let batches = physical_plan::collect(Arc::clone(&plan), task_ctx).await?;
-    let execute_ns = u64::try_from(executing.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let execute_ns = elapsed_ns(executing);
     let rows_written = rows_written(&batches)?;
     Ok(ExecutedSink {
         rows_written,
         plan,
         execute_ns,
     })
+}
+
+/// What probing a sink frame yields: the plan it stopped, when and why it stopped, and its
+/// progress samples.
+///
+/// Every operator's metrics are readable from the plan, as they stood at the stop.
+#[derive(Debug)]
+pub struct ProbedSink {
+    /// The rows the operator feeding the sink had emitted when the probe stopped.
+    pub rows_received: u64,
+    pub plan: Arc<dyn ExecutionPlan>,
+    /// Nanoseconds from the start of execution to the stop.
+    pub execute_ns: u64,
+    /// Every progress sample taken, in order.
+    pub samples: Vec<ProgressSample>,
+    /// The elapsed nanoseconds of the first sample that showed a finished partition of the
+    /// operator feeding the sink, if one did before the stop.
+    pub first_partition_end_ns: Option<u64>,
+    pub decision: Decision,
+}
+
+/// Executes `frame`, a sink frame, until [`throughput_probe::decide`] stops it, and keeps hold of
+/// the physical plan it ran.
+///
+/// The plan is built as [`execute_and_retain`] builds it and executed as a stream. A sampler on
+/// the session's IO runtime reads the metrics of the operator feeding the sink every poll period,
+/// starting as execution starts, and after each reading the probe decides whether to stop. The
+/// stream is polled only once the first reading is in, so the samples start at the start of
+/// execution. When the stream ends before a decision, the sampler takes one last reading at once.
+/// Stopping drops the stream, which aborts the plan's tasks.
+///
+/// # Errors
+///
+/// Returns an error if the poll period is zero, the session has no IO runtime, the plan cannot be
+/// built or executed, the sink has no single input, or that input reports no output rows or ends
+/// without a finished partition.
+pub async fn probe(frame: DataFrame, settings: &ProbeSettings) -> Result<ProbedSink> {
+    if settings.poll_period.is_zero() {
+        return Err(DataFusionError::Configuration(
+            "a throughput probe's poll period must be positive".to_string(),
+        ));
+    }
+    let task_ctx = Arc::new(frame.task_ctx());
+    let io_runtime = pipeline::io_runtime(task_ctx.session_config())?;
+    let plan = frame.create_physical_plan().await?;
+    let feeding = match plan.children().as_slice() {
+        [feeding] => Arc::clone(feeding),
+        children => {
+            return Err(DataFusionError::Internal(format!(
+                "a probed sink needs one input, but {} has {}",
+                plan.name(),
+                children.len()
+            )));
+        }
+    };
+
+    let (readings_sender, mut readings) = mpsc::unbounded_channel();
+    let (finish, finishing) = oneshot::channel::<()>();
+    let executing = Instant::now();
+    let mut unpolled = Some(physical_plan::execute_stream(Arc::clone(&plan), task_ctx)?);
+    let mut sampling = JoinSet::new();
+    sampling.spawn_on(
+        sample(
+            Arc::clone(&feeding),
+            executing,
+            settings.poll_period,
+            readings_sender,
+            finishing,
+        ),
+        &io_runtime,
+    );
+
+    let mut polling = None;
+    let mut finish = Some(finish);
+    let mut samples = Vec::new();
+    let mut first_partition_end_ns = None;
+    let decision = loop {
+        tokio::select! {
+            reading = readings.recv() => {
+                let Some(Reading { elapsed_ns, rows, finished }) = reading else {
+                    return Err(DataFusionError::Internal(format!(
+                        "the plan ended, but {}, the operator feeding its sink, reported no finished partition",
+                        feeding.name()
+                    )));
+                };
+                let rows = rows.ok_or_else(|| DataFusionError::Internal(format!(
+                    "{}, the operator feeding the sink, reports no output rows to sample",
+                    feeding.name()
+                )))?;
+                samples.push(ProgressSample { elapsed_ns, rows });
+                if finished && first_partition_end_ns.is_none() {
+                    first_partition_end_ns = Some(elapsed_ns);
+                }
+                if let Some(decision) =
+                    throughput_probe::decide(settings, &samples, first_partition_end_ns)
+                {
+                    break decision;
+                }
+                if let Some(stream) = unpolled.take() {
+                    polling = Some(stream);
+                }
+            }
+            batch = next_batch(&mut polling) => {
+                if let Some(batch) = batch {
+                    batch?;
+                } else {
+                    polling = None;
+                    // Dropping the sender resolves the sampler's receiver: its last reading.
+                    drop(finish.take());
+                }
+            }
+        }
+    };
+    drop(polling.or(unpolled));
+    let execute_ns = elapsed_ns(executing);
+    drop(sampling);
+    let rows_received = feeding
+        .metrics()
+        .and_then(|metrics| metrics.output_rows())
+        .map_or(0, to_u64);
+    Ok(ProbedSink {
+        rows_received,
+        plan,
+        execute_ns,
+        samples,
+        first_partition_end_ns,
+        decision,
+    })
+}
+
+/// One reading of the operator feeding a probed sink.
+struct Reading {
+    elapsed_ns: u64,
+    /// `None` if the operator reports no output rows.
+    rows: Option<u64>,
+    /// Whether any partition of the operator has an end timestamp.
+    finished: bool,
+}
+
+/// Reads `feeding` every `poll_period` from now on, and once more at once when `finishing`
+/// resolves, as it does when its sender is dropped, sending each reading with its time since
+/// `executing`. Stops after that last reading, or once the readings are no longer received.
+async fn sample(
+    feeding: Arc<dyn ExecutionPlan>,
+    executing: Instant,
+    poll_period: Duration,
+    readings: mpsc::UnboundedSender<Reading>,
+    mut finishing: oneshot::Receiver<()>,
+) {
+    let mut ticks = time::interval(poll_period);
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        let last = tokio::select! {
+            _ = ticks.tick() => false,
+            _ = &mut finishing => true,
+        };
+        let metrics = feeding.metrics();
+        let elapsed_ns = elapsed_ns(executing);
+        let reading = Reading {
+            elapsed_ns,
+            rows: metrics
+                .as_ref()
+                .and_then(MetricsSet::output_rows)
+                .map(to_u64),
+            finished: metrics.iter().flat_map(MetricsSet::iter).any(|metric| {
+                matches!(metric.value(), MetricValue::EndTimestamp(end) if end.value().is_some())
+            }),
+        };
+        if readings.send(reading).is_err() || last {
+            return;
+        }
+    }
+}
+
+/// The next batch of `stream`, or never if there is none to poll.
+async fn next_batch(stream: &mut Option<SendableRecordBatchStream>) -> Option<Result<RecordBatch>> {
+    match stream {
+        Some(stream) => stream.next().await,
+        None => future::pending().await,
+    }
+}
+
+/// Wall-clock nanoseconds since `since`, saturating at `u64::MAX`.
+fn elapsed_ns(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// A count as a probe reports it. Saturates rather than failing on a platform whose `usize` is
+/// wider than 64 bits.
+fn to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 /// The frame that runs `df` into a sink keeping every batch it receives, in arrival order.
@@ -160,9 +364,9 @@ pub fn collect(ordered: OrderedFrame) -> Result<(DataFrame, Arc<CollectingSink>)
 ///
 /// Returns an error if the sink plan cannot be built.
 pub fn drain(ordered: OrderedFrame) -> Result<DataFrame> {
-    let sink = Arc::new(DrainingSink {
-        schema: Arc::clone(ordered.frame.schema().inner()),
-    });
+    let sink = Arc::new(DrainingSink::new(Arc::clone(
+        ordered.frame.schema().inner(),
+    )));
     run_into(
         ordered.frame,
         "drain",
@@ -225,6 +429,14 @@ impl DataSink for CollectingSink {
 #[derive(Debug)]
 pub struct DrainingSink {
     schema: SchemaRef,
+}
+
+impl DrainingSink {
+    /// A sink accepting batches of `schema`.
+    #[must_use]
+    pub const fn new(schema: SchemaRef) -> Self {
+        Self { schema }
+    }
 }
 
 impl DisplayAs for DrainingSink {

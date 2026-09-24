@@ -95,6 +95,27 @@ table measures, read from the DataFusion source.
 ```
 cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --write data/combined.vortex --metrics data/runs --run-id grouped-8
 ```
+A throughput probe, `--probe --metrics DIR`, runs the formulation's unchanged plan, drains its
+rows, and stops early to estimate the plan's steady-state throughput without running it to the
+end. Every 100 ms it takes a progress sample: the time since execution started and the rows the
+sink has received. It stops at the first finished partition of the plan, with stop reason
+`completed`, or once `--max-duration SECONDS` (decimal, default 300) has passed, with stop reason
+`capped`. Its steady-state throughput is the rows received between the first and last samples of
+its measurement window over the time between them, and it prints the run id, the rows received,
+that throughput, and the stop reason.
+A probe records three tables under `DIR`, all Parquet and one file per run: the run record in
+`DIR/runs/<id>.parquet`, the run metrics as they stood at the stop in `DIR/metrics/<id>.parquet`,
+and its progress samples, one row each of run id, sample index, elapsed nanoseconds, and rows, in
+`DIR/progress/<id>.parquet`. Its run record holds the rows received as `rows_written`, times
+`execute_ns` to the stop, and fills the probe columns a measured write leaves empty: `action`,
+`stop_reason`, `steady_state_throughput`, `window_end_ns`, `window_rows`,
+`first_partition_end_ns`, `poll_period_ns`, and `max_duration_ns`. `--run-id` works as for a
+measured write, a repeated id is refused before anything runs, and a probe that fails records
+nothing. `--probe` refuses `--limit`, which would change the plan measured. See
+[ADR 0017](docs/adr/0017-estimate-throughput-by-stopping-full-plan-runs.md).
+```
+cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --probe --metrics data/runs --run-id grouped-8-probe --max-duration 60
+```
 An earlier variant of the reference combiner is still available as `cargo run -r --example combiner1`.
 
 ### Building for a specific GCE instance family

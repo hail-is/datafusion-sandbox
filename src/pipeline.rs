@@ -1,5 +1,8 @@
 //! The execution side of every pipeline: builds the runtimes and the session,
 //! then runs a pipeline closure to completion.
+//!
+//! The pipeline runs on the CPU runtime. It reaches the IO runtime through its session, with
+//! [`io_runtime`], to spawn work that must not wait behind plan execution.
 
 use crate::cpu_runtime::CpuRuntime;
 
@@ -144,7 +147,9 @@ where
         .build()?;
     let cpu_runtime = CpuRuntime::try_new(threads.get())?;
 
-    let ctx = SessionContext::new_with_config(session_config());
+    let ctx = SessionContext::new_with_config(
+        session_config().with_extension(Arc::new(IoRuntime(io_runtime.handle().clone()))),
+    );
     for url in &object_stores {
         register_object_store(&ctx, url, io_runtime.handle())?;
     }
@@ -159,6 +164,31 @@ where
             )),
         }
     })
+}
+
+/// The IO runtime of the runner that built a session, carried in its configuration.
+#[derive(Debug)]
+struct IoRuntime(Handle);
+
+/// The IO runtime of the session configured by `config`.
+///
+/// A task spawned on the handle runs on the IO runtime's threads, so a saturated CPU runtime
+/// neither delays it nor loses plan time to it.
+///
+/// # Errors
+///
+/// Returns an internal error if `config` is not the configuration of a session the pipeline
+/// runner built.
+pub fn io_runtime(config: &SessionConfig) -> Result<Handle> {
+    config
+        .get_extension::<IoRuntime>()
+        .map(|io_runtime| io_runtime.0.clone())
+        .ok_or_else(|| {
+            DataFusionError::Internal(
+                "the session was not built by the pipeline runner, so it has no IO runtime"
+                    .to_string(),
+            )
+        })
 }
 
 /// Registers the Google Cloud Storage bucket at `url`.
