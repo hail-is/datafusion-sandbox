@@ -44,6 +44,11 @@ The per-operator, per-partition counters and timers a plan accumulated while exe
 as one table. Distinct from the run record, which describes the run rather than its plan.
 _Avoid_: profile, trace, stats, analyze output
 
+**Metrics directory**:
+The directory a measured write records runs under: a run record table and a run metrics table,
+one file per run in each.
+_Avoid_: metrics path, output metrics, results directory
+
 **Sink**:
 The operator a combiner run's rows end in, and the plan's only consumer: a file sink when the
 action writes, a partitioned file sink when it writes one file per locus interval, a collecting

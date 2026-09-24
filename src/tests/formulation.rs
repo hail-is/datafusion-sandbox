@@ -31,8 +31,12 @@ use crate::{
     locus::{LocusOrdering, LocusRepresentation, StoredOrdering},
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
+    run_metrics::FormulationRecord,
     sink,
-    tests::{plan_shape::PlanShape, support::hostile_config},
+    tests::{
+        plan_shape::PlanShape,
+        support::{grouped_merge, hostile_config, interval_merge},
+    },
     write::WriteTarget,
 };
 use datafusion::{
@@ -66,6 +70,37 @@ const REPRESENTATIONS: [LocusRepresentation; 2] = [
     LocusRepresentation::ContigPosition,
     LocusRepresentation::Packed,
 ];
+
+/// Each formulation describes its recorded settings: its name, and the group count or split
+/// points only the formulation that takes one has.
+#[test]
+fn each_formulation_describes_its_recorded_settings() {
+    let record =
+        |name: &str, groups: Option<usize>, split_points: Option<&str>| FormulationRecord {
+            name: name.to_string(),
+            groups,
+            split_points: split_points.map(ToString::to_string),
+        };
+
+    for (formulation, expected) in [
+        (
+            Formulation::CombineAllelesUnion,
+            record("union", None, None),
+        ),
+        (Formulation::CombineRefsUnion, record("union", None, None)),
+        (grouped_merge(3), record("grouped-merge", Some(3), None)),
+        (
+            interval_merge("1:5,2:1"),
+            record("interval-merge", None, Some("1:5,2:1")),
+        ),
+    ] {
+        assert_eq!(
+            FormulationRecord::from(&formulation),
+            expected,
+            "{formulation:?}"
+        );
+    }
+}
 
 #[test]
 fn rejects_a_dataset_with_an_insufficient_locus_ordering() {

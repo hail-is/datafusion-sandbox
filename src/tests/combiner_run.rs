@@ -1,10 +1,11 @@
 use crate::fixture;
 
 use crate::{
-    combiner_run::{self, Action, CombinerRun, Outcome},
+    combiner_run::{Action, CombinerRun, Outcome},
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
     locus::{Locus, LocusOrdering, LocusRepresentation},
+    metrics_directory::MetricsDirectory,
     pipeline::{self, PipelineOptions},
     tests::{
         plan_shape::exec_names,
@@ -15,17 +16,17 @@ use crate::{
 use datafusion::{
     arrow::{
         array::{ArrayRef, Int32Array},
-        compute::concat_batches,
         record_batch::RecordBatch,
         util::display::array_value_to_string,
     },
-    error::{DataFusionError, Result},
+    error::Result,
     parquet::file::reader::{FileReader, SerializedFileReader},
+    prelude::SessionContext,
 };
-use object_store::{ObjectStoreExt, PutPayload, path::Path as ObjectPath};
-use std::{num::NonZeroUsize, path::Path, sync::Arc, time::SystemTime};
+use object_store::{ObjectStoreExt, path::Path as ObjectPath};
+use std::{future::Future, num::NonZeroUsize, path::Path, sync::Arc, time::SystemTime};
 
-use fixture::{FixtureFormat, SAMPLES};
+use fixture::{FixtureFormat, MemoryStore, RecordedRun, SAMPLES};
 
 #[test]
 fn renders_outcomes() {
@@ -727,11 +728,9 @@ fn a_measured_write_writes_the_output_and_its_run_record() {
     let reader = SerializedFileReader::try_from(measured.output_path.as_path()).unwrap();
     assert_eq!(reader.metadata().file_metadata().num_rows(), 24);
 
-    let record = read_back(
-        &format!("{}/runs/run-a.parquet", measured.metrics_directory),
-        FixtureFormat::Parquet,
-    );
-    let record = concat_batches(&record[0].schema(), &record).unwrap();
+    let record = recorded(&measured.metrics_directory, "run-a")
+        .record
+        .unwrap();
     assert_eq!(record.num_rows(), 1);
     for (column, expected) in [
         ("run_id", "run-a"),
@@ -804,11 +803,9 @@ fn a_measured_write_records_the_operators_of_the_explained_plan() {
         .unwrap(),
     );
 
-    let metrics = read_back(
-        &format!("{}/metrics/run-a.parquet", measured.metrics_directory),
-        FixtureFormat::Parquet,
-    );
-    let metrics = concat_batches(&metrics[0].schema(), &metrics).unwrap();
+    let metrics = recorded(&measured.metrics_directory, "run-a")
+        .metrics
+        .unwrap();
     assert!(
         string_values(&metrics, "run_id")
             .iter()
@@ -852,7 +849,7 @@ fn every_combiner_takes_a_measured_write() {
         (Formulation::CombineAllelesUnion, "alleles", 8),
         (Formulation::CombineRefsUnion, "refs", 32),
     ] {
-        let metrics_directory = dir.path().join("metrics").to_str().unwrap().to_string();
+        let metrics_directory = MetricsDirectory::new(dir.path().join("metrics").to_str().unwrap());
         let outcome = run(
             formulation,
             input.table_path(),
@@ -879,12 +876,8 @@ fn every_combiner_takes_a_measured_write() {
             panic!("{run_id}: expected a measured write, got {outcome:?}");
         };
         assert_eq!(rows_written, expected, "{run_id}");
-        for table in ["runs", "metrics"] {
-            let batches = read_back(
-                &format!("{metrics_directory}/{table}/{run_id}.parquet"),
-                FixtureFormat::Parquet,
-            );
-            let batch = concat_batches(&batches[0].schema(), &batches).unwrap();
+        let RecordedRun { record, metrics } = recorded(&metrics_directory, run_id);
+        for (table, batch) in [("runs", record.unwrap()), ("metrics", metrics.unwrap())] {
             assert!(
                 string_values(&batch, "run_id")
                     .iter()
@@ -899,7 +892,7 @@ fn every_combiner_takes_a_measured_write() {
 struct MeasuredGroupedMerge {
     input: fixture::DiskDatasetFixture,
     output_path: std::path::PathBuf,
-    metrics_directory: String,
+    metrics_directory: MetricsDirectory,
     outcome: Outcome,
 }
 
@@ -923,7 +916,7 @@ fn measured_grouped_merge(dir: &Path, run_id: &str) -> MeasuredGroupedMerge {
     let mut measured = MeasuredGroupedMerge {
         input: fixture::contig_position_disk_fixture(FixtureFormat::Vortex),
         output_path: dir.join("measured.parquet"),
-        metrics_directory: dir.join("metrics").to_str().unwrap().to_string(),
+        metrics_directory: MetricsDirectory::new(dir.join("metrics").to_str().unwrap()),
         outcome: Outcome::RowsWritten(0),
     };
     measured.outcome = run(
@@ -942,119 +935,149 @@ fn measured_grouped_merge(dir: &Path, run_id: &str) -> MeasuredGroupedMerge {
     measured
 }
 
-/// A measured write refuses a run id that already has a run record under its metrics directory,
-/// before it discovers the dataset or writes anything: the second output path is never written,
-/// and the first run's two files are byte-for-byte what they were.
+/// A measured write refuses a run id that already has a run record under its metrics directory
+/// before it discovers the dataset, so the refusal is the error even when the dataset path names
+/// nothing. It writes nothing: the second output path is never written, and the first run's
+/// tables read back as they were.
 #[test]
-fn refuses_a_run_id_that_already_has_a_run_record() {
-    let dir = tempfile::tempdir().unwrap();
-    let measured = measured_grouped_merge(dir.path(), "run-a");
-    let record_path = format!("{}/runs/run-a.parquet", measured.metrics_directory);
-    let metrics_path = format!("{}/metrics/run-a.parquet", measured.metrics_directory);
-    let record_bytes = std::fs::read(&record_path).unwrap();
-    let metrics_bytes = std::fs::read(&metrics_path).unwrap();
-    let second_output = dir.path().join("second.parquet");
+fn refuses_a_run_id_that_already_has_a_run_record_before_discovery() {
+    let input = memory_dataset();
+    let store = MemoryStore::new("refused");
+    let url = store.url().as_str().to_string();
+    let metrics_directory = MetricsDirectory::new(&format!("{url}metrics"));
+    let record_path = metrics_directory.run_record_path("run-a");
+    let measured_write = |input_path: String, output: &str| CombinerRun {
+        input_path,
+        ..measured_run(
+            &input,
+            format!("{url}{output}"),
+            metrics_directory.clone(),
+            "run-a",
+        )
+    };
+    let first = measured_write(input.table_path().to_string(), "first.parquet");
+    let second = measured_write(format!("{url}no-such-dataset/"), "second.parquet");
+    let directory = metrics_directory.clone();
+    let output_store = store.clone();
 
-    let err = run(
-        grouped_merge(2),
-        measured.input.table_path(),
-        measured.input.input_format(),
-        Action::MeasuredWrite {
-            write: WriteTarget {
-                output_path: second_output.to_str().unwrap().to_string(),
-                output_format: OutputFormat::PARQUET,
-            },
-            metrics_directory: measured.metrics_directory.clone(),
-            run_id: "run-a".to_string(),
-        },
-        Some(three_samples()),
-        None,
-    )
-    .unwrap_err();
+    let (before, refused, after, second_output) =
+        on_memory_stores(&input, &store, move |ctx| async move {
+            first.execute_in(&ctx).await?;
+            let before = fixture::read_recorded_run(&ctx, &directory, "run-a").await?;
+            let refused = second.execute_in(&ctx).await;
+            let after = fixture::read_recorded_run(&ctx, &directory, "run-a").await?;
+            let second_output = output_store
+                .store()
+                .head(&ObjectPath::from("second.parquet"))
+                .await;
+            Ok((before, refused, after, second_output))
+        });
 
-    let message = err.to_string();
+    let message = refused.unwrap_err().to_string();
     assert!(message.contains("run id 'run-a'"), "{message}");
     assert!(message.contains(&record_path), "{message}");
     assert!(
-        !second_output.exists(),
-        "refused write wrote {}",
-        second_output.display()
+        matches!(second_output, Err(object_store::Error::NotFound { .. })),
+        "refused write wrote {second_output:?}"
     );
-    assert_eq!(std::fs::read(&record_path).unwrap(), record_bytes);
-    assert_eq!(std::fs::read(&metrics_path).unwrap(), metrics_bytes);
+    assert_eq!(after.record, before.record);
+    assert_eq!(after.metrics, before.metrics);
 }
 
-/// The check behind the refusal asks the metrics directory's own store, so it holds on an
-/// in-memory store: a run id is recorded once `runs/<id>.parquet` exists under the directory,
-/// whatever the object holds, and not before, and not for another id.
+/// A measured write whose data write fails, here on a store failing every write under the output
+/// path, records nothing: neither table gets a file, so a partial run never unions into a history.
 #[test]
-fn run_is_recorded_asks_the_metrics_directory_store() {
-    let store = fixture::MemoryStore::new("history");
-    let recorded = pipeline::run(
+fn a_failed_data_write_records_nothing() {
+    let input = memory_dataset();
+    let store = MemoryStore::failing_writes_under("failed-write", "out");
+    let url = store.url().as_str().to_string();
+    let metrics_directory = MetricsDirectory::new(&format!("{url}metrics"));
+    let run = measured_run(
+        &input,
+        format!("{url}out/combined.parquet"),
+        metrics_directory.clone(),
+        "run-a",
+    );
+
+    let (failed, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
+        let failed = run.execute_in(&ctx).await;
+        let recorded = fixture::read_recorded_run(&ctx, &metrics_directory, "run-a").await?;
+        Ok((failed, recorded))
+    });
+
+    let message = failed.unwrap_err().to_string();
+    assert!(message.contains("out/combined.parquet"), "{message}");
+    let RecordedRun { record, metrics } = recorded;
+    assert!(record.is_none(), "{record:?}");
+    assert!(metrics.is_none(), "{metrics:?}");
+}
+
+/// The in-memory contig-position Vortex dataset fixture.
+fn memory_dataset() -> Arc<fixture::DatasetFixture> {
+    Arc::clone(fixture::dataset_fixture(
+        FixtureFormat::Vortex,
+        LocusRepresentation::ContigPosition,
+    ))
+}
+
+/// A measured grouped-merge write of `input` to Parquet at `output_path`, recorded as `run_id`
+/// under `metrics_directory`.
+fn measured_run(
+    input: &fixture::DatasetFixture,
+    output_path: String,
+    metrics_directory: MetricsDirectory,
+    run_id: &str,
+) -> CombinerRun {
+    CombinerRun {
+        formulation: grouped_merge(2),
+        input_path: input.table_path().to_string(),
+        input_format: input.input_format(),
+        action: Action::MeasuredWrite {
+            write: WriteTarget {
+                output_path,
+                output_format: OutputFormat::PARQUET,
+            },
+            metrics_directory,
+            run_id: run_id.to_string(),
+        },
+        sample_set: None,
+        row_limit: None,
+        threads: NonZeroUsize::MIN,
+    }
+}
+
+/// Runs `pipeline` on a session serving the dataset fixture `input` and `store`.
+fn on_memory_stores<T, Fut>(
+    input: &Arc<fixture::DatasetFixture>,
+    store: &MemoryStore,
+    pipeline: impl FnOnce(SessionContext) -> Fut + Send + 'static,
+) -> T
+where
+    T: Send + 'static,
+    Fut: Future<Output = Result<T>> + Send + 'static,
+{
+    let input = Arc::clone(input);
+    let store = store.clone();
+    pipeline::run(
         move |ctx| {
+            input.register(&ctx);
             store.register(&ctx);
-            async move {
-                let metrics_directory = "memory://history/benchmarks/";
-                let before =
-                    combiner_run::run_is_recorded(&ctx, metrics_directory, "run-a").await?;
-                store
-                    .store()
-                    .put(
-                        &ObjectPath::from("benchmarks/runs/run-a.parquet"),
-                        PutPayload::from_static(b"not a parquet file"),
-                    )
-                    .await?;
-                Ok((
-                    before,
-                    combiner_run::run_is_recorded(&ctx, metrics_directory, "run-a").await?,
-                    combiner_run::run_is_recorded(&ctx, metrics_directory, "run-b").await?,
-                ))
-            }
+            pipeline(ctx)
         },
         PipelineOptions::single_threaded(),
     )
-    .unwrap();
-    assert_eq!(recorded, (false, true, false));
+    .unwrap()
 }
 
-/// A measured write whose data write fails, here into a directory that is a regular file, records
-/// nothing: neither table's directory gets a file, so a partial run never unions into a history.
-#[test]
-fn a_failed_data_write_records_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
-    let blocker = dir.path().join("blocker");
-    std::fs::write(&blocker, b"").unwrap();
-    let metrics_directory = dir.path().join("metrics");
-
-    let err = run(
-        grouped_merge(2),
-        input.table_path(),
-        input.input_format(),
-        Action::MeasuredWrite {
-            write: WriteTarget {
-                output_path: blocker.join("out.parquet").to_str().unwrap().to_string(),
-                output_format: OutputFormat::PARQUET,
-            },
-            metrics_directory: metrics_directory.to_str().unwrap().to_string(),
-            run_id: "run-a".to_string(),
-        },
-        Some(three_samples()),
-        None,
+/// Reads back what `directory`, on disk, holds for `run_id`.
+fn recorded(directory: &MetricsDirectory, run_id: &str) -> RecordedRun {
+    let directory = directory.clone();
+    let run_id = run_id.to_string();
+    pipeline::run(
+        move |ctx| async move { fixture::read_recorded_run(&ctx, &directory, &run_id).await },
+        PipelineOptions::single_threaded(),
     )
-    .unwrap_err();
-
-    assert!(
-        matches!(err, DataFusionError::IoError(_)) && err.to_string().contains("blocker"),
-        "expected the sink's IO error, got {err}"
-    );
-    for table in ["runs", "metrics"] {
-        let files: Vec<_> = std::fs::read_dir(metrics_directory.join(table)).map_or_else(
-            |_| Vec::new(),
-            |entries| entries.map(|entry| entry.unwrap().path()).collect(),
-        );
-        assert!(files.is_empty(), "{table} holds {files:?}");
-    }
+    .unwrap()
 }
 
 /// Every row of `batches` as its column values rendered in order.

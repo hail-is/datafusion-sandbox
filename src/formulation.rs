@@ -12,6 +12,7 @@ use crate::{
     dataset::Dataset,
     locus::{LocusOrdering, SplitPoints},
     ordered_frame::{OrderedFrame, OutputLayout},
+    run_metrics::FormulationRecord,
 };
 
 use datafusion::{error::Result, prelude::*};
@@ -43,6 +44,23 @@ impl fmt::Display for Formulation {
     }
 }
 
+impl From<&Formulation> for FormulationRecord {
+    fn from(formulation: &Formulation) -> Self {
+        let (groups, split_points) = match formulation {
+            Formulation::CombineAllelesUnion | Formulation::CombineRefsUnion => (None, None),
+            Formulation::CombineRefsGroupedMerge { groups } => (Some(groups.get()), None),
+            Formulation::CombineRefsIntervalMerge { split_points } => {
+                (None, Some(split_points.to_string()))
+            }
+        };
+        Self {
+            name: formulation.to_string(),
+            groups,
+            split_points,
+        }
+    }
+}
+
 impl Formulation {
     #[must_use]
     pub fn required_ordering(&self) -> LocusOrdering {
@@ -51,28 +69,6 @@ impl Formulation {
             Self::CombineRefsUnion
             | Self::CombineRefsGroupedMerge { .. }
             | Self::CombineRefsIntervalMerge { .. } => combine_refs_union::required_ordering(),
-        }
-    }
-
-    /// The sample group count of a grouped merge; `None` for every other formulation.
-    #[must_use]
-    pub const fn groups(&self) -> Option<NonZeroUsize> {
-        match self {
-            Self::CombineRefsGroupedMerge { groups } => Some(*groups),
-            Self::CombineAllelesUnion
-            | Self::CombineRefsUnion
-            | Self::CombineRefsIntervalMerge { .. } => None,
-        }
-    }
-
-    /// The split points of an interval merge; `None` for every other formulation.
-    #[must_use]
-    pub const fn split_points(&self) -> Option<&SplitPoints> {
-        match self {
-            Self::CombineRefsIntervalMerge { split_points } => Some(split_points),
-            Self::CombineAllelesUnion
-            | Self::CombineRefsUnion
-            | Self::CombineRefsGroupedMerge { .. } => None,
         }
     }
 

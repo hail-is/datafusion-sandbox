@@ -14,6 +14,7 @@ use datafusion_sandbox::combiner_run::{Action, CombinerRun};
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::formulation::Formulation;
 use datafusion_sandbox::locus::SplitPoints;
+use datafusion_sandbox::metrics_directory::MetricsDirectory;
 use datafusion_sandbox::ordered_frame::OutputLayout;
 use datafusion_sandbox::write::WriteTarget;
 use datafusion_sandbox::{pipeline, split_points};
@@ -339,7 +340,7 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
             match metrics {
                 Some(metrics_directory) => Action::MeasuredWrite {
                     write,
-                    metrics_directory,
+                    metrics_directory: MetricsDirectory::new(&metrics_directory),
                     run_id: run_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
                 },
                 None => Action::Write(write),
@@ -726,7 +727,7 @@ mod tests {
         };
         assert_eq!(write.output_path, "out.vortex");
         assert_eq!(write.output_format.compression(), Some("compact"));
-        assert_eq!(metrics_directory, "runs");
+        assert_eq!(metrics_directory, MetricsDirectory::new("runs"));
         assert!(Uuid::parse_str(&run_id).is_ok(), "run id {run_id:?}");
         assert_eq!(run.row_limit, None);
     }

@@ -11,8 +11,9 @@
 )]
 
 use datafusion_sandbox::{
-    fixture::{self, FixtureFormat},
+    fixture::{self, FixtureFormat, RecordedRun},
     format::InputFormat,
+    metrics_directory::MetricsDirectory,
     pipeline::{self, PipelineOptions},
 };
 
@@ -162,28 +163,22 @@ fn a_measured_write_prints_the_run_id_and_records_both_tables() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(stdout, "formulation: union\nrun id: cli-run\n32\n");
     assert!(output_path.exists());
-    for table in ["runs", "metrics"] {
-        let path = format!("{metrics_directory}/{table}/cli-run.parquet");
-        let batches = read_file(&path, &InputFormat::PARQUET);
-        let run_ids: Vec<String> = batches
-            .iter()
-            .flat_map(|batch| {
-                let column = batch.column_by_name("run_id").unwrap();
-                (0..batch.num_rows()).map(|row| array_value_to_string(column, row).unwrap())
-            })
+    let recorded = read_recorded_run(&metrics_directory, "cli-run");
+    let record = recorded.record.expect("a run record");
+    let metrics = recorded.metrics.expect("run metrics");
+    for (table, batch) in [("runs", &record), ("metrics", &metrics)] {
+        let column = batch.column_by_name("run_id").unwrap();
+        let run_ids: Vec<String> = (0..batch.num_rows())
+            .map(|row| array_value_to_string(column, row).unwrap())
             .collect();
-        assert!(!run_ids.is_empty(), "{path} is empty");
+        assert!(!run_ids.is_empty(), "{table} is empty");
         assert!(
             run_ids.iter().all(|run_id| run_id == "cli-run"),
-            "{path}: {run_ids:?}"
+            "{table}: {run_ids:?}"
         );
     }
-    let record = read_file(
-        &format!("{metrics_directory}/runs/cli-run.parquet"),
-        &InputFormat::PARQUET,
-    );
     let peak_rss_bytes: u64 =
-        array_value_to_string(record[0].column_by_name("peak_rss_bytes").unwrap(), 0)
+        array_value_to_string(record.column_by_name("peak_rss_bytes").unwrap(), 0)
             .unwrap()
             .parse()
             .unwrap();
@@ -258,6 +253,17 @@ fn read_file(path: &str, input_format: &InputFormat) -> Vec<RecordBatch> {
     let input_format = input_format.clone();
     pipeline::run(
         move |ctx| async move { fixture::read_file(&ctx, &path, &input_format, None).await },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap()
+}
+
+/// Reads back what the metrics directory at `path` on disk holds for `run_id`.
+fn read_recorded_run(path: &str, run_id: &str) -> RecordedRun {
+    let directory = MetricsDirectory::new(path);
+    let run_id = run_id.to_string();
+    pipeline::run(
+        move |ctx| async move { fixture::read_recorded_run(&ctx, &directory, &run_id).await },
         PipelineOptions::single_threaded(),
     )
     .unwrap()

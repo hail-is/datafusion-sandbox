@@ -67,3 +67,8 @@ fails records nothing: the tables are written only after the data write succeeds
 record is written last, so it is the mark of a recorded run. A failure between the two table
 writes leaves run metrics without a record, and a retry of that id replaces them rather than being
 refused.
+
+The `metrics_directory` module owns the layout and both guarantees (issue #183). Checking an id
+returns the value that records the run, so a run that was never checked cannot be recorded. The
+check is not a lock: two concurrent runs sharing an id can both pass it, and the later run's files
+replace the earlier run's.

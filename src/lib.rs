@@ -10,6 +10,8 @@
 //! - [`locus`] describes the supported stored locus representations, split points, and locus
 //!   intervals.
 //! - [`ordered_frame`] carries a formulation's deferred rows, ordering, and output layout.
+//! - [`metrics_directory`] lays out the run tables under a metrics directory and records a run
+//!   there.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
 //! - [`run_metrics`] fills the run record and run metrics tables of a measured write.
 //! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of
@@ -48,6 +50,7 @@ pub mod format;
 pub mod formulation;
 pub mod generated;
 pub mod locus;
+pub mod metrics_directory;
 pub mod ordered_frame;
 pub mod pipeline;
 pub mod process;

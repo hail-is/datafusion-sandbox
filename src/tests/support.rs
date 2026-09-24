@@ -1,6 +1,11 @@
 //! Test support about no dataset and no plan.
 
-use crate::{formulation::Formulation, locus::SplitPoints, pipeline};
+use crate::{
+    formulation::Formulation,
+    locus::SplitPoints,
+    pipeline,
+    run_metrics::{FormulationRecord, RunRecord, WriteRecord},
+};
 use datafusion::{
     arrow::{
         array::{TimestampNanosecondArray, UInt64Array},
@@ -9,7 +14,10 @@ use datafusion::{
     },
     prelude::SessionConfig,
 };
-use std::num::NonZeroUsize;
+use std::{
+    num::NonZeroUsize,
+    time::{Duration, SystemTime},
+};
 
 /// The values of the string column `name`, rendered, a null rendering as the empty string. A
 /// string column read back from Parquet is a view array, so this renders rather than downcasts.
@@ -115,4 +123,34 @@ pub(super) fn interval_merge(split_points: &str) -> Formulation {
     }
     .expect("test split points are valid");
     Formulation::CombineRefsIntervalMerge { split_points }
+}
+
+/// A run record of `run_id` whose other fields hold plausible settings and measurements of a
+/// grouped-merge write, for tests that need a record but assert on none of its facts.
+#[must_use]
+pub(super) fn run_record(run_id: &str) -> RunRecord {
+    RunRecord {
+        run_id: run_id.to_string(),
+        started_at: SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(1_700_000_000))
+            .expect("a start time after the epoch"),
+        formulation: FormulationRecord {
+            name: "grouped-merge".to_string(),
+            groups: Some(2),
+            split_points: None,
+        },
+        dataset_path: "gs://bucket/refs".to_string(),
+        input_format: "vortex".to_string(),
+        write: WriteRecord {
+            output_path: "gs://bucket/combined.parquet".to_string(),
+            output_format: "parquet".to_string(),
+            compression: Some("snappy".to_string()),
+        },
+        threads: 1,
+        samples: 4,
+        rows_written: 32,
+        run_ns: 2_000,
+        execute_ns: 1_000,
+        peak_rss_bytes: 1 << 20,
+    }
 }

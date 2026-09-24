@@ -83,7 +83,7 @@ pub fn recover_file_order(
     // sort may panic on a comparator that is not one. So sort by a total proxy key and verify
     // each adjacent pair afterwards. Transitivity of the interval relation makes a consistent
     // chain of adjacent pairs a consistent whole.
-    let key_of = |file: usize| keys.get(file).map(Vec::as_slice).unwrap_or_default();
+    let key_of = |file: usize| keys.get(file).map_or_default(Vec::as_slice);
     let mut order: Vec<usize> = (0..files.len()).collect();
     order.sort_by(|&a, &b| compare_keys(key_of(a), key_of(b)));
 
