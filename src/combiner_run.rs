@@ -1,7 +1,6 @@
 //! A resolved combiner run, the action it performs, and its outcome.
 
 use crate::{
-    dataset::Dataset,
     format::InputFormat,
     formulation::Formulation,
     metrics_directory::MetricsDirectory,
@@ -10,6 +9,7 @@ use crate::{
     process,
     run_metrics::RunRecord,
     sink,
+    stored::dataset::Dataset,
     write::WriteTarget,
 };
 

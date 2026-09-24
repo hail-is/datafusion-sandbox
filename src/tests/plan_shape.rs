@@ -26,14 +26,14 @@ use object_store::path::Path;
 use std::{fmt, sync::Arc};
 
 /// An owned handle through which tests observe and assert a physical plan's shape.
-pub(super) struct PlanShape {
+pub struct PlanShape {
     plan: Arc<dyn ExecutionPlan>,
 }
 
 impl PlanShape {
     /// Observes `plan` without taking ownership from its test.
     #[must_use]
-    pub(super) fn of(plan: &Arc<dyn ExecutionPlan>) -> Self {
+    pub fn of(plan: &Arc<dyn ExecutionPlan>) -> Self {
         Self {
             plan: Arc::clone(plan),
         }
@@ -41,14 +41,14 @@ impl PlanShape {
 
     /// Every node of type `T` in the plan, root first.
     #[must_use]
-    pub(super) fn nodes_of<T: ExecutionPlan>(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+    pub fn nodes_of<T: ExecutionPlan>(&self) -> Vec<Arc<dyn ExecutionPlan>> {
         nodes_of::<T>(&self.plan)
     }
 
     /// The operator on each rendered line, root first, with display indentation retained and
     /// operator details removed.
     #[must_use]
-    pub(super) fn operators(&self) -> Vec<String> {
+    pub fn operators(&self) -> Vec<String> {
         self.to_string()
             .lines()
             .map(|line| {
@@ -65,7 +65,7 @@ impl PlanShape {
     /// `OrderedSource`, so the test-only bridge in `sorted_table` unwraps it without making the
     /// production source type part of the crate API.
     #[must_use]
-    pub(super) fn scanned_files(&self) -> Vec<Vec<Path>> {
+    pub fn scanned_files(&self) -> Vec<Vec<Path>> {
         self.nodes_of::<DataSourceExec>()
             .into_iter()
             .map(|node| {
@@ -94,7 +94,7 @@ impl PlanShape {
 
     /// The object-store paths read by the plan's only scan, in file order.
     #[must_use]
-    pub(super) fn files_in_only_scan(&self) -> Vec<Path> {
+    pub fn files_in_only_scan(&self) -> Vec<Path> {
         let mut scans = self.scanned_files();
         assert_eq!(
             scans.len(),
@@ -111,7 +111,7 @@ impl PlanShape {
     /// sort-preserving merge. Several groups add an outer union with one single-partition input
     /// per group. A group of one sample is its scan; a larger group is a flat merge. A formulation
     /// may merge once more after parallel operators above the outer union. No sort may appear.
-    pub(super) fn assert_merge_tree(&self, groups: &[usize]) {
+    pub fn assert_merge_tree(&self, groups: &[usize]) {
         if let [n_samples] = groups {
             self.assert_flat_merge(&self.plan, *n_samples);
             return;
@@ -170,7 +170,7 @@ impl PlanShape {
     }
 
     /// Asserts one union with one ordered, single-partition input per sample and no merge above it.
-    pub(super) fn assert_one_ordered_partition_per_sample(&self, n_samples: usize) {
+    pub fn assert_one_ordered_partition_per_sample(&self, n_samples: usize) {
         let unions = self.nodes_of::<UnionExec>();
         assert_eq!(
             unions.len(),
@@ -207,7 +207,7 @@ impl PlanShape {
     }
 
     /// Asserts that the plan contains no re-sort.
-    pub(super) fn assert_no_sorts(&self) {
+    pub fn assert_no_sorts(&self) {
         self.assert_no_sorts_in(&self.plan);
     }
 
@@ -217,7 +217,7 @@ impl PlanShape {
     /// This observation is text-based on purpose. Parquet renders `predicate=`, Vortex renders
     /// `predicate:`, and Vortex's file source is a foreign type. The absence of a [`FilterExec`]
     /// elsewhere and the result assertions establish that this displayed predicate is effective.
-    pub(super) fn assert_filter_reaches_every_scan(
+    pub fn assert_filter_reaches_every_scan(
         &self,
         n_scans: usize,
         representation: LocusRepresentation,
@@ -251,7 +251,7 @@ impl PlanShape {
     }
 
     /// Asserts the merge tree and that the optimizer left the filter inside every scan.
-    pub(super) fn assert_filter_stays_inside_the_scans(&self, groups: &[usize]) {
+    pub fn assert_filter_stays_inside_the_scans(&self, groups: &[usize]) {
         self.assert_merge_tree(groups);
         assert!(
             self.nodes_of::<FilterExec>().is_empty(),
@@ -283,7 +283,7 @@ impl PlanShape {
 
     /// Asserts one flat sample merge per locus interval, with at most one final merge above the
     /// union of intervals and no filter, sort, or repartition operator.
-    pub(super) fn assert_one_merge_per_interval(
+    pub fn assert_one_merge_per_interval(
         &self,
         intervals: usize,
         samples: usize,
@@ -368,7 +368,7 @@ impl PlanShape {
     ///
     /// Only column names are compared. Every stored ordering in these tests uses the same direction
     /// and null placement.
-    pub(super) fn assert_ends_in_sink_requiring(&self, ordering: &StoredOrdering) {
+    pub fn assert_ends_in_sink_requiring(&self, ordering: &StoredOrdering) {
         let required = match (
             self.plan.downcast_ref::<DataSinkExec>(),
             self.plan.downcast_ref::<PartitionedSinkExec>(),

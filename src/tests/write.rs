@@ -1,7 +1,6 @@
 //! File writes through a write target, over in-memory object stores.
 
 use crate::{
-    dataset::Dataset,
     fixture::{self, FixtureFormat, MemoryStore},
     format::OutputFormat,
     formulation::Formulation,
@@ -9,6 +8,7 @@ use crate::{
     locus::LocusRepresentation,
     pipeline::{self, PipelineOptions},
     run_metrics::WriteRecord,
+    stored::dataset::Dataset,
     write::WriteTarget,
 };
 

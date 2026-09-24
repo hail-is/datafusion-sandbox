@@ -141,9 +141,9 @@ increasing in the locus ordering, define `j` locus intervals.
 _Avoid_: boundary, breakpoint, cut point, partition key
 
 **Row-balanced split points**:
-The split points that cut a sorted table into locus intervals holding as near equal row counts as
-its loci allow: with `n` rows and `j` intervals, the `k`-th point is the locus of the row at index
-`floor(k * n / j)`. Whether they are found exactly from the rows or approximated from file
+The split points that cut a locus-sorted table into locus intervals holding as near equal row
+counts as its loci allow: with `n` rows and `j` intervals, the `k`-th point is the locus of the row
+at index `floor(k * n / j)`. Whether they are found exactly from the rows or approximated from file
 statistics is a method, not a different kind of split point.
 _Avoid_: oracle split points, ideal split points, even split points
 
@@ -165,6 +165,12 @@ One stored collection of per-sample tables under a declared locus ordering, iden
 the format of each file, and the sample set found there. A dataset without a declared locus
 ordering does not exist.
 _Avoid_: input, table (a dataset holds many per-sample tables), corpus, dataset layout (retired)
+
+**Locus-sorted table**:
+One file or a directory of files read as a single sorted table under a locus ordering; it has no
+sample set. Unlike a sorted table it knows its locus ordering, and unlike a dataset it holds one
+table rather than one per sample.
+_Avoid_: standalone table, sorted frame, table (unqualified)
 
 **Generated table**:
 A table whose rows a generator produces on demand rather than reading them from storage. It has no
@@ -231,8 +237,9 @@ requirement.
 _Avoid_: sort key, ordering (unqualified), stored ordering (the expansion, a separate term)
 
 **Stored ordering**:
-The expansion of a locus ordering into stored fields under a dataset's locus representation:
-`contig` then `position`, or the packed `locus` field, optionally followed by `alleles`.
+The expansion of a locus ordering into stored fields under the locus representation of a dataset or
+a locus-sorted table: `contig` then `position`, or the packed `locus` field, optionally followed by
+`alleles`.
 _Avoid_: sort expressions, physical ordering, locus ordering (the declaration, a separate term)
 
 **Reference data**:

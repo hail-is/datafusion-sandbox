@@ -1,6 +1,6 @@
 use super::combine_refs_union::required_ordering;
-use crate::dataset::{Dataset, union_or_single};
 use crate::locus::StoredOrdering;
+use crate::stored::dataset::{Dataset, union_or_single};
 
 use datafusion::{error::Result, prelude::*};
 use std::num::NonZeroUsize;

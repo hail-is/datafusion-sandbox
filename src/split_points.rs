@@ -1,15 +1,14 @@
 //! Exact row-balanced split points from a stored locus-sorted table.
 //!
-//! The path-taking entry runs both plans through the pipeline runner. The first obtains the row
-//! count. The second reads only locus fields, numbers rows in the table's recovered order, and
-//! filters to the requested interval boundaries. Keeping the plan as scan, window, and filter
-//! avoids collecting the table or reading its locus columns more than once.
+//! The path-taking entry runs two plans over the table: the first obtains the row count, the second
+//! reads only the stored ordering's columns, numbers rows in the table's recovered order, and
+//! filters to the requested interval boundaries. Results are keyed by row number, so the entry
+//! does not depend on the order in which the filtered rows arrive.
 
 use crate::{
-    dataset::read_sorted_table,
     format::InputFormat,
-    locus::{Locus, LocusOrdering, LocusRepresentation, SplitPoints},
-    pipeline::{self, PipelineOptions},
+    locus::{Locus, LocusOrdering, SplitPoints},
+    stored::locus_sorted_table::LocusSortedTable,
 };
 
 use datafusion::{
@@ -17,49 +16,31 @@ use datafusion::{
     datasource::listing::ListingTableUrl,
     functions_window::row_number::row_number,
     logical_expr::ExprFunctionExt,
-    prelude::{DataFrame, col, lit},
+    prelude::{DataFrame, SessionContext, col, lit},
 };
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 const ROW_NUMBER_COLUMN: &str = "__row_number";
 
-/// Computes the row-balanced split points of the sorted table at `path`.
+/// Computes the row-balanced split points of the locus-sorted table at `table_path`.
 ///
 /// # Errors
 ///
-/// Returns an error if the path cannot be read as one locus-sorted table, the table has no rows,
-/// the requested intervals select fewer than one distinct row apiece, a selected row does not hold
-/// a valid locus, or the selected loci are not strictly increasing.
-pub fn row_balanced(
-    path: String,
+/// Returns an error if `intervals` is less than 2, the path cannot be opened as one locus-sorted
+/// table, the table has no rows, the requested intervals select fewer than one distinct row apiece,
+/// a selected row does not hold a valid locus, or the selected loci are not strictly increasing.
+pub async fn row_balanced(
+    ctx: &SessionContext,
+    table_path: ListingTableUrl,
     input_format: InputFormat,
     intervals: NonZeroUsize,
-    threads: NonZeroUsize,
 ) -> Result<SplitPoints> {
     validate_interval_count(intervals)?;
-    let options = PipelineOptions::for_paths(threads, [path.as_str()])?;
-    pipeline::run(
-        move |ctx| async move {
-            let table_path = ListingTableUrl::parse(path)?;
-            let frame =
-                read_sorted_table(&ctx, table_path, input_format, LocusOrdering::locus()).await?;
-            row_balanced_from_frame(frame, intervals).await
-        },
-        options,
-    )
-}
-
-/// Computes row-balanced split points from an already resolved sorted frame.
-///
-/// This is the exact method's internal seam for module tests and callers that already have a
-/// frame. Plan execution still belongs inside [`pipeline::run`].
-pub(crate) async fn row_balanced_from_frame(
-    frame: DataFrame,
-    intervals: NonZeroUsize,
-) -> Result<SplitPoints> {
-    validate_interval_count(intervals)?;
-    let (representation, targets, selected) = row_balanced_plan(frame, intervals).await?;
+    let table =
+        LocusSortedTable::open(ctx, table_path, input_format, LocusOrdering::locus()).await?;
+    let (targets, selected) = selected_rows(ctx, &table, intervals).await?;
     let batches = selected.collect().await?;
+    let representation = table.locus_representation();
     let mut loci_by_row_number = BTreeMap::new();
     for batch in &batches {
         let loci = representation.loci(batch).map_err(configuration_error)?;
@@ -97,13 +78,13 @@ pub(crate) async fn row_balanced_from_frame(
     })
 }
 
-/// Builds the exact method's window and filter plan after executing its row-count plan.
-pub(crate) async fn row_balanced_plan(
-    frame: DataFrame,
+/// Counts the table's rows and selects the target rows by their row number in locus order.
+async fn selected_rows(
+    ctx: &SessionContext,
+    table: &LocusSortedTable,
     intervals: NonZeroUsize,
-) -> Result<(LocusRepresentation, Vec<u64>, DataFrame)> {
-    let representation = LocusRepresentation::detect(frame.schema().inner())?;
-    let ordering = LocusOrdering::locus().expand(representation);
+) -> Result<(Vec<u64>, DataFrame)> {
+    let frame = table.read(ctx)?;
     let row_count = frame.clone().count().await?;
     if row_count == 0 {
         return Err(DataFusionError::Configuration(
@@ -112,6 +93,7 @@ pub(crate) async fn row_balanced_plan(
     }
 
     let targets = target_row_numbers(row_count, intervals)?;
+    let ordering = table.stored_ordering();
     let columns = ordering.column_names();
     let columns = columns.iter().map(String::as_str).collect::<Vec<_>>();
     let selected = frame
@@ -126,16 +108,7 @@ pub(crate) async fn row_balanced_plan(
             col(ROW_NUMBER_COLUMN)
                 .in_list(targets.iter().copied().map(lit).collect::<Vec<_>>(), false),
         )?;
-
-    // DataFusion otherwise repartitions above the global window to parallelize the filter. That
-    // would violate the one-partition plan and allow collect to return target rows out of order.
-    let (mut state, plan) = selected.into_parts();
-    state
-        .config_mut()
-        .options_mut()
-        .optimizer
-        .enable_round_robin_repartition = false;
-    Ok((representation, targets, DataFrame::new(state, plan)))
+    Ok((targets, selected))
 }
 
 fn target_row_numbers(row_count: usize, intervals: NonZeroUsize) -> Result<Vec<u64>> {

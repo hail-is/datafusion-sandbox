@@ -1,5 +1,5 @@
-use crate::dataset::Dataset;
 use crate::locus::{LocusOrdering, StoredOrdering};
+use crate::stored::dataset::Dataset;
 
 use datafusion::{error::Result, functions_window::rank::rank, prelude::*};
 

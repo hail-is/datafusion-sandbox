@@ -8,7 +8,10 @@
 )]
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use datafusion::error::{DataFusionError, Result};
+use datafusion::{
+    datasource::listing::ListingTableUrl,
+    error::{DataFusionError, Result},
+};
 
 use datafusion_sandbox::combiner_run::{Action, CombinerRun};
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
@@ -16,8 +19,9 @@ use datafusion_sandbox::formulation::Formulation;
 use datafusion_sandbox::locus::SplitPoints;
 use datafusion_sandbox::metrics_directory::MetricsDirectory;
 use datafusion_sandbox::ordered_frame::OutputLayout;
+use datafusion_sandbox::pipeline::{self, PipelineOptions};
+use datafusion_sandbox::split_points;
 use datafusion_sandbox::write::WriteTarget;
-use datafusion_sandbox::{pipeline, split_points};
 use std::{num::NonZeroUsize, path::Path};
 use uuid::Uuid;
 
@@ -372,10 +376,18 @@ fn main() -> Result<()> {
         Command::BalanceSplitPoints(args) => {
             let threads = threads.unwrap_or_else(pipeline::default_thread_count);
             let input_format = args.input_format.format();
-            let path_is_directory = args.path.ends_with('/') || Path::new(&args.path).is_dir();
-            validate_input_path(&args.path, &input_format, path_is_directory)?;
-            let points =
-                split_points::row_balanced(args.path, input_format, args.intervals, threads)?;
+            validate_input_path(&args.path, &input_format)?;
+            let options = PipelineOptions::for_paths(threads, [args.path.as_str()])?;
+            let BalanceSplitPointsArgs {
+                path, intervals, ..
+            } = args;
+            let points = pipeline::run(
+                move |ctx| async move {
+                    let table_path = ListingTableUrl::parse(path)?;
+                    split_points::row_balanced(&ctx, table_path, input_format, intervals).await
+                },
+                options,
+            )?;
             println!("{points}");
         }
         command => {
@@ -391,15 +403,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Rejects a file path whose recognized extension contradicts the selected input format.
-fn validate_input_path(
-    input_path: &str,
-    input_format: &InputFormat,
-    path_is_directory: bool,
-) -> Result<()> {
-    if path_is_directory {
-        return Ok(());
-    }
+/// Rejects an input path whose recognized extension contradicts the selected input format.
+fn validate_input_path(input_path: &str, input_format: &InputFormat) -> Result<()> {
     let Some(extension) = Path::new(input_path)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -488,7 +493,7 @@ mod tests {
 
     #[test]
     fn balance_split_points_rejects_a_contradictory_file_extension() {
-        let error = validate_input_path("combined.parquet", &InputFormat::VORTEX, false)
+        let error = validate_input_path("combined.parquet", &InputFormat::VORTEX)
             .expect_err("a Parquet extension must contradict the Vortex input format");
 
         assert!(
@@ -497,8 +502,10 @@ mod tests {
             ),
             "{error}"
         );
-        validate_input_path("combined.parquet", &InputFormat::VORTEX, true)
-            .expect("a directory path is not format inference");
+        validate_input_path("combined.vortex", &InputFormat::VORTEX)
+            .expect("a Vortex extension agrees with the Vortex input format");
+        validate_input_path("combined", &InputFormat::VORTEX)
+            .expect("a path without a recognized extension is not format inference");
     }
 
     #[test]

@@ -527,6 +527,41 @@ fn rejects_a_non_int64_packed_locus_representation() {
     assert!(message.contains("Utf8"), "unexpected error: {message}");
 }
 
+#[test]
+fn validating_a_locus_ordering_detects_the_representation_and_expands_under_it() {
+    let (representation, stored_ordering) = LocusOrdering::locus_then_alleles()
+        .validate_against(&schema(vec![
+            Field::new("locus", DataType::Int64, false),
+            Field::new("alleles", DataType::Utf8, false),
+        ]))
+        .unwrap();
+
+    assert_eq!(representation, LocusRepresentation::Packed);
+    assert_eq!(stored_ordering.column_names(), ["locus", "alleles"]);
+}
+
+#[test]
+fn validating_a_locus_ordering_rejects_a_schema_missing_an_ordering_column() {
+    let error = LocusOrdering::locus_then_alleles()
+        .validate_against(&schema(vec![
+            Field::new("contig", DataType::Utf8View, false),
+            Field::new("position", DataType::Int32, false),
+        ]))
+        .expect_err("the schema has no alleles column");
+
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    assert!(error.to_string().contains("'alleles'"), "{error}");
+}
+
+#[test]
+fn validating_a_locus_ordering_surfaces_a_representation_error() {
+    let error = LocusOrdering::locus()
+        .validate_against(&schema(vec![Field::new("alleles", DataType::Utf8, false)]))
+        .expect_err("the schema has no locus representation");
+
+    assert!(error.to_string().contains("neither"), "{error}");
+}
+
 fn schema(fields: Vec<Field>) -> SchemaRef {
     Arc::new(Schema::new(fields))
 }
