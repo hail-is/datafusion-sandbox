@@ -35,7 +35,8 @@
 //!   session. Every shared dataset fixture holds one. The sorted-table planning
 //!   tests build metadata-only tables over one with nothing in it. One built by
 //!   `MemoryStore::failing_writes_under` fails every write under a prefix, for
-//!   tests of what a failed write leaves behind.
+//!   tests of what a failed write leaves behind, which `MemoryStore::locations_under`
+//!   lists.
 //!
 //! Row helpers, for tests that filter a fixture and check what comes back:
 //! - `sample_rows`, the rows above as one sample's expected result.

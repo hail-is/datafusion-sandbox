@@ -13,7 +13,6 @@ use crate::{
 };
 
 use datafusion::datasource::listing::ListingTableUrl;
-use futures_util::TryStreamExt;
 use object_store::{ObjectStoreExt, path::Path};
 use std::sync::Arc;
 
@@ -118,7 +117,7 @@ fn an_ordered_write_uses_its_frames_file_per_partition_layout() {
         output_format,
     };
 
-    let (executed, mut written) = pipeline::run(
+    let (executed, written) = pipeline::run(
         move |ctx| async move {
             input.register(&ctx);
             output.register(&ctx);
@@ -135,19 +134,13 @@ fn an_ordered_write_uses_its_frames_file_per_partition_layout() {
             .await?;
             let ordered = formulation.plan(&ctx, &dataset).await?;
             let executed = target.write(ordered).await?;
-            let written: Vec<Path> = output
-                .store()
-                .list(Some(&Path::from("combined")))
-                .map_ok(|metadata| metadata.location)
-                .try_collect()
-                .await?;
+            let written = output.locations_under("combined").await;
             Ok((executed, written))
         },
         PipelineOptions::single_threaded(),
     )
     .unwrap();
 
-    written.sort();
     assert_eq!(executed.rows_written, 32);
     assert!(executed.execute_ns > 0);
     assert!(executed.plan.metrics().is_some());
