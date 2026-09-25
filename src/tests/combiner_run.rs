@@ -11,6 +11,7 @@ use crate::{
         plan_shape::exec_names,
         support::{grouped_merge, interval_merge, string_values, timestamp_values, u64_values},
     },
+    throughput_probe::{ProbeSettings, StopReason},
     write::WriteTarget,
 };
 use datafusion::{
@@ -48,6 +49,28 @@ fn renders_outcomes() {
         .render()
         .unwrap(),
         "42\nwarning: metric 'bytes_written' has no column in the run metrics table and was not recorded\nwarning: metric 'rows_written' has no column in the run metrics table and was not recorded"
+    );
+    assert_eq!(
+        Outcome::Probed {
+            rows_received: 42,
+            steady_state_throughput: Some(1_234.56),
+            stop_reason: StopReason::Capped,
+            unrecorded_metrics: vec!["bytes_written".to_string()],
+        }
+        .render()
+        .unwrap(),
+        "42\nsteady-state throughput: 1234.6 rows/s\nstop reason: capped\nwarning: metric 'bytes_written' has no column in the run metrics table and was not recorded"
+    );
+    assert_eq!(
+        Outcome::Probed {
+            rows_received: 0,
+            steady_state_throughput: None,
+            stop_reason: StopReason::Completed,
+            unrecorded_metrics: Vec::new(),
+        }
+        .render()
+        .unwrap(),
+        "0\nsteady-state throughput: none\nstop reason: completed"
     );
     assert_eq!(
         Outcome::Plan("physical plan".to_string()).render().unwrap(),
@@ -876,7 +899,9 @@ fn every_combiner_takes_a_measured_write() {
             panic!("{run_id}: expected a measured write, got {outcome:?}");
         };
         assert_eq!(rows_written, expected, "{run_id}");
-        let RecordedRun { record, metrics } = recorded(&metrics_directory, run_id);
+        let RecordedRun {
+            record, metrics, ..
+        } = recorded(&metrics_directory, run_id);
         for (table, batch) in [("runs", record.unwrap()), ("metrics", metrics.unwrap())] {
             assert!(
                 string_values(&batch, "run_id")
@@ -1007,9 +1032,188 @@ fn a_failed_data_write_records_nothing() {
 
     let message = failed.unwrap_err().to_string();
     assert!(message.contains("out/combined.parquet"), "{message}");
-    let RecordedRun { record, metrics } = recorded;
+    let RecordedRun {
+        record, metrics, ..
+    } = recorded;
     assert!(record.is_none(), "{record:?}");
     assert!(metrics.is_none(), "{metrics:?}");
+}
+
+/// A drained probe of every formulation runs the plan to its end, which the fixture reaches in
+/// well under the maximum duration, so it completes at the first partition end, having received
+/// every row. It records all three tables: a run record whose probe columns say so and whose
+/// write columns are empty, the run metrics, and progress samples whose rows only increase to
+/// the rows received.
+#[test]
+fn a_drained_probe_of_every_formulation_completes_and_records_three_tables() {
+    let input = memory_dataset();
+    for (formulation, rows) in [
+        (Formulation::CombineAllelesUnion, 8),
+        (Formulation::CombineRefsUnion, 32),
+        (grouped_merge(2), 32),
+        (interval_merge("1:3,2:2"), 32),
+    ] {
+        let store = MemoryStore::new("probed");
+        let directory = MetricsDirectory::new(&format!("{}metrics", store.url().as_str()));
+        let run = CombinerRun {
+            formulation: formulation.clone(),
+            ..probe_run(&input, directory.clone(), "run-a")
+        };
+
+        let (outcome, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
+            let outcome = run.execute_in(&ctx).await?;
+            Ok((
+                outcome,
+                fixture::read_recorded_run(&ctx, &directory, "run-a").await?,
+            ))
+        });
+
+        let Outcome::Probed {
+            rows_received,
+            steady_state_throughput,
+            stop_reason,
+            unrecorded_metrics,
+        } = outcome
+        else {
+            panic!("{formulation}: expected a probe, got {outcome:?}");
+        };
+        assert_eq!(rows_received, rows, "{formulation}");
+        assert_eq!(stop_reason, StopReason::Completed, "{formulation}");
+        assert!(
+            steady_state_throughput.is_some_and(|throughput| throughput > 0.0),
+            "{formulation}: {steady_state_throughput:?}"
+        );
+        assert_eq!(unrecorded_metrics, Vec::<String>::new(), "{formulation}");
+
+        let record = recorded.record.unwrap();
+        for (column, expected) in [
+            ("run_id", "run-a"),
+            ("action", "probe"),
+            ("stop_reason", "completed"),
+            ("rows_written", &rows.to_string()),
+            ("window_rows", &rows.to_string()),
+            ("poll_period_ns", "100000000"),
+            ("max_duration_ns", "300000000000"),
+            ("output_path", ""),
+            ("output_format", ""),
+        ] {
+            assert_eq!(
+                string_values(&record, column),
+                [expected],
+                "{formulation}: {column}"
+            );
+        }
+        let window_end_ns = u64_values(&record, "window_end_ns")[0].unwrap();
+        assert_eq!(
+            u64_values(&record, "first_partition_end_ns"),
+            [Some(window_end_ns)],
+            "{formulation}"
+        );
+        let execute_ns = u64_values(&record, "execute_ns")[0].unwrap();
+        assert!(execute_ns >= window_end_ns, "{formulation}");
+
+        let samples = recorded.progress_samples.unwrap();
+        assert!(
+            string_values(&samples, "run_id")
+                .iter()
+                .all(|id| id == "run-a"),
+            "{formulation}"
+        );
+        let sample_rows: Vec<u64> = u64_values(&samples, "rows")
+            .into_iter()
+            .map(Option::unwrap)
+            .collect();
+        assert!(sample_rows.len() >= 2, "{formulation}: {sample_rows:?}");
+        assert!(
+            sample_rows.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{formulation}: {sample_rows:?}"
+        );
+        assert_eq!(sample_rows.last(), Some(&rows), "{formulation}");
+        assert_eq!(
+            u64_values(&samples, "elapsed_ns").last(),
+            Some(&Some(window_end_ns)),
+            "{formulation}"
+        );
+        assert!(recorded.metrics.unwrap().num_rows() > 0, "{formulation}");
+    }
+}
+
+/// A probe refuses a run id that already has a run record before it discovers the dataset, and
+/// leaves the recorded run's tables as they were.
+#[test]
+fn a_probe_refuses_a_run_id_that_already_has_a_run_record_before_discovery() {
+    let input = memory_dataset();
+    let store = MemoryStore::new("probe-refused");
+    let url = store.url().as_str().to_string();
+    let directory = MetricsDirectory::new(&format!("{url}metrics"));
+    let first = probe_run(&input, directory.clone(), "run-a");
+    let second = CombinerRun {
+        input_path: format!("{url}no-such-dataset/"),
+        ..probe_run(&input, directory.clone(), "run-a")
+    };
+
+    let (before, refused, after) = on_memory_stores(&input, &store, move |ctx| async move {
+        first.execute_in(&ctx).await?;
+        let before = fixture::read_recorded_run(&ctx, &directory, "run-a").await?;
+        let refused = second.execute_in(&ctx).await;
+        let after = fixture::read_recorded_run(&ctx, &directory, "run-a").await?;
+        Ok((before, refused, after))
+    });
+
+    let message = refused.unwrap_err().to_string();
+    assert!(message.contains("run id 'run-a'"), "{message}");
+    assert!(before.record.is_some());
+    assert_eq!(after.record, before.record);
+    assert_eq!(after.metrics, before.metrics);
+    assert_eq!(after.progress_samples, before.progress_samples);
+}
+
+/// A probe whose progress samples write fails, the first of its three, records nothing.
+#[test]
+fn a_probe_whose_progress_samples_write_fails_records_nothing() {
+    let input = memory_dataset();
+    let store = MemoryStore::failing_writes_under("probe-fails", "metrics/progress");
+    let directory = MetricsDirectory::new(&format!("{}metrics", store.url().as_str()));
+    let run = probe_run(&input, directory.clone(), "run-a");
+
+    let (failed, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
+        let failed = run.execute_in(&ctx).await;
+        let recorded = fixture::read_recorded_run(&ctx, &directory, "run-a").await?;
+        Ok((failed, recorded))
+    });
+
+    let message = failed.unwrap_err().to_string();
+    assert!(message.contains("metrics/progress"), "{message}");
+    let RecordedRun {
+        record,
+        metrics,
+        progress_samples,
+    } = recorded;
+    assert!(record.is_none(), "{record:?}");
+    assert!(metrics.is_none(), "{metrics:?}");
+    assert!(progress_samples.is_none(), "{progress_samples:?}");
+}
+
+/// A drained grouped-merge probe of `input` with the default settings, recorded as `run_id` under
+/// `metrics_directory`.
+fn probe_run(
+    input: &fixture::DatasetFixture,
+    metrics_directory: MetricsDirectory,
+    run_id: &str,
+) -> CombinerRun {
+    CombinerRun {
+        formulation: grouped_merge(2),
+        input_path: input.table_path().to_string(),
+        input_format: input.input_format(),
+        action: Action::Probe {
+            metrics_directory,
+            run_id: run_id.to_string(),
+            settings: ProbeSettings::default(),
+        },
+        sample_set: None,
+        row_limit: None,
+        threads: NonZeroUsize::MIN,
+    }
 }
 
 /// The in-memory contig-position Vortex dataset fixture.

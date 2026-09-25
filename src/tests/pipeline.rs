@@ -246,3 +246,23 @@ fn runs_with_one_thread() {
 
     assert!(output.exists());
 }
+
+/// The pipeline reaches the IO runtime through its session, and a task spawned there runs on
+/// the IO runtime's threads rather than the CPU runtime's the pipeline runs on.
+#[test]
+fn gives_the_pipeline_the_io_runtime() {
+    let (pipeline_thread, io_thread) = pipeline::run(
+        |ctx| async move {
+            let io = pipeline::io_runtime(ctx.state().config())?;
+            let io_thread = io
+                .spawn(async { std::thread::current().id() })
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            Ok::<_, DataFusionError>((std::thread::current().id(), io_thread))
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap();
+
+    assert_ne!(pipeline_thread, io_thread);
+}

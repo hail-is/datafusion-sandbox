@@ -1,9 +1,11 @@
-//! The two tables a measured write records: the run record and the run metrics.
+//! The tables a recorded run fills: the run record, the run metrics, and a throughput probe's
+//! progress samples.
 //!
-//! This module owns both schemas and the two pure functions that fill them: [`run_record_batch`]
-//! turns the facts of one combiner run into its one-row run record, and [`run_metrics_batch`]
-//! turns an executed plan into its run metrics, one row per operator per partition. Neither knows
-//! about datasets, formulations, or storage. A formulation and a write target describe their
+//! This module owns the schemas and the pure functions that fill them: [`run_record_batch`] turns
+//! the facts of one combiner run into its one-row run record, [`run_metrics_batch`] turns an
+//! executed plan into its run metrics, one row per operator per partition, and
+//! [`progress_samples_batch`] turns a probe's samples into one row each. None knows about
+//! datasets, formulations, or storage. A formulation and a write target describe their
 //! settings as a [`FormulationRecord`] and a [`WriteRecord`], the combiner run supplies the other
 //! facts and the plan, and the metrics directory writes the batches where they go. See
 //! [ADR 0016](../docs/adr/0016-record-run-metrics-as-wide-parquet-tables.md) for why the tables
@@ -23,9 +25,11 @@
 //! `DataFusion`'s fallback grouped hash aggregate stream; the streams it picks for the allele
 //! combiner's distinct do not report it, so the column is null for every current plan.
 
+use crate::throughput_probe::{Decision, ProbeSettings, ProgressSample};
+
 use datafusion::{
     arrow::{
-        array::{ArrayRef, StringArray, TimestampNanosecondArray, UInt64Array},
+        array::{ArrayRef, Float64Array, StringArray, TimestampNanosecondArray, UInt64Array},
         datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
         record_batch::RecordBatch,
     },
@@ -39,30 +43,44 @@ use datafusion::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 /// The facts of one combiner run: its resolved settings and its whole-run measurements.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RunRecord {
     pub run_id: String,
     pub started_at: SystemTime,
     pub formulation: FormulationRecord,
     pub dataset_path: String,
     pub input_format: String,
-    pub write: WriteRecord,
+    /// The write the run made; `None` for a drained probe.
+    pub write: Option<WriteRecord>,
     pub threads: usize,
     /// The size of the sample set the run covered.
     pub samples: usize,
+    /// The rows written; for a probe, the rows the sink received before the stop.
     pub rows_written: u64,
-    /// Wall-clock nanoseconds from resolved settings to the completed write.
+    /// Wall-clock nanoseconds from resolved settings to the completed write, or a probe's stop.
     pub run_ns: u64,
-    /// Wall-clock nanoseconds the physical plan's execution alone took.
+    /// Wall-clock nanoseconds the physical plan's execution alone took, to a probe's stop.
     pub execute_ns: u64,
     /// The process's peak resident set size in bytes, over its lifetime up to the plan's
     /// completion. A whole-process figure: it counts scan buffers and the pages the allocator
     /// keeps resident, whatever the allocator.
     pub peak_rss_bytes: u64,
+    /// What a throughput probe decided and how it was set; `None` for a measured write.
+    pub probe: Option<ProbeRecord>,
+}
+
+/// A throughput probe's settings and the decision that stopped it, as the run record holds them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProbeRecord {
+    pub settings: ProbeSettings,
+    pub decision: Decision,
+    /// The elapsed nanoseconds of the first sample that showed a finished partition; `None` if
+    /// none did before the stop.
+    pub first_partition_end_ns: Option<u64>,
 }
 
 /// The settings of a formulation the run record holds. A formulation describes itself as one.
@@ -98,6 +116,7 @@ enum RecordCell {
     OptionalString(fn(&RunRecord) -> Option<&str>),
     UInt64(fn(&RunRecord) -> u64),
     OptionalUInt64(fn(&RunRecord) -> Option<u64>),
+    OptionalFloat64(fn(&RunRecord) -> Option<f64>),
     Timestamp(fn(&RunRecord) -> SystemTime),
 }
 
@@ -134,11 +153,21 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
     },
     RecordColumn {
         name: "output_format",
-        cell: RecordCell::String(|record| &record.write.output_format),
+        cell: RecordCell::OptionalString(|record| {
+            record
+                .write
+                .as_ref()
+                .map(|write| write.output_format.as_str())
+        }),
     },
     RecordColumn {
         name: "compression",
-        cell: RecordCell::OptionalString(|record| record.write.compression.as_deref()),
+        cell: RecordCell::OptionalString(|record| {
+            record
+                .write
+                .as_ref()
+                .and_then(|write| write.compression.as_deref())
+        }),
     },
     RecordColumn {
         name: "threads",
@@ -150,7 +179,12 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
     },
     RecordColumn {
         name: "output_path",
-        cell: RecordCell::String(|record| &record.write.output_path),
+        cell: RecordCell::OptionalString(|record| {
+            record
+                .write
+                .as_ref()
+                .map(|write| write.output_path.as_str())
+        }),
     },
     RecordColumn {
         name: "rows_written",
@@ -168,6 +202,73 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
         name: "peak_rss_bytes",
         cell: RecordCell::UInt64(|record| record.peak_rss_bytes),
     },
+    RecordColumn {
+        name: "action",
+        cell: RecordCell::OptionalString(|record| record.probe.as_ref().map(|_| "probe")),
+    },
+    RecordColumn {
+        name: "stop_reason",
+        cell: RecordCell::OptionalString(|record| {
+            record
+                .probe
+                .as_ref()
+                .map(|probe| probe.decision.stop_reason.name())
+        }),
+    },
+    RecordColumn {
+        name: "steady_state_throughput",
+        cell: RecordCell::OptionalFloat64(|record| {
+            record
+                .probe
+                .as_ref()
+                .and_then(|probe| probe.decision.steady_state_throughput)
+        }),
+    },
+    RecordColumn {
+        name: "window_end_ns",
+        cell: RecordCell::OptionalUInt64(|record| {
+            record
+                .probe
+                .as_ref()
+                .map(|probe| probe.decision.window_end_ns)
+        }),
+    },
+    RecordColumn {
+        name: "window_rows",
+        cell: RecordCell::OptionalUInt64(|record| {
+            record
+                .probe
+                .as_ref()
+                .map(|probe| probe.decision.window_rows)
+        }),
+    },
+    RecordColumn {
+        name: "first_partition_end_ns",
+        cell: RecordCell::OptionalUInt64(|record| {
+            record
+                .probe
+                .as_ref()
+                .and_then(|probe| probe.first_partition_end_ns)
+        }),
+    },
+    RecordColumn {
+        name: "poll_period_ns",
+        cell: RecordCell::OptionalUInt64(|record| {
+            record
+                .probe
+                .as_ref()
+                .map(|probe| duration_ns(probe.settings.poll_period))
+        }),
+    },
+    RecordColumn {
+        name: "max_duration_ns",
+        cell: RecordCell::OptionalUInt64(|record| {
+            record
+                .probe
+                .as_ref()
+                .map(|probe| duration_ns(probe.settings.max_duration))
+        }),
+    },
 ];
 
 impl RecordCell {
@@ -175,13 +276,14 @@ impl RecordCell {
         match self {
             Self::String(_) | Self::OptionalString(_) => DataType::Utf8,
             Self::UInt64(_) | Self::OptionalUInt64(_) => DataType::UInt64,
+            Self::OptionalFloat64(_) => DataType::Float64,
             Self::Timestamp(_) => timestamp_type(),
         }
     }
 
     const fn nullable(&self) -> bool {
         match self {
-            Self::OptionalString(_) | Self::OptionalUInt64(_) => true,
+            Self::OptionalString(_) | Self::OptionalUInt64(_) | Self::OptionalFloat64(_) => true,
             Self::String(_) | Self::UInt64(_) | Self::Timestamp(_) => false,
         }
     }
@@ -193,6 +295,7 @@ impl RecordCell {
             Self::OptionalString(cell) => Arc::new(StringArray::from(vec![cell(record)])),
             Self::UInt64(cell) => Arc::new(UInt64Array::from(vec![cell(record)])),
             Self::OptionalUInt64(cell) => Arc::new(UInt64Array::from(vec![cell(record)])),
+            Self::OptionalFloat64(cell) => Arc::new(Float64Array::from(vec![cell(record)])),
             Self::Timestamp(cell) => {
                 Arc::new(timestamp_array(vec![Some(timestamp_nanos(cell(record))?)]))
             }
@@ -223,6 +326,40 @@ pub fn run_record_batch(record: &RunRecord) -> Result<RecordBatch> {
         .map(|column| column.cell.array(record))
         .collect::<Result<Vec<_>>>()?;
     Ok(RecordBatch::try_new(run_record_schema(), columns)?)
+}
+
+/// The schema of the progress samples table: one row per progress sample of a throughput probe.
+///
+/// `sample_index` is the sample's position in the order the probe took them, from 0.
+#[must_use]
+pub fn progress_samples_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("run_id", DataType::Utf8, false),
+        Field::new("sample_index", DataType::UInt64, false),
+        Field::new("elapsed_ns", DataType::UInt64, false),
+        Field::new("rows", DataType::UInt64, false),
+    ]))
+}
+
+/// The batch of the progress samples table holding `samples`, in order, of the run `run_id`.
+///
+/// # Errors
+///
+/// Returns an error if the batch cannot be assembled.
+pub fn progress_samples_batch(run_id: &str, samples: &[ProgressSample]) -> Result<RecordBatch> {
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(vec![run_id; samples.len()])),
+        Arc::new(UInt64Array::from_iter_values(
+            (0..samples.len()).map(to_u64),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            samples.iter().map(|sample| sample.elapsed_ns),
+        )),
+        Arc::new(UInt64Array::from_iter_values(
+            samples.iter().map(|sample| sample.rows),
+        )),
+    ];
+    Ok(RecordBatch::try_new(progress_samples_schema(), columns)?)
 }
 
 /// The run metrics of one executed plan, and the names of the metrics it reported that the table
@@ -706,4 +843,9 @@ fn timestamp_nanos(time: SystemTime) -> Result<i64> {
 /// wider than 64 bits.
 fn to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+/// `duration` in nanoseconds as the table stores it, saturating at `u64::MAX`.
+fn duration_ns(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }

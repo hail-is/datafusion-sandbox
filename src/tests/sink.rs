@@ -4,12 +4,18 @@ use super::plan_shape::PlanShape;
 use crate::fixture::{self, DatasetFixture, FixtureFormat, SAMPLES, block_on};
 use crate::{
     formulation::Formulation,
-    generated::make_range_table,
+    generated::{make_range_table, make_unbounded_table},
     locus::LocusRepresentation,
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
-    sink::{self, CollectingSink, DataSinkTarget, PartitionedSinkExec, SinkTarget},
+    run_metrics,
+    sink::{
+        self, CollectingSink, DataSinkTarget, DrainingSink, PartitionedSinkExec, ProbedSink,
+        SinkTarget,
+    },
     stored::dataset::Dataset,
+    tests::support::{rows_of_operator, u64_values},
+    throughput_probe::{ProbeSettings, StopReason},
 };
 
 use datafusion::{
@@ -29,12 +35,13 @@ use datafusion::{
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
         union::UnionExec,
     },
-    prelude::{SessionContext, col, lit},
+    prelude::{DataFrame, SessionContext, col, lit},
 };
 
 use std::{
     fmt,
     sync::{Arc, Mutex, PoisonError},
+    time::Duration,
 };
 
 /// The number of rows every fixture dataset holds across its samples.
@@ -483,6 +490,107 @@ impl SinkTarget for CollectingPartitions {
         *self.sinks.lock().unwrap_or_else(PoisonError::into_inner) = sinks;
         Ok(Arc::new(exec))
     }
+}
+
+/// Probing a plan that never finishes stops it at the maximum duration, capped, with no
+/// partition end. The samples start near the start of execution, take the time forward, and
+/// their rows only increase; the plan dropped at the stop still reports its metrics, where the
+/// operator feeding the sink holds the rows the probe says the sink received.
+#[test]
+fn probing_a_plan_that_never_finishes_stops_it_capped() {
+    let max_duration = Duration::from_millis(300);
+    let (probed, filter_rows) = probe_generated(max_duration, |ctx| make_unbounded_table(ctx, 64));
+
+    assert_eq!(probed.decision.stop_reason, StopReason::Capped);
+    assert_eq!(probed.first_partition_end_ns, None);
+    let samples = &probed.samples;
+    assert!(samples.len() >= 3, "{samples:?}");
+    assert!(samples[0].elapsed_ns < samples[1].elapsed_ns, "{samples:?}");
+    let last = samples.last().unwrap();
+    assert!(
+        u128::from(last.elapsed_ns) >= max_duration.as_nanos(),
+        "{samples:?}"
+    );
+    for pair in samples.windows(2) {
+        assert!(pair[0].elapsed_ns < pair[1].elapsed_ns, "{pair:?}");
+        assert!(pair[0].rows <= pair[1].rows, "{pair:?}");
+    }
+    assert!(last.rows > samples[0].rows, "{samples:?}");
+    assert_eq!(probed.decision.window_end_ns, last.elapsed_ns);
+    assert!(probed.rows_received >= last.rows);
+    assert!(probed.execute_ns >= last.elapsed_ns);
+    assert_eq!(filter_rows, probed.rows_received);
+}
+
+/// Probing a plan that finishes before its cap completes at the sample that first shows its
+/// partition finished, which closes the window, having received every row.
+#[test]
+fn probing_a_plan_that_finishes_completes_at_its_partition_end() {
+    let (probed, filter_rows) = probe_generated(Duration::from_secs(60), |ctx| {
+        make_range_table(ctx, 10_000, 64)
+    });
+
+    assert_eq!(probed.decision.stop_reason, StopReason::Completed);
+    let last = probed.samples.last().unwrap();
+    assert_eq!(probed.first_partition_end_ns, Some(last.elapsed_ns));
+    assert_eq!(probed.decision.window_end_ns, last.elapsed_ns);
+    assert_eq!(last.rows, 10_000);
+    assert_eq!(probed.rows_received, 10_000);
+    assert_eq!(filter_rows, 10_000);
+}
+
+/// Probing with a zero poll period, which no sampler can keep, is refused with an error that
+/// names the setting, before the plan executes.
+#[test]
+fn probing_with_a_zero_poll_period_is_refused() {
+    let settings = ProbeSettings {
+        poll_period: Duration::ZERO,
+        ..ProbeSettings::default()
+    };
+
+    let error = try_probe_generated(settings, |ctx| make_range_table(ctx, 100, 64)).unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("poll period"), "{message}");
+}
+
+/// Probes a drain of the generated table `build` makes, sampling every 10 ms, and returns what
+/// [`try_probe_generated`] returns.
+fn probe_generated(
+    max_duration: Duration,
+    build: impl FnOnce(&SessionContext) -> Result<DataFrame> + Send + 'static,
+) -> (ProbedSink, u64) {
+    let settings = ProbeSettings {
+        poll_period: Duration::from_millis(10),
+        max_duration,
+    };
+    try_probe_generated(settings, build).unwrap()
+}
+
+/// Probes a drain of the generated table `build` makes with `settings`, filtered so that the
+/// operator feeding the sink counts its rows. Returns the probe and the `output_rows` of the
+/// filter, over its partitions, in the run metrics of the plan it stopped.
+fn try_probe_generated(
+    settings: ProbeSettings,
+    build: impl FnOnce(&SessionContext) -> Result<DataFrame> + Send + 'static,
+) -> Result<(ProbedSink, u64)> {
+    pipeline::run(
+        move |ctx| async move {
+            let frame = build(&ctx)?.filter(col("idx").gt_eq(lit(0)))?;
+            let sink = Arc::new(DrainingSink::new(Arc::clone(frame.schema().inner())));
+            let target = Arc::new(DataSinkTarget::new(sink));
+            let probed =
+                sink::probe(sink::run_into(frame, "drain", None, target)?, &settings).await?;
+            let metrics = run_metrics::run_metrics_batch("probe", &probed.plan)?.batch;
+            let output_rows = u64_values(&metrics, "output_rows");
+            let filter_rows = rows_of_operator(&metrics, "FilterExec")
+                .into_iter()
+                .map(|row| output_rows[row].unwrap())
+                .sum();
+            Ok((probed, filter_rows))
+        },
+        PipelineOptions::single_threaded(),
+    )
 }
 
 /// The contig-position fixture in `format`, built outside any runtime as the fixture requires.

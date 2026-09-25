@@ -19,8 +19,8 @@ _Avoid_: invocation, command
 
 **Action**:
 What a caller asks a combiner run to do with its combined rows: write them, write them and record
-the run, collect them for display, render the plan, or execute and render the analyzed plan. The
-Action determines the run's Outcome.
+the run, run them only until their throughput settles, collect them for display, render the plan,
+or execute and render the analyzed plan. The Action determines the run's Outcome.
 _Avoid_: mode (taken by **Compression mode**), ending, sink (the operator the rows end in, which
 the action chooses; a separate term)
 
@@ -29,6 +29,13 @@ The action that writes a formulation's rows and records how its plan ran: a run 
 run metrics, beside the output. The rows written are the rows a plain write writes. See
 [ADR 0016](docs/adr/0016-record-run-metrics-as-wide-parquet-tables.md).
 _Avoid_: profiled write, benchmark run, instrumented write
+
+**Throughput probe**:
+The action that runs a formulation's plan, writing its rows or only draining them, takes progress
+samples as it goes, and stops once its estimate of steady-state throughput settles or its
+measurement window closes. It records the run like a measured write, plus its progress samples;
+any rows it wrote are incomplete and are not kept.
+_Avoid_: benchmark run, early-stopped write, timed run
 
 **Outcome**:
 What a pipeline hands back after it runs: rows written, collected batches, or a plan rendered as
@@ -254,6 +261,32 @@ The encoding of one file, together with how to read or write it, its extension, 
 modes it accepts. It does not describe how a dataset arranges rows across files; that is the
 dataset's locus ordering and its output layout.
 _Avoid_: locus ordering, output layout, codec, encoding
+
+### Throughput
+
+**Progress sample**:
+One reading, taken during a throughput probe, of how many rows its sink has received so far and
+when.
+_Avoid_: poll, tick, snapshot
+
+**Warmup**:
+The stretch at the start of a throughput probe whose progress samples its estimate leaves out,
+because throughput has not yet settled.
+_Avoid_: ramp-up, burn-in
+
+**Measurement window**:
+The stretch of a throughput probe its estimate covers: from the end of warmup to the stop, or to
+the first finished partition if that comes sooner.
+_Avoid_: steady-state interval (**Locus interval** owns "interval"), sample window
+
+**Steady-state throughput**:
+A throughput probe's estimate: the rows its sink received per second over its measurement window.
+_Avoid_: rate, speed, throughput (unqualified)
+
+**Stop reason**:
+Why a throughput probe ended: its estimate settled (steady), a partition of its plan finished and
+closed its measurement window (completed), or it reached its time limit (capped).
+_Avoid_: exit status, termination cause
 
 ### Benchmark settings
 

@@ -1,13 +1,14 @@
-//! The metrics directory a measured write records runs under.
+//! The metrics directory measured writes and throughput probes record runs under.
 //!
-//! A metrics directory holds two tables, each a directory of one Parquet file per run: the run
-//! record at `runs/<run_id>.parquet` and the run metrics at `metrics/<run_id>.parquet`. This
-//! module owns that layout and the two guarantees
+//! A metrics directory holds three tables, each a directory of one Parquet file per run: the run
+//! record at `runs/<run_id>.parquet`, the run metrics at `metrics/<run_id>.parquet`, and a
+//! throughput probe's progress samples at `progress/<run_id>.parquet`. This module owns that
+//! layout and the two guarantees
 //! [ADR 0016](../docs/adr/0016-record-run-metrics-as-wide-parquet-tables.md) gives the history a
 //! directory accumulates. A run id that already has a run record is refused: checking an id is
 //! the only way to get an [`UnrecordedRun`], and only an unrecorded run can be recorded. And the
-//! run record is written last, so its presence marks a recorded run: a failure between the two
-//! writes leaves run metrics without a record, which a retry of the id replaces.
+//! run record is written last, so its presence marks a recorded run: a failure between the
+//! writes leaves other tables' files without a record, which a retry of the id replaces.
 //!
 //! The check is not a lock. Two runs sharing an id that check before either records both pass,
 //! and the later one's files replace the earlier one's.
@@ -15,6 +16,7 @@
 use crate::{
     format::OutputFormat,
     run_metrics::{self, RunRecord},
+    throughput_probe::ProgressSample,
     write::WriteTarget,
 };
 
@@ -32,8 +34,11 @@ use std::sync::Arc;
 const RUNS_TABLE: &str = "runs";
 /// The subdirectory of a metrics directory holding the run metrics table.
 const METRICS_TABLE: &str = "metrics";
+/// The subdirectory of a metrics directory holding the progress samples table.
+const PROGRESS_TABLE: &str = "progress";
 
-/// A directory a measured write records runs under, on any store the session serves.
+/// A directory measured writes and throughput probes record runs under, on any store the session
+/// serves.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetricsDirectory {
     /// The path as given, without a trailing slash.
@@ -67,6 +72,12 @@ impl MetricsDirectory {
         self.table_path(METRICS_TABLE, run_id)
     }
 
+    /// The path of the progress samples file of `run_id`.
+    #[must_use]
+    pub fn progress_samples_path(&self, run_id: &str) -> String {
+        self.table_path(PROGRESS_TABLE, run_id)
+    }
+
     fn table_path(&self, table: &str, run_id: &str) -> String {
         format!("{}/{table}/{run_id}.parquet", self.path)
     }
@@ -85,7 +96,7 @@ impl MetricsDirectory {
         let store = ctx.runtime_env().object_store(&url)?;
         match store.head(url.prefix()).await {
             Ok(_) => Err(DataFusionError::Configuration(format!(
-                "run id '{run_id}' already has a run record at '{record_path}'; a measured write does not replace a recorded run"
+                "run id '{run_id}' already has a run record at '{record_path}'; a recorded run is never replaced"
             ))),
             Err(object_store::Error::NotFound { .. }) => Ok(UnrecordedRun {
                 directory: self.clone(),
@@ -126,12 +137,7 @@ impl UnrecordedRun {
         record: &RunRecord,
         plan: &Arc<dyn ExecutionPlan>,
     ) -> Result<Vec<String>> {
-        if record.run_id != self.run_id {
-            return Err(DataFusionError::Internal(format!(
-                "the run '{}' was checked, but the record names run '{}'",
-                self.run_id, record.run_id
-            )));
-        }
+        self.check(record)?;
         let metrics = run_metrics::run_metrics_batch(&self.run_id, plan)?;
         write_table(
             ctx,
@@ -146,6 +152,42 @@ impl UnrecordedRun {
         )
         .await?;
         Ok(metrics.unrecorded)
+    }
+
+    /// Records a throughput probe: writes its progress `samples` first, and then records it as
+    /// [`UnrecordedRun::record`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for any reason [`UnrecordedRun::record`] gives, or if the progress
+    /// samples cannot be filled or written, which leaves the run unrecorded.
+    pub async fn record_probe(
+        self,
+        ctx: &SessionContext,
+        record: &RunRecord,
+        plan: &Arc<dyn ExecutionPlan>,
+        samples: &[ProgressSample],
+    ) -> Result<Vec<String>> {
+        self.check(record)?;
+        write_table(
+            ctx,
+            run_metrics::progress_samples_batch(&self.run_id, samples)?,
+            self.directory.progress_samples_path(&self.run_id),
+        )
+        .await?;
+        self.record(ctx, record, plan).await
+    }
+
+    /// Refuses `record` if it names another run than the one checked.
+    fn check(&self, record: &RunRecord) -> Result<()> {
+        if record.run_id == self.run_id {
+            Ok(())
+        } else {
+            Err(DataFusionError::Internal(format!(
+                "the run '{}' was checked, but the record names run '{}'",
+                self.run_id, record.run_id
+            )))
+        }
     }
 }
 

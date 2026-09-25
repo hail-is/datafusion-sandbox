@@ -9,6 +9,7 @@ use crate::{
     run_metrics,
     sink::{self, CollectingSink, DataSinkTarget},
     tests::support::{run_record, string_values},
+    throughput_probe::ProgressSample,
 };
 
 use datafusion::{
@@ -40,6 +41,10 @@ fn the_layout_names_one_file_per_run_in_each_table() {
     assert_eq!(
         directory.run_metrics_path("run-a"),
         "gs://bucket/benchmarks/metrics/run-a.parquet"
+    );
+    assert_eq!(
+        directory.progress_samples_path("run-a"),
+        "gs://bucket/benchmarks/progress/run-a.parquet"
     );
 }
 
@@ -171,10 +176,77 @@ fn a_failed_run_record_write_leaves_run_metrics_and_the_id_unrecorded() {
 
     let error = failed.unwrap_err().to_string();
     assert!(error.contains("benchmarks/runs"), "{error}");
-    let RecordedRun { record, metrics } = recorded;
+    let RecordedRun {
+        record, metrics, ..
+    } = recorded;
     assert!(record.is_none(), "{record:?}");
     assert!(metrics.is_some());
     retried.unwrap();
+}
+
+/// Recording a probe writes its progress samples beside the run metrics and the run record, and
+/// a measured write's recording writes none.
+#[test]
+fn recording_a_probe_writes_its_progress_samples_as_a_third_table() {
+    let store = MemoryStore::new("probe-recorded");
+    let directory = directory(&store);
+    let samples = [(1_000, 0), (100_002_000, 640)]
+        .map(|(elapsed_ns, rows)| ProgressSample { elapsed_ns, rows });
+    let expected_samples = run_metrics::progress_samples_batch("run-a", &samples).unwrap();
+    let expected_record = run_metrics::run_record_batch(&run_record("run-a")).unwrap();
+
+    let (probe, measured) = on(&store, move |ctx| async move {
+        let plan = executed_plan(&ctx, false).await?;
+        let run = directory.unrecorded(&ctx, "run-a").await?;
+        run.record_probe(&ctx, &run_record("run-a"), &plan, &samples)
+            .await?;
+        let run = directory.unrecorded(&ctx, "run-b").await?;
+        run.record(&ctx, &run_record("run-b"), &plan).await?;
+        Ok((
+            fixture::read_recorded_run(&ctx, &directory, "run-a").await?,
+            fixture::read_recorded_run(&ctx, &directory, "run-b").await?,
+        ))
+    });
+
+    assert_eq!(probe.progress_samples.unwrap(), expected_samples);
+    assert_eq!(probe.record.unwrap(), expected_record);
+    assert!(probe.metrics.is_some());
+    assert!(measured.record.is_some());
+    assert!(measured.progress_samples.is_none());
+}
+
+/// A probe whose progress samples write fails records nothing: the samples go first.
+#[test]
+fn a_failed_progress_samples_write_records_nothing() {
+    let store = MemoryStore::failing_writes_under("progress-fails", "benchmarks/progress");
+    let directory = directory(&store);
+    let samples = [ProgressSample {
+        elapsed_ns: 1_000,
+        rows: 0,
+    }];
+
+    let (failed, recorded) = on(&store, move |ctx| async move {
+        let plan = executed_plan(&ctx, false).await?;
+        let run = directory.unrecorded(&ctx, "run-a").await?;
+        let failed = run
+            .record_probe(&ctx, &run_record("run-a"), &plan, &samples)
+            .await;
+        Ok((
+            failed,
+            fixture::read_recorded_run(&ctx, &directory, "run-a").await?,
+        ))
+    });
+
+    let error = failed.unwrap_err().to_string();
+    assert!(error.contains("benchmarks/progress"), "{error}");
+    let RecordedRun {
+        record,
+        metrics,
+        progress_samples,
+    } = recorded;
+    assert!(record.is_none(), "{record:?}");
+    assert!(metrics.is_none(), "{metrics:?}");
+    assert!(progress_samples.is_none(), "{progress_samples:?}");
 }
 
 /// A run whose run metrics write fails writes no run record either: the metrics go first.
@@ -195,7 +267,9 @@ fn a_failed_run_metrics_write_records_nothing() {
 
     let error = failed.unwrap_err().to_string();
     assert!(error.contains("benchmarks/metrics"), "{error}");
-    let RecordedRun { record, metrics } = recorded;
+    let RecordedRun {
+        record, metrics, ..
+    } = recorded;
     assert!(record.is_none(), "{record:?}");
     assert!(metrics.is_none(), "{metrics:?}");
 }

@@ -9,13 +9,14 @@ use crate::{
     locus::LocusRepresentation,
     ordered_frame::OutputLayout,
     pipeline::{self, PipelineOptions},
-    run_metrics::{self, FormulationRecord, RunRecord, WriteRecord},
+    run_metrics::{self, FormulationRecord, ProbeRecord, RunRecord, WriteRecord},
     sink::{self, CollectingSink, DataSinkTarget},
     stored::dataset::Dataset,
     tests::support::{
         grouped_merge, interval_merge, rows_of_operator, run_record, string_values,
         timestamp_values, u64_values,
     },
+    throughput_probe::{Decision, ProbeSettings, ProgressSample, StopReason},
     write::WriteTarget,
 };
 
@@ -35,7 +36,8 @@ use std::{
 };
 
 /// The run record table's columns, in order, with their types and whether they may be null: the
-/// settings a formulation or a write target may leave unset are the only nullable ones.
+/// settings a formulation may leave unset, the write a drained probe does not make, and the
+/// facts only a probe has are the only nullable ones.
 #[test]
 fn the_run_record_schema_names_its_columns_in_order() {
     let schema = run_metrics::run_record_schema();
@@ -62,15 +64,23 @@ fn the_run_record_schema_names_its_columns_in_order() {
             ("split_points", &DataType::Utf8, true),
             ("dataset_path", &DataType::Utf8, false),
             ("input_format", &DataType::Utf8, false),
-            ("output_format", &DataType::Utf8, false),
+            ("output_format", &DataType::Utf8, true),
             ("compression", &DataType::Utf8, true),
             ("threads", &DataType::UInt64, false),
             ("samples", &DataType::UInt64, false),
-            ("output_path", &DataType::Utf8, false),
+            ("output_path", &DataType::Utf8, true),
             ("rows_written", &DataType::UInt64, false),
             ("run_ns", &DataType::UInt64, false),
             ("execute_ns", &DataType::UInt64, false),
             ("peak_rss_bytes", &DataType::UInt64, false),
+            ("action", &DataType::Utf8, true),
+            ("stop_reason", &DataType::Utf8, true),
+            ("steady_state_throughput", &DataType::Float64, true),
+            ("window_end_ns", &DataType::UInt64, true),
+            ("window_rows", &DataType::UInt64, true),
+            ("first_partition_end_ns", &DataType::UInt64, true),
+            ("poll_period_ns", &DataType::UInt64, true),
+            ("max_duration_ns", &DataType::UInt64, true),
         ]
     );
 }
@@ -89,17 +99,30 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
         },
         dataset_path: "gs://bucket/refs".to_string(),
         input_format: "vortex".to_string(),
-        write: WriteRecord {
+        write: Some(WriteRecord {
             output_path: "gs://bucket/combined.parquet".to_string(),
             output_format: "parquet".to_string(),
             compression: Some("zstd(3)".to_string()),
-        },
+        }),
         threads: 4,
         samples: 50,
         rows_written: 123_456,
         run_ns: 2_000_000_000,
         execute_ns: 1_500_000_000,
         peak_rss_bytes: 3_221_225_472,
+        probe: Some(ProbeRecord {
+            settings: ProbeSettings {
+                poll_period: Duration::from_millis(100),
+                max_duration: Duration::from_secs(300),
+            },
+            decision: Decision {
+                stop_reason: StopReason::Completed,
+                steady_state_throughput: Some(2_500.5),
+                window_end_ns: 1_400_000_000,
+                window_rows: 120_000,
+            },
+            first_partition_end_ns: Some(1_400_000_001),
+        }),
     };
 
     let batch = run_metrics::run_record_batch(&record).unwrap();
@@ -123,13 +146,21 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
         ("run_ns", "2000000000"),
         ("execute_ns", "1500000000"),
         ("peak_rss_bytes", "3221225472"),
+        ("action", "probe"),
+        ("stop_reason", "completed"),
+        ("steady_state_throughput", "2500.5"),
+        ("window_end_ns", "1400000000"),
+        ("window_rows", "120000"),
+        ("first_partition_end_ns", "1400000001"),
+        ("poll_period_ns", "100000000"),
+        ("max_duration_ns", "300000000000"),
     ] {
         assert_eq!(string_values(&batch, column), [expected], "{column}");
     }
 }
 
 /// A formulation without a group count or split points and a format at its default compression
-/// leave those three columns null.
+/// leave those three columns null, and a measured write leaves every probe column null.
 #[test]
 fn unset_run_record_settings_are_null() {
     let record = RunRecord {
@@ -138,19 +169,111 @@ fn unset_run_record_settings_are_null() {
             groups: None,
             split_points: None,
         },
-        write: WriteRecord {
+        write: Some(WriteRecord {
             compression: None,
-            ..run_record("run-1").write
-        },
+            ..run_record("run-1").write.unwrap()
+        }),
         ..run_record("run-1")
     };
 
     let batch = run_metrics::run_record_batch(&record).unwrap();
 
-    for column in ["groups", "split_points", "compression"] {
+    for column in [
+        "groups",
+        "split_points",
+        "compression",
+        "action",
+        "stop_reason",
+        "steady_state_throughput",
+        "window_end_ns",
+        "window_rows",
+        "first_partition_end_ns",
+        "poll_period_ns",
+        "max_duration_ns",
+    ] {
         assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");
     }
     assert_eq!(string_values(&batch, "formulation"), ["union"]);
+}
+
+/// A drained probe writes nothing, so its write settings are null; a probe with no estimate and
+/// no finished partition leaves those two columns null too.
+#[test]
+fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
+    let record = RunRecord {
+        write: None,
+        probe: Some(ProbeRecord {
+            settings: ProbeSettings::default(),
+            decision: Decision {
+                stop_reason: StopReason::Capped,
+                steady_state_throughput: None,
+                window_end_ns: 0,
+                window_rows: 0,
+            },
+            first_partition_end_ns: None,
+        }),
+        ..run_record("run-1")
+    };
+
+    let batch = run_metrics::run_record_batch(&record).unwrap();
+
+    for column in [
+        "output_format",
+        "compression",
+        "output_path",
+        "steady_state_throughput",
+        "first_partition_end_ns",
+    ] {
+        assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");
+    }
+    assert_eq!(string_values(&batch, "action"), ["probe"]);
+    assert_eq!(string_values(&batch, "stop_reason"), ["capped"]);
+}
+
+/// The progress samples table holds one row per sample, in the order taken, each with its index
+/// in that order.
+#[test]
+fn progress_samples_fill_one_row_each_in_order() {
+    let samples = [(3_000, 0), (100_004_000, 512), (200_001_000, 1_536)]
+        .map(|(elapsed_ns, rows)| ProgressSample { elapsed_ns, rows });
+
+    let batch = run_metrics::progress_samples_batch("run-1", &samples).unwrap();
+
+    assert_eq!(batch.schema(), run_metrics::progress_samples_schema());
+    let columns: Vec<(&str, &DataType, bool)> = batch
+        .schema_ref()
+        .fields()
+        .iter()
+        .map(|field| {
+            (
+                field.name().as_str(),
+                field.data_type(),
+                field.is_nullable(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        columns,
+        [
+            ("run_id", &DataType::Utf8, false),
+            ("sample_index", &DataType::UInt64, false),
+            ("elapsed_ns", &DataType::UInt64, false),
+            ("rows", &DataType::UInt64, false),
+        ]
+    );
+    assert_eq!(string_values(&batch, "run_id"), ["run-1"; 3]);
+    assert_eq!(
+        u64_values(&batch, "sample_index"),
+        [Some(0), Some(1), Some(2)]
+    );
+    assert_eq!(
+        u64_values(&batch, "elapsed_ns"),
+        [Some(3_000), Some(100_004_000), Some(200_001_000)]
+    );
+    assert_eq!(
+        u64_values(&batch, "rows"),
+        [Some(0), Some(512), Some(1_536)]
+    );
 }
 
 /// The run metrics table has a column for every metric the operators present in a current
