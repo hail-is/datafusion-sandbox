@@ -8,7 +8,7 @@ use crate::{
 };
 use datafusion::{
     arrow::{
-        array::{TimestampNanosecondArray, UInt64Array},
+        array::{Float64Array, TimestampNanosecondArray, UInt64Array},
         record_batch::RecordBatch,
         util::display::array_value_to_string,
     },
@@ -49,6 +49,24 @@ pub(super) fn u64_values(batch: &RecordBatch, name: &str) -> Vec<Option<u64>> {
         .as_any()
         .downcast_ref::<UInt64Array>()
         .unwrap_or_else(|| panic!("{name} is not a UInt64 column: {column:?}"))
+        .iter()
+        .collect()
+}
+
+/// The values of the `Float64` column `name`, null included.
+///
+/// # Panics
+///
+/// Panics if `batch` has no column `name` or it is not a `Float64` column.
+#[must_use]
+pub(super) fn f64_values(batch: &RecordBatch, name: &str) -> Vec<Option<f64>> {
+    let column = batch
+        .column_by_name(name)
+        .unwrap_or_else(|| panic!("no column {name}"));
+    column
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap_or_else(|| panic!("{name} is not a Float64 column: {column:?}"))
         .iter()
         .collect()
 }

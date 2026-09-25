@@ -563,6 +563,7 @@ fn probe_generated(
     let settings = ProbeSettings {
         poll_period: Duration::from_millis(10),
         max_duration,
+        ..ProbeSettings::default()
     };
     try_probe_generated(settings, build).unwrap()
 }

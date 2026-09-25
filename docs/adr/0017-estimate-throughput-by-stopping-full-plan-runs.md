@@ -21,6 +21,12 @@ decided in a grilling session on 2026-09-24.
   a pure function of the samples and its settings, so a recorded run replays exactly. Rejected: a
   fixed time budget, which gives a noisy configuration the same time as a quiet one and still needs
   a guess at warmup.
+- **MSER judges only cuts that leave at least five batches.** A minimum past half the batches
+  means the run is still too short to judge, so the probe keeps running. But the variance of a
+  single batch is always zero, so over every cut the minimum would always be the last batch, and
+  the probe would never stop steady. The variance of the last few batches is also too noisy to
+  compare, and often dips below that of the whole run by chance. Rejected: judging every cut,
+  which is the literal reading of #188 and never settles.
 - **Record every progress sample.** Each run keeps its full sample series beside its run record,
   so any stopping rule can be re-judged offline without rerunning a sweep. Samples are taken
   faster than the rule batches them, and batching is exact after the fact because the counts are

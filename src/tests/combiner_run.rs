@@ -9,9 +9,11 @@ use crate::{
     pipeline::{self, PipelineOptions},
     tests::{
         plan_shape::exec_names,
-        support::{grouped_merge, interval_merge, string_values, timestamp_values, u64_values},
+        support::{
+            f64_values, grouped_merge, interval_merge, string_values, timestamp_values, u64_values,
+        },
     },
-    throughput_probe::{ProbeSettings, StopReason},
+    throughput_probe::{self, Decision, ProbeSettings, ProgressSample, StopReason},
     write::WriteTarget,
 };
 use datafusion::{
@@ -25,7 +27,13 @@ use datafusion::{
     prelude::SessionContext,
 };
 use object_store::{ObjectStoreExt, path::Path as ObjectPath};
-use std::{future::Future, num::NonZeroUsize, path::Path, sync::Arc, time::SystemTime};
+use std::{
+    future::Future,
+    num::{NonZeroU32, NonZeroUsize},
+    path::Path,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use fixture::{FixtureFormat, MemoryStore, RecordedRun, SAMPLES};
 
@@ -1092,7 +1100,13 @@ fn a_drained_probe_of_every_formulation_completes_and_records_three_tables() {
             ("stop_reason", "completed"),
             ("rows_written", &rows.to_string()),
             ("window_rows", &rows.to_string()),
+            ("warmup_end_ns", ""),
             ("poll_period_ns", "100000000"),
+            ("batch_duration_ns", "1000000000"),
+            ("precision", "0.02"),
+            ("consecutive_checks", "3"),
+            ("window_groups", "10"),
+            ("min_duration_ns", "20000000000"),
             ("max_duration_ns", "300000000000"),
             ("output_path", ""),
             ("output_format", ""),
@@ -1135,6 +1149,121 @@ fn a_drained_probe_of_every_formulation_completes_and_records_three_tables() {
             "{formulation}"
         );
         assert!(recorded.metrics.unwrap().num_rows() > 0, "{formulation}");
+    }
+}
+
+/// A recorded probe replays exactly. Deciding after each of its recorded progress samples, as the
+/// probe did, with the settings its run record holds and the first partition end revealed from
+/// the sample that showed it, keeps running until the last sample and then reaches the decision
+/// its run record holds. So the tables hold every input the live decision had, and the samples it
+/// had, no more and no fewer. The settings are off their defaults, and short enough that MSER
+/// finds an end of warmup in a fixture's few milliseconds. A fixture's probe always completes, so
+/// the settings only the steady check reads show only if they would have stopped it sooner.
+#[test]
+fn a_recorded_probe_replays_to_its_recorded_decision() {
+    let input = memory_dataset();
+    let settings = ProbeSettings {
+        poll_period: Duration::from_millis(2),
+        batch_duration: Duration::from_millis(1),
+        precision: 1.0,
+        consecutive_checks: NonZeroU32::new(2).unwrap(),
+        window_groups: 3,
+        min_duration: Duration::from_millis(1),
+        max_duration: Duration::from_secs(60),
+    };
+    for formulation in [
+        Formulation::CombineAllelesUnion,
+        Formulation::CombineRefsUnion,
+        grouped_merge(2),
+        interval_merge("1:3,2:2"),
+    ] {
+        let store = MemoryStore::new("replayed");
+        let directory = MetricsDirectory::new(&format!("{}metrics", store.url().as_str()));
+        let run = CombinerRun {
+            formulation: formulation.clone(),
+            action: Action::Probe {
+                metrics_directory: directory.clone(),
+                run_id: "run-a".to_string(),
+                settings: settings.clone(),
+            },
+            ..probe_run(&input, directory.clone(), "run-a")
+        };
+
+        let (outcome, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
+            let outcome = run.execute_in(&ctx).await?;
+            Ok((
+                outcome,
+                fixture::read_recorded_run(&ctx, &directory, "run-a").await?,
+            ))
+        });
+
+        let record = recorded.record.unwrap();
+        let progress = recorded.progress_samples.unwrap();
+        let samples: Vec<ProgressSample> = u64_values(&progress, "elapsed_ns")
+            .into_iter()
+            .zip(u64_values(&progress, "rows"))
+            .map(|(elapsed_ns, rows)| ProgressSample {
+                elapsed_ns: elapsed_ns.unwrap(),
+                rows: rows.unwrap(),
+            })
+            .collect();
+        let recorded_settings = recorded_probe_settings(&record);
+        let first_partition_end_ns = u64_values(&record, "first_partition_end_ns")[0];
+        let (taken, replayed) = (1..=samples.len())
+            .find_map(|taken| {
+                let seen = samples.get(..taken)?;
+                let latest_ns = seen.last()?.elapsed_ns;
+                throughput_probe::decide(
+                    &recorded_settings,
+                    seen,
+                    first_partition_end_ns.filter(|&end_ns| end_ns <= latest_ns),
+                )
+                .map(|decision| (taken, decision))
+            })
+            .unwrap_or_else(|| panic!("{formulation}: the replay keeps running over {samples:?}"));
+        assert_eq!(taken, samples.len(), "{formulation}: {samples:?}");
+
+        let recorded_decision = Decision {
+            stop_reason: replayed.stop_reason,
+            steady_state_throughput: f64_values(&record, "steady_state_throughput")[0],
+            warmup_end_ns: u64_values(&record, "warmup_end_ns")[0],
+            window_end_ns: u64_values(&record, "window_end_ns")[0].unwrap(),
+            window_rows: u64_values(&record, "window_rows")[0].unwrap(),
+        };
+        assert_eq!(replayed, recorded_decision, "{formulation}");
+        assert_eq!(
+            string_values(&record, "stop_reason"),
+            [replayed.stop_reason.name()],
+            "{formulation}"
+        );
+        let Outcome::Probed {
+            steady_state_throughput,
+            stop_reason,
+            ..
+        } = outcome
+        else {
+            panic!("{formulation}: expected a probe, got {outcome:?}");
+        };
+        assert_eq!(
+            (stop_reason, steady_state_throughput),
+            (replayed.stop_reason, replayed.steady_state_throughput),
+            "{formulation}"
+        );
+    }
+}
+
+/// The probe settings a run record holds.
+fn recorded_probe_settings(record: &RecordBatch) -> ProbeSettings {
+    let duration = |column| Duration::from_nanos(u64_values(record, column)[0].unwrap());
+    let count = |column| u32::try_from(u64_values(record, column)[0].unwrap()).unwrap();
+    ProbeSettings {
+        poll_period: duration("poll_period_ns"),
+        batch_duration: duration("batch_duration_ns"),
+        precision: f64_values(record, "precision")[0].unwrap(),
+        consecutive_checks: NonZeroU32::new(count("consecutive_checks")).unwrap(),
+        window_groups: count("window_groups"),
+        min_duration: duration("min_duration_ns"),
+        max_duration: duration("max_duration_ns"),
     }
 }
 
