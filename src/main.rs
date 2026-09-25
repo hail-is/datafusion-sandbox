@@ -7,7 +7,7 @@
     )
 )]
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use datafusion::{
     datasource::listing::ListingTableUrl,
     error::{DataFusionError, Result},
@@ -190,8 +190,8 @@ struct CombinerArgs {
     compression: Option<String>,
     /// Record the run under DIR: its run record at DIR/runs/<ID>.parquet and its run metrics at
     /// DIR/metrics/<ID>.parquet, and a probe's progress samples at DIR/progress/<ID>.parquet, all
-    /// Parquet whatever the output format. DIR may be any path --write accepts. Requires --write,
-    /// and performs it, or --probe.
+    /// Parquet whatever the output format. DIR may be any path --write accepts. Requires --probe,
+    /// or --write, whose write it measures.
     #[arg(
         long,
         value_name = "DIR",
@@ -278,7 +278,7 @@ struct ProbeArgs {
         value_name = "SECONDS",
         value_parser = parse_seconds,
         requires = "probe",
-        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+        conflicts_with_all = ["show", "explain", "explain_analyze", "limit"]
     )]
     poll_period: Option<Duration>,
     /// With --probe, batch progress samples into batches of at least SECONDS, over which MSER
@@ -289,7 +289,7 @@ struct ProbeArgs {
         value_name = "SECONDS",
         value_parser = parse_seconds,
         requires = "probe",
-        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+        conflicts_with_all = ["show", "explain", "explain_analyze", "limit"]
     )]
     batch: Option<Duration>,
     /// With --probe, count a check as tight when its interval's half-width is below FRACTION of
@@ -299,7 +299,7 @@ struct ProbeArgs {
         value_name = "FRACTION",
         value_parser = parse_precision,
         requires = "probe",
-        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+        conflicts_with_all = ["show", "explain", "explain_analyze", "limit"]
     )]
     precision: Option<f64>,
     /// With --probe, stop, steady, after COUNT consecutive tight checks. Defaults to 3.
@@ -308,7 +308,7 @@ struct ProbeArgs {
         value_name = "COUNT",
         value_parser = clap::value_parser!(NonZeroU32),
         requires = "probe",
-        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+        conflicts_with_all = ["show", "explain", "explain_analyze", "limit"]
     )]
     consecutive: Option<NonZeroU32>,
     /// With --probe, split the measurement window into COUNT groups of equal duration for its
@@ -318,7 +318,7 @@ struct ProbeArgs {
         value_name = "COUNT",
         value_parser = clap::value_parser!(u32).range(2..=1000),
         requires = "probe",
-        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+        conflicts_with_all = ["show", "explain", "explain_analyze", "limit"]
     )]
     window_groups: Option<u32>,
     /// With --probe, stop steady no sooner than SECONDS of execution. Defaults to 20.
@@ -327,7 +327,7 @@ struct ProbeArgs {
         value_name = "SECONDS",
         value_parser = parse_seconds,
         requires = "probe",
-        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+        conflicts_with_all = ["show", "explain", "explain_analyze", "limit"]
     )]
     min_duration: Option<Duration>,
     /// With --probe, stop the probe, capped, once it has executed for SECONDS, unless the same
@@ -337,7 +337,7 @@ struct ProbeArgs {
         value_name = "SECONDS",
         value_parser = parse_seconds,
         requires = "probe",
-        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+        conflicts_with_all = ["show", "explain", "explain_analyze", "limit"]
     )]
     max_duration: Option<Duration>,
 }
@@ -359,18 +359,22 @@ impl ProbeArgs {
 }
 
 /// The action flags. At least one is required. `--explain` and `--explain-analyze` may combine
-/// with `--write`, in which case they render or analyze the write's plan; every other pair
-/// conflicts. `--write` and `--probe` are the recorded actions, one of which `--metrics`
-/// requires.
+/// with `--write`, in which case they render or analyze the write's plan, and `--probe` may too,
+/// in which case it probes the write; every other pair conflicts. `--write` and `--probe` are
+/// the recorded actions, one of which `--metrics` requires.
+// The recorded-action group allows both, since a probe may take a write. A group whose members
+// conflict would also drop `--compression`'s requirement of `--write` beside `--probe`.
 #[derive(Args)]
 #[group(required = true, multiple = true)]
+#[command(group(ArgGroup::new("recorded_action").multiple(true)))]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each flag is a clap switch, and `CliAction` resolves them to one action"
 )]
 struct ActionArgs {
     /// Write the combined rows to PATH. With --explain or --explain-analyze, the plan shown is
-    /// the write's, and --explain-analyze performs the write.
+    /// the write's, and --explain-analyze performs the write. With --probe, the probe writes
+    /// them, and keeps nothing.
     #[arg(long, value_name = "PATH", group = "recorded_action")]
     write: Option<String>,
     /// Print the combined rows.
@@ -382,18 +386,19 @@ struct ActionArgs {
     /// Execute the plan and print it with per-operator metrics.
     #[arg(long)]
     explain_analyze: bool,
-    /// Drain the combined rows as a throughput probe, taking a progress sample every
+    /// Run the combined rows as a throughput probe, taking a progress sample every
     /// --poll-period, until its steady-state throughput settles, a partition of the plan
-    /// finishes, or --max-duration passes. Records the run and its progress samples under
-    /// --metrics, which it requires, and prints its steady-state throughput and stop reason.
+    /// finishes, or --max-duration passes. With --write, writes them to PATH, which must not
+    /// exist, and removes everything under PATH afterwards; otherwise drains them. Records the
+    /// run and its progress samples under --metrics, which it requires, and prints its
+    /// steady-state throughput and stop reason.
     // The explicit conflicts matter: clap drops a `requires` whose target conflicts with a
-    // present argument, so each conflict of `--metrics` is stated here too, and so is
-    // `--compression`, whose required `--write` conflicts with `--probe`.
+    // present argument, so each conflict of `--metrics` is stated here too.
     #[arg(
         long,
         group = "recorded_action",
         requires = "metrics",
-        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit", "compression"]
+        conflicts_with_all = ["show", "explain", "explain_analyze", "limit"]
     )]
     probe: bool,
 }
@@ -403,7 +408,7 @@ enum CliAction {
     Show,
     Explain { write: Option<String> },
     ExplainAnalyze { write: Option<String> },
-    Probe,
+    Probe { write: Option<String> },
 }
 
 impl CliAction {
@@ -428,10 +433,10 @@ impl TryFrom<ActionArgs> for CliAction {
             (None, true, false, false, false) => Ok(Self::Show),
             (write, false, true, false, false) => Ok(Self::Explain { write }),
             (write, false, false, true, false) => Ok(Self::ExplainAnalyze { write }),
-            (None, false, false, false, true) => Ok(Self::Probe),
+            (write, false, false, false, true) => Ok(Self::Probe { write }),
             _ => Err(DataFusionError::Configuration(
                 "an action is required: --write, --show, --explain, --explain-analyze, or \
-                 --probe, where --explain and --explain-analyze may combine with --write"
+                 --probe, where --explain, --explain-analyze and --probe may combine with --write"
                     .to_string(),
             )),
         }
@@ -492,7 +497,8 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
                 None => Action::Write(write),
             }
         }
-        CliAction::Probe => Action::Probe {
+        CliAction::Probe { write } => Action::Probe {
+            write: write.map(write_target).transpose()?,
             metrics_directory: MetricsDirectory::new(&metrics.ok_or_else(|| {
                 DataFusionError::Configuration("--probe requires --metrics".to_string())
             })?),
@@ -1298,14 +1304,12 @@ mod tests {
     }
 
     /// `--probe` conflicts outright with `--limit`, which would change the plan it measures,
-    /// with every other action, `--write` included until a probe can write, and so with
-    /// `--compression`.
+    /// whether or not it writes, and with every other action but `--write`.
     #[test]
     fn probe_conflicts_with_limit_and_every_other_action() {
         for args in [
             vec!["--limit", "5"],
-            vec!["--compression", "snappy"],
-            vec!["--write", "out.vortex"],
+            vec!["--write", "out.vortex", "--limit", "5"],
             vec!["--show"],
             vec!["--explain"],
             vec!["--explain-analyze"],
@@ -1371,6 +1375,7 @@ mod tests {
         let run = resolve(parse_combiner(["--probe", "--metrics", "runs"])).unwrap();
 
         let Action::Probe {
+            write,
             metrics_directory,
             run_id,
             settings,
@@ -1378,10 +1383,66 @@ mod tests {
         else {
             panic!("expected a probe, got {:?}", run.action);
         };
+        assert!(write.is_none(), "{write:?}");
         assert_eq!(metrics_directory, MetricsDirectory::new("runs"));
         assert!(Uuid::parse_str(&run_id).is_ok(), "run id {run_id:?}");
         assert_eq!(settings, ProbeSettings::default());
         assert_eq!(run.row_limit, None);
+    }
+
+    /// A probe with `--write` probes the write a plain write would perform, validated and
+    /// compressed the same way.
+    #[test]
+    fn probe_with_a_write_resolves_to_a_written_probe_with_its_compression() {
+        let run = resolve(parse_combiner([
+            "--probe",
+            "--write",
+            "out.vortex",
+            "--compression",
+            "compact",
+            "--metrics",
+            "runs",
+            "--max-duration",
+            "5",
+        ]))
+        .unwrap();
+
+        let Action::Probe {
+            write: Some(write),
+            settings,
+            ..
+        } = run.action
+        else {
+            panic!("expected a written probe, got {:?}", run.action);
+        };
+        assert_eq!(write.output_path, "out.vortex");
+        assert_eq!(write.output_format.compression(), Some("compact"));
+        assert_eq!(settings.max_duration, Duration::from_secs(5));
+
+        let error = resolve(parse_combiner([
+            "--probe",
+            "--write",
+            "out.parquet",
+            "--metrics",
+            "runs",
+        ]))
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("out.parquet"), "{error}");
+    }
+
+    /// `--compression` still requires `--write` beside `--probe`, which may take one.
+    #[test]
+    fn compression_with_a_drained_probe_is_rejected() {
+        let diagnostic =
+            combiner_diagnostic(&["--probe", "--metrics", "runs", "--compression", "compact"]);
+
+        assert!(
+            diagnostic.contains("--compression"),
+            "diagnostic:\n{diagnostic}"
+        );
+        assert!(diagnostic.contains("--write"), "diagnostic:\n{diagnostic}");
     }
 
     #[test]
