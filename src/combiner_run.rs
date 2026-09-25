@@ -11,13 +11,13 @@ use crate::{
     sink,
     stored::dataset::Dataset,
     throughput_probe::{ProbeSettings, StopReason},
-    write::WriteTarget,
+    write::{VacantTarget, WriteTarget},
 };
 
 use datafusion::{
     arrow::{record_batch::RecordBatch, util::pretty::pretty_format_batches},
     datasource::listing::ListingTableUrl,
-    error::Result,
+    error::{DataFusionError, Result},
     prelude::{DataFrame, SessionContext},
 };
 use std::{
@@ -28,8 +28,8 @@ use std::{
 /// What to do with the combined rows.
 ///
 /// Every action runs the rows into a sink that requires the formulation's ordering: the file
-/// sink for a write, measured or not, a collecting sink for collect, and a draining sink for a
-/// throughput probe and for an explain without a write. The run supplies the ordering to each.
+/// sink for a write, measured, probed or not, a collecting sink for collect, and a draining sink
+/// for a throughput probe or an explain without a write. The run supplies the ordering to each.
 /// See ADR 0014 for why the plan ends in a sink rather than a sort.
 #[derive(Debug)]
 pub enum Action {
@@ -42,9 +42,12 @@ pub enum Action {
         metrics_directory: MetricsDirectory,
         run_id: String,
     },
-    /// Drain the rows until the throughput probe's settings stop the run, and record it as
-    /// `run_id` under the metrics directory with its progress samples. See ADR 0017.
+    /// Write the rows to the target, or drain them without one, until the throughput probe's
+    /// settings stop the run, and record it as `run_id` under the metrics directory with its
+    /// progress samples. Everything under the target's output path is removed afterwards, so it
+    /// must not exist beforehand. See ADR 0017.
     Probe {
+        write: Option<WriteTarget>,
         metrics_directory: MetricsDirectory,
         run_id: String,
         settings: ProbeSettings,
@@ -71,8 +74,12 @@ impl Action {
             }
             | Self::ExplainAnalyze {
                 write: Some(target),
+            }
+            | Self::Probe {
+                write: Some(target),
+                ..
             } => Some(&target.output_path),
-            Self::Probe { .. }
+            Self::Probe { write: None, .. }
             | Self::Collect
             | Self::Explain { write: None }
             | Self::ExplainAnalyze { write: None } => None,
@@ -142,12 +149,13 @@ impl CombinerRun {
     /// # Errors
     ///
     /// Returns an error if a measured write's or a probe's run id already has a run record under
-    /// its metrics directory, the input dataset cannot be resolved, the formulation cannot be
-    /// planned or executed, or the requested output cannot be written. A measured write or a
-    /// probe that fails records nothing: the refusal of a repeated id comes before dataset
-    /// discovery, and the run is recorded only after the data write or the probe succeeds. A
-    /// probe also fails on a session the pipeline runner did not build, which has no IO runtime
-    /// to sample on.
+    /// its metrics directory, a writing probe's output path already exists or holds its metrics
+    /// directory, the input dataset cannot be resolved, the formulation cannot be planned or
+    /// executed, or the requested output cannot be written. A measured write or a probe that
+    /// fails records nothing: the refusals of a repeated id and of a probe's output path come
+    /// before dataset discovery, and the run is recorded only after the data write or the probe
+    /// succeeds. A probe also fails on a session the pipeline runner did not build, which has no
+    /// IO runtime to sample on.
     pub async fn execute_in(self, ctx: &SessionContext) -> Result<Outcome> {
         self.run(ctx, Started::now()).await
     }
@@ -206,17 +214,22 @@ impl CombinerRun {
                 })
             }
             Action::Probe {
+                write,
                 metrics_directory,
                 run_id,
                 settings,
             } => {
                 let run = metrics_directory.unrecorded(ctx, &run_id).await?;
+                let write = probe_output(ctx, write, &metrics_directory).await?;
                 let (ordered, samples) = rows().await?;
-                let probed = sink::probe(sink::drain(ordered)?, &settings).await?;
+                let probed = match &write {
+                    Some(target) => target.probe(ordered, &settings).await?,
+                    None => sink::probe(sink::drain(ordered)?, &settings).await?,
+                };
                 let record = facts.record(
                     run_id,
                     samples,
-                    None,
+                    write.as_ref().map(|target| target.target().into()),
                     probed.rows_received,
                     probed.execute_ns,
                     Some(ProbeRecord {
@@ -347,6 +360,27 @@ fn sink_frame(ordered: OrderedFrame, write: Option<WriteTarget>) -> Result<DataF
         Some(target) => target.sink_frame(ordered),
         None => sink::drain(ordered),
     }
+}
+
+/// The output of a probe that writes to `write`, checked vacant, and refused if it holds
+/// `metrics_directory`, whose records its removal would reach. `None` for a draining probe.
+async fn probe_output(
+    ctx: &SessionContext,
+    write: Option<WriteTarget>,
+    metrics_directory: &MetricsDirectory,
+) -> Result<Option<VacantTarget>> {
+    let Some(target) = write else {
+        return Ok(None);
+    };
+    let target = target.vacant(ctx).await?;
+    if target.contains(metrics_directory.path())? {
+        return Err(DataFusionError::Configuration(format!(
+            "the probe's metrics directory '{}' is under its output path '{}', everything under which the probe removes",
+            metrics_directory.path(),
+            target.target().output_path
+        )));
+    }
+    Ok(Some(target))
 }
 
 async fn explain(frame: DataFrame, analyze: bool) -> Result<Outcome> {

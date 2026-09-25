@@ -1,15 +1,20 @@
 //! File writes, their targets, sink frames, and execution.
 //!
 //! A write target pairs an output path with an output format. An ordered write takes its output
-//! layout from the ordered frame and selects the matching file sink. Output-path validation remains
-//! the CLI's responsibility.
+//! layout from the ordered frame and selects the matching file sink. Validating an output path's
+//! extension against the format and layout remains the CLI's responsibility.
+//!
+//! A throughput probe that writes never keeps its output, so it writes only to a [`VacantTarget`]:
+//! a target with nothing at its output path when checked, whose probe removes everything under
+//! that path after every ending. The check is what keeps the removal to what the probe created.
 
 use crate::{
     format::OutputFormat,
     locus::StoredOrdering,
     ordered_frame::{OrderedFrame, OutputLayout},
     run_metrics::WriteRecord,
-    sink::{self, ExecutedSink, PartitionedSinkExec, SinkTarget},
+    sink::{self, ExecutedSink, PartitionedSinkExec, ProbedSink, SinkTarget},
+    throughput_probe::ProbeSettings,
 };
 
 use datafusion::{
@@ -18,14 +23,17 @@ use datafusion::{
     datasource::{
         file_format::FileFormat, listing::ListingTableUrl, physical_plan::FileSinkConfig,
     },
-    error::Result,
+    error::{DataFusionError, Result},
+    execution::object_store::ObjectStoreUrl,
     logical_expr::dml::InsertOp,
+    object_store::{self, ObjectStore, ObjectStoreExt, path::Path as ObjectPath},
     physical_expr::LexRequirement,
     physical_plan::ExecutionPlan,
-    prelude::DataFrame,
+    prelude::{DataFrame, SessionContext},
 };
 use datafusion_datasource::{file_groups::FileGroup, file_sink_config::FileOutputMode};
-use std::sync::Arc;
+use futures_util::TryStreamExt;
+use std::{io, path::PathBuf, sync::Arc, time::Duration};
 
 /// The output path and output format of a write.
 #[derive(Debug)]
@@ -91,6 +99,181 @@ impl WriteTarget {
         };
         sink::run_into(frame, &self.output_path, ordering, target)
     }
+}
+
+impl WriteTarget {
+    /// Checks that nothing exists at the output path, neither a file nor a non-empty directory,
+    /// and hands back the target as vacant, so a probe may write to it and remove what it wrote.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error naming the output path if something exists there, or an
+    /// error if the path is on a store the session does not serve or the store cannot answer.
+    pub async fn vacant(self, ctx: &SessionContext) -> Result<VacantTarget> {
+        let url = ListingTableUrl::parse(&self.output_path)?;
+        let store = ctx.runtime_env().object_store(&url)?;
+        let location = url.prefix().clone();
+        let existing = match store.head(&location).await {
+            Ok(_) => Some("a file"),
+            Err(object_store::Error::NotFound { .. }) => objects_under(store.as_ref(), &location)
+                .await?
+                .first()
+                .map(|_| "a non-empty directory"),
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(existing) = existing {
+            return Err(DataFusionError::Configuration(format!(
+                "the probe's output path '{}' already exists as {existing}; a probe removes everything under its output path, so it writes only where nothing is",
+                self.output_path
+            )));
+        }
+        // A local directory outlives the files deleted from it, so the probe removes the one at
+        // its output path too, unless it was there, empty, before the probe.
+        let directory = match url.get_url().to_file_path() {
+            Ok(path) if url.get_url().scheme() == "file" && !path.is_dir() => Some(path),
+            Ok(_) | Err(()) => None,
+        };
+        Ok(VacantTarget {
+            target: self,
+            store_url: url.object_store(),
+            store,
+            location,
+            directory,
+        })
+    }
+}
+
+/// A write target that had nothing at its output path when it was checked, so a throughput probe
+/// may write there. [`WriteTarget::vacant`] is the only way to get one.
+///
+/// Like a run id's check, this check is not a lock: a writer that creates the output path after
+/// it loses what it wrote to the probe's removal.
+#[derive(Debug)]
+pub struct VacantTarget {
+    target: WriteTarget,
+    store_url: ObjectStoreUrl,
+    store: Arc<dyn ObjectStore>,
+    location: ObjectPath,
+    /// The local directory the output path names, if the probe is to remove it once empty.
+    directory: Option<PathBuf>,
+}
+
+/// How long removing a probe's output waits before listing the output path again. Stopping a
+/// probe aborts its writer tasks without waiting for them, and a file operation one had already
+/// handed to a blocking thread still completes, so a file can appear after the first removal.
+const SETTLE: Duration = Duration::from_millis(100);
+
+/// How many pauses removing a probe's output waits through before it gives up.
+const SETTLE_ROUNDS: u32 = 50;
+
+impl VacantTarget {
+    /// The target checked.
+    #[must_use]
+    pub const fn target(&self) -> &WriteTarget {
+        &self.target
+    }
+
+    /// Whether `path` is the output path or under it, where the probe's removal reaches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `path` is not a valid path or URL.
+    pub fn contains(&self, path: &str) -> Result<bool> {
+        let url = ListingTableUrl::parse(path)?;
+        Ok(url.object_store() == self.store_url && url.prefix().prefix_matches(&self.location))
+    }
+
+    /// Probes the write of `ordered` to this target with `settings`, through the sink a plain
+    /// write chooses for the frame's output layout, and then removes everything under the output
+    /// path, whether the probe stopped, completed or failed.
+    ///
+    /// The removal deletes every object under the output path and lists it again after a pause,
+    /// until a listing finds nothing and a local directory it is to remove is gone, for at most
+    /// [`SETTLE_ROUNDS`] pauses. It does not reach an unfinished multipart upload, which an
+    /// object store lists nowhere: on Google Cloud Storage, a stopped write leaves one for each
+    /// file it had begun uploading in parts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the probe fails, or if its output cannot be removed.
+    pub async fn probe(
+        &self,
+        ordered: OrderedFrame,
+        settings: &ProbeSettings,
+    ) -> Result<ProbedSink> {
+        let probed = match self.target.sink_frame(ordered) {
+            Ok(frame) => sink::probe(frame, settings).await,
+            Err(error) => Err(error),
+        };
+        match (probed, self.remove_output().await) {
+            (Ok(probed), Ok(())) => Ok(probed),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(removal)) => Err(error.context(format!(
+                "the probe failed, and removing its output then failed too: {removal}"
+            ))),
+        }
+    }
+
+    /// Deletes everything under the output path until a listing after a pause finds nothing,
+    /// then the local directory the path names, if any.
+    async fn remove_output(&self) -> Result<()> {
+        let mut found = self.remaining().await?;
+        for _ in 0..SETTLE_ROUNDS {
+            for location in &found {
+                match self.store.delete(location).await {
+                    Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            tokio::time::sleep(SETTLE).await;
+            found = self.remaining().await?;
+            if found.is_empty() && self.remove_directory()? {
+                return Ok(());
+            }
+        }
+        Err(DataFusionError::Execution(format!(
+            "the probe's output at '{}' was still there after {SETTLE_ROUNDS} attempts to remove it",
+            self.target.output_path
+        )))
+    }
+
+    /// Removes the local directory the output path names, if the probe is to, and says whether
+    /// it is gone. One that is not yet empty holds the staging files of local uploads the stop
+    /// aborted, which no listing shows and which each upload removes as it is dropped.
+    fn remove_directory(&self) -> Result<bool> {
+        let Some(directory) = &self.directory else {
+            return Ok(true);
+        };
+        match std::fs::remove_dir(directory) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(false),
+            Err(error) => Err(DataFusionError::Execution(format!(
+                "could not remove the probe's output directory '{}': {error}",
+                directory.display()
+            ))),
+        }
+    }
+
+    /// The object at the output path, if any, and every object under it.
+    async fn remaining(&self) -> Result<Vec<ObjectPath>> {
+        let mut found = objects_under(self.store.as_ref(), &self.location).await?;
+        match self.store.head(&self.location).await {
+            Ok(meta) => found.push(meta.location),
+            Err(object_store::Error::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(found)
+    }
+}
+
+/// The locations of the objects under `location` in `store`.
+async fn objects_under(store: &dyn ObjectStore, location: &ObjectPath) -> Result<Vec<ObjectPath>> {
+    Ok(store
+        .list(Some(location))
+        .map_ok(|meta| meta.location)
+        .try_collect()
+        .await?)
 }
 
 impl From<&WriteTarget> for WriteRecord {

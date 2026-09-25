@@ -96,10 +96,11 @@ table measures, read from the DataFusion source.
 cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --write data/combined.vortex --metrics data/runs --run-id grouped-8
 ```
 A throughput probe, `--probe --metrics DIR`, runs the formulation's unchanged plan, drains its
-rows, and stops early to estimate the plan's steady-state throughput without running it to the
-end. Every `--poll-period` it takes a progress sample: the time since execution started and the
-rows the sink has received. After each progress sample it applies a stopping rule, a pure
-function of its settings, the samples so far and the first partition end:
+rows, or writes them as described below, and stops early to estimate the plan's steady-state
+throughput without running it to the end. Every `--poll-period` it takes a progress sample: the
+time since execution started and the rows the sink has received. After each progress sample it
+applies a stopping rule, a pure function of its settings, the samples so far and the first
+partition end:
 1. It batches the samples into batches spanning at least `--batch` each, and takes each batch's
    rate as its rows over the time between its end samples.
 2. It picks the end of warmup with MSER: the number of batches d that minimizes
@@ -148,6 +149,32 @@ plan measured. See
 [ADR 0017](docs/adr/0017-estimate-throughput-by-stopping-full-plan-runs.md).
 ```
 cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --probe --metrics data/runs --run-id grouped-8-probe --max-duration 60
+```
+A writing probe, `--probe --write PATH --metrics DIR`, writes the rows through the sink a plain
+write to `PATH` would use, one file or a directory of one file per interval, with the output
+format and `--compression` a plain write takes, so encoding and writing count in its throughput.
+It samples the rows reaching the sink, as the draining form does; under interval-merge's
+file-per-interval sink, that is the rows reaching all the interval writers, and the first interval
+to finish closes the window. Its run record also fills `output_path`, `output_format`, and
+`compression`. The output of a stopped write is incomplete, so a probe keeps none of it: after
+every ending, whether steady, completed, capped, or failed, it removes everything under `PATH`,
+and a local directory it created at `PATH`. So that the removal only ever touches what the probe
+wrote, a probe refuses a `PATH` that already exists, as a file or as a non-empty directory,
+before it discovers the dataset.
+On Google Cloud Storage, the removal does not reach unfinished multipart uploads. A write the
+probe stops leaves one for each file it had not finished: every such Vortex file, whose writer
+always uploads in parts, and every such Parquet file past its first 10 MiB. They hold no object
+at `PATH` and no listing shows them, but their uploaded parts are billed until they are aborted,
+and object_store can neither list nor abort them once the writer is gone. Probe into a bucket
+with a lifecycle rule that aborts incomplete multipart uploads, for example after one day. This
+command replaces the bucket's lifecycle configuration, so merge any rules it already has into
+the file first:
+```
+echo '{"rule":[{"action":{"type":"AbortIncompleteMultipartUpload"},"condition":{"age":1}}]}' > lifecycle.json
+gcloud storage buckets update gs://BUCKET --lifecycle-file=lifecycle.json
+```
+```
+cargo run -r -- combine-refs data/vortices_chr22 --formulation interval-merge --probe --write data/probe-out --metrics data/runs --run-id interval-probe --max-duration 60
 ```
 An earlier variant of the reference combiner is still available as `cargo run -r --example combiner1`.
 

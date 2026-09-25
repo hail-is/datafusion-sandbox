@@ -26,6 +26,7 @@ use datafusion::{
     parquet::file::reader::{FileReader, SerializedFileReader},
     prelude::SessionContext,
 };
+use futures::executor::block_on;
 use object_store::{ObjectStoreExt, path::Path as ObjectPath};
 use std::{
     future::Future,
@@ -1182,6 +1183,7 @@ fn a_recorded_probe_replays_to_its_recorded_decision() {
         let run = CombinerRun {
             formulation: formulation.clone(),
             action: Action::Probe {
+                write: None,
                 metrics_directory: directory.clone(),
                 run_id: "run-a".to_string(),
                 settings: settings.clone(),
@@ -1323,6 +1325,300 @@ fn a_probe_whose_progress_samples_write_fails_records_nothing() {
     assert!(progress_samples.is_none(), "{progress_samples:?}");
 }
 
+/// A written probe of each output layout writes through the sink a plain write chooses, and
+/// records all three tables with the write's columns filled. Grouped-merge writes one Parquet
+/// file; interval-merge writes a Vortex file per interval, whose progress samples count the rows
+/// of the operator beneath the partition sinks, and whose first finished interval closes the
+/// window and stops the probe. Either way nothing is left under the output path.
+#[test]
+fn a_written_probe_of_each_output_layout_writes_through_the_plain_writes_sink_and_keeps_nothing() {
+    let input = memory_dataset();
+    for (formulation, output, output_format, sink) in [
+        (
+            grouped_merge(2),
+            "out/combined.parquet",
+            OutputFormat::PARQUET,
+            "DataSinkExec: sink=ParquetSink",
+        ),
+        (
+            interval_merge("1:3,2:2"),
+            "out/combined",
+            OutputFormat::VORTEX,
+            "PartitionedSinkExec: partitions=3, sink=VortexSink",
+        ),
+    ] {
+        let store = MemoryStore::new("written-probe");
+        let url = store.url().as_str().to_string();
+        let directory = MetricsDirectory::new(&format!("{url}metrics"));
+        let output_path = format!("{url}{output}");
+        let run = CombinerRun {
+            formulation: formulation.clone(),
+            ..written_probe_run(
+                &input,
+                WriteTarget {
+                    output_path: output_path.clone(),
+                    output_format: output_format.clone(),
+                },
+                directory.clone(),
+                "run-a",
+                ProbeSettings::default(),
+            )
+        };
+
+        let (outcome, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
+            let outcome = run.execute_in(&ctx).await?;
+            Ok((
+                outcome,
+                fixture::read_recorded_run(&ctx, &directory, "run-a").await?,
+            ))
+        });
+
+        let Outcome::Probed {
+            rows_received,
+            stop_reason,
+            ..
+        } = outcome
+        else {
+            panic!("{formulation}: expected a probe, got {outcome:?}");
+        };
+        // Grouped-merge's one partition ends with every row. Interval-merge's first interval to
+        // finish stops the probe, however far the others got.
+        match formulation {
+            Formulation::CombineRefsIntervalMerge { .. } => {
+                assert!((1..=32).contains(&rows_received), "{rows_received}");
+            }
+            _ => assert_eq!(rows_received, 32, "{formulation}"),
+        }
+        assert_eq!(stop_reason, StopReason::Completed, "{formulation}");
+
+        let record = recorded.record.unwrap();
+        for (column, expected) in [
+            ("action", "probe"),
+            ("stop_reason", "completed"),
+            ("rows_written", &rows_received.to_string()),
+            ("output_path", output_path.as_str()),
+            ("output_format", output_format.name()),
+        ] {
+            assert_eq!(
+                string_values(&record, column),
+                [expected],
+                "{formulation}: {column}"
+            );
+        }
+        let window_end_ns = u64_values(&record, "window_end_ns")[0].unwrap();
+        assert_eq!(
+            u64_values(&record, "first_partition_end_ns"),
+            [Some(window_end_ns)],
+            "{formulation}"
+        );
+        let samples = recorded.progress_samples.unwrap();
+        let sample_rows = u64_values(&samples, "rows");
+        assert!(
+            sample_rows
+                .last()
+                .is_some_and(|rows| rows.is_some_and(|rows| rows > 0 && rows <= rows_received)),
+            "{formulation}: {sample_rows:?}"
+        );
+        let metrics = recorded.metrics.unwrap();
+        let root = &string_values(&metrics, "display")[0];
+        assert!(root.starts_with(sink), "{formulation}: {root}");
+
+        assert_eq!(
+            block_on(store.locations_under("out")),
+            Vec::<ObjectPath>::new(),
+            "{formulation}"
+        );
+    }
+}
+
+/// A written probe capped before its plan could finish, and one whose data write fails, both leave
+/// nothing under the output path. A failed probe also records nothing, whether every write failed
+/// or, under interval-merge, only one interval's file did.
+#[test]
+fn a_capped_or_failed_written_probe_keeps_nothing() {
+    let input = memory_dataset();
+    let capped = MemoryStore::new("capped-probe");
+    let url = capped.url().as_str().to_string();
+    let directory = MetricsDirectory::new(&format!("{url}metrics"));
+    let run = CombinerRun {
+        formulation: interval_merge("1:3,2:2"),
+        ..written_probe_run(
+            &input,
+            WriteTarget {
+                output_path: format!("{url}out/combined"),
+                output_format: OutputFormat::VORTEX,
+            },
+            directory,
+            "run-a",
+            ProbeSettings {
+                max_duration: Duration::from_nanos(1),
+                ..ProbeSettings::default()
+            },
+        )
+    };
+    let outcome = on_memory_stores(&input, &capped, move |ctx| async move {
+        run.execute_in(&ctx).await
+    });
+    let Outcome::Probed { stop_reason, .. } = outcome else {
+        panic!("expected a probe, got {outcome:?}");
+    };
+    assert_eq!(stop_reason, StopReason::Capped);
+    assert_eq!(
+        block_on(capped.locations_under("out")),
+        Vec::<ObjectPath>::new()
+    );
+
+    for (formulation, output_path, output_format, failing_prefix) in [
+        (
+            grouped_merge(2),
+            "out/combined.parquet",
+            OutputFormat::PARQUET,
+            "out",
+        ),
+        (
+            interval_merge("1:3,2:2"),
+            "out/combined",
+            OutputFormat::VORTEX,
+            "out/combined/2.vortex",
+        ),
+    ] {
+        let failing = MemoryStore::failing_writes_under("failed-probe", failing_prefix);
+        let url = failing.url().as_str().to_string();
+        let directory = MetricsDirectory::new(&format!("{url}metrics"));
+        let run = CombinerRun {
+            formulation: formulation.clone(),
+            ..written_probe_run(
+                &input,
+                WriteTarget {
+                    output_path: format!("{url}{output_path}"),
+                    output_format,
+                },
+                directory.clone(),
+                "run-a",
+                ProbeSettings::default(),
+            )
+        };
+        let (failed, recorded) = on_memory_stores(&input, &failing, move |ctx| async move {
+            let failed = run.execute_in(&ctx).await;
+            let recorded = fixture::read_recorded_run(&ctx, &directory, "run-a").await?;
+            Ok((failed, recorded))
+        });
+        let message = failed.unwrap_err().to_string();
+        assert!(message.contains(failing_prefix), "{formulation}: {message}");
+        let RecordedRun {
+            record,
+            metrics,
+            progress_samples,
+        } = recorded;
+        assert!(record.is_none(), "{formulation}: {record:?}");
+        assert!(metrics.is_none(), "{formulation}: {metrics:?}");
+        assert!(
+            progress_samples.is_none(),
+            "{formulation}: {progress_samples:?}"
+        );
+        assert_eq!(
+            block_on(failing.locations_under("out")),
+            Vec::<ObjectPath>::new(),
+            "{formulation}"
+        );
+    }
+}
+
+/// A written probe refuses a metrics directory under its output path, whose records the removal
+/// of its output would reach, before it discovers the dataset.
+#[test]
+fn a_written_probe_refuses_a_metrics_directory_under_its_output_path_before_discovery() {
+    let input = memory_dataset();
+    let store = MemoryStore::new("metrics-under-output");
+    let url = store.url().as_str().to_string();
+    let run = CombinerRun {
+        input_path: format!("{url}no-such-dataset/"),
+        ..written_probe_run(
+            &input,
+            WriteTarget {
+                output_path: format!("{url}out"),
+                output_format: OutputFormat::VORTEX,
+            },
+            MetricsDirectory::new(&format!("{url}out/metrics")),
+            "run-a",
+            ProbeSettings::default(),
+        )
+    };
+
+    let refused = on_memory_stores(&input, &store, move |ctx| async move {
+        Ok(run.execute_in(&ctx).await)
+    });
+
+    let message = refused.unwrap_err().to_string();
+    assert!(message.contains("metrics directory"), "{message}");
+    assert!(message.contains(&format!("{url}out/metrics")), "{message}");
+}
+
+/// A written probe refuses an output path that already exists, as a file or as a non-empty
+/// directory, before it discovers the dataset, and leaves what is there untouched.
+#[test]
+fn a_written_probe_refuses_an_existing_output_path_before_discovery() {
+    let input = memory_dataset();
+    for existing in ["out/combined", "out/combined/0.vortex"] {
+        let store = MemoryStore::new("probe-output-exists");
+        block_on(
+            store
+                .store()
+                .put(&ObjectPath::from(existing), "kept".into()),
+        )
+        .unwrap();
+        let url = store.url().as_str().to_string();
+        let output_path = format!("{url}out/combined");
+        let run = CombinerRun {
+            formulation: interval_merge("1:3,2:2"),
+            input_path: format!("{url}no-such-dataset/"),
+            ..written_probe_run(
+                &input,
+                WriteTarget {
+                    output_path: output_path.clone(),
+                    output_format: OutputFormat::VORTEX,
+                },
+                MetricsDirectory::new(&format!("{url}metrics")),
+                "run-a",
+                ProbeSettings::default(),
+            )
+        };
+
+        let refused = on_memory_stores(&input, &store, move |ctx| async move {
+            Ok(run.execute_in(&ctx).await)
+        });
+
+        let message = refused.unwrap_err().to_string();
+        assert!(message.contains(&output_path), "{existing}: {message}");
+        assert!(message.contains("already exists"), "{existing}: {message}");
+        assert_eq!(
+            block_on(store.locations_under("out")),
+            [ObjectPath::from(existing)],
+            "{existing}"
+        );
+    }
+}
+
+/// A written probe of `input` with `settings` to `write`, a grouped-merge unless the caller swaps
+/// the formulation, recorded as `run_id` under `metrics_directory`.
+fn written_probe_run(
+    input: &fixture::DatasetFixture,
+    write: WriteTarget,
+    metrics_directory: MetricsDirectory,
+    run_id: &str,
+    settings: ProbeSettings,
+) -> CombinerRun {
+    CombinerRun {
+        action: Action::Probe {
+            write: Some(write),
+            metrics_directory,
+            run_id: run_id.to_string(),
+            settings,
+        },
+        ..probe_run(input, MetricsDirectory::new(""), run_id)
+    }
+}
+
 /// A drained grouped-merge probe of `input` with the default settings, recorded as `run_id` under
 /// `metrics_directory`.
 fn probe_run(
@@ -1335,6 +1631,7 @@ fn probe_run(
         input_path: input.table_path().to_string(),
         input_format: input.input_format(),
         action: Action::Probe {
+            write: None,
             metrics_directory,
             run_id: run_id.to_string(),
             settings: ProbeSettings::default(),
