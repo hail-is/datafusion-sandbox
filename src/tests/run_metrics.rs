@@ -31,6 +31,7 @@ use datafusion::{
 use object_store::{ObjectStoreExt, path::Path};
 
 use std::{
+    num::NonZeroU32,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -76,10 +77,16 @@ fn the_run_record_schema_names_its_columns_in_order() {
             ("action", &DataType::Utf8, true),
             ("stop_reason", &DataType::Utf8, true),
             ("steady_state_throughput", &DataType::Float64, true),
+            ("warmup_end_ns", &DataType::UInt64, true),
             ("window_end_ns", &DataType::UInt64, true),
             ("window_rows", &DataType::UInt64, true),
             ("first_partition_end_ns", &DataType::UInt64, true),
             ("poll_period_ns", &DataType::UInt64, true),
+            ("batch_duration_ns", &DataType::UInt64, true),
+            ("precision", &DataType::Float64, true),
+            ("consecutive_checks", &DataType::UInt64, true),
+            ("window_groups", &DataType::UInt64, true),
+            ("min_duration_ns", &DataType::UInt64, true),
             ("max_duration_ns", &DataType::UInt64, true),
         ]
     );
@@ -113,11 +120,17 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
         probe: Some(ProbeRecord {
             settings: ProbeSettings {
                 poll_period: Duration::from_millis(100),
+                batch_duration: Duration::from_millis(1_500),
+                precision: 0.05,
+                consecutive_checks: NonZeroU32::new(4).unwrap(),
+                window_groups: 12,
+                min_duration: Duration::from_secs(30),
                 max_duration: Duration::from_secs(300),
             },
             decision: Decision {
                 stop_reason: StopReason::Completed,
                 steady_state_throughput: Some(2_500.5),
+                warmup_end_ns: Some(400_000_000),
                 window_end_ns: 1_400_000_000,
                 window_rows: 120_000,
             },
@@ -149,10 +162,16 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
         ("action", "probe"),
         ("stop_reason", "completed"),
         ("steady_state_throughput", "2500.5"),
+        ("warmup_end_ns", "400000000"),
         ("window_end_ns", "1400000000"),
         ("window_rows", "120000"),
         ("first_partition_end_ns", "1400000001"),
         ("poll_period_ns", "100000000"),
+        ("batch_duration_ns", "1500000000"),
+        ("precision", "0.05"),
+        ("consecutive_checks", "4"),
+        ("window_groups", "12"),
+        ("min_duration_ns", "30000000000"),
         ("max_duration_ns", "300000000000"),
     ] {
         assert_eq!(string_values(&batch, column), [expected], "{column}");
@@ -185,10 +204,16 @@ fn unset_run_record_settings_are_null() {
         "action",
         "stop_reason",
         "steady_state_throughput",
+        "warmup_end_ns",
         "window_end_ns",
         "window_rows",
         "first_partition_end_ns",
         "poll_period_ns",
+        "batch_duration_ns",
+        "precision",
+        "consecutive_checks",
+        "window_groups",
+        "min_duration_ns",
         "max_duration_ns",
     ] {
         assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");
@@ -196,8 +221,8 @@ fn unset_run_record_settings_are_null() {
     assert_eq!(string_values(&batch, "formulation"), ["union"]);
 }
 
-/// A drained probe writes nothing, so its write settings are null; a probe with no estimate and
-/// no finished partition leaves those two columns null too.
+/// A drained probe writes nothing, so its write settings are null; a probe with no estimate, no
+/// end of warmup and no finished partition leaves those three columns null too.
 #[test]
 fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
     let record = RunRecord {
@@ -207,6 +232,7 @@ fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
             decision: Decision {
                 stop_reason: StopReason::Capped,
                 steady_state_throughput: None,
+                warmup_end_ns: None,
                 window_end_ns: 0,
                 window_rows: 0,
             },
@@ -222,6 +248,7 @@ fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
         "compression",
         "output_path",
         "steady_state_throughput",
+        "warmup_end_ns",
         "first_partition_end_ns",
     ] {
         assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");

@@ -97,21 +97,54 @@ cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --w
 ```
 A throughput probe, `--probe --metrics DIR`, runs the formulation's unchanged plan, drains its
 rows, and stops early to estimate the plan's steady-state throughput without running it to the
-end. Every 100 ms it takes a progress sample: the time since execution started and the rows the
-sink has received. It stops at the first finished partition of the plan, with stop reason
-`completed`, or once `--max-duration SECONDS` (decimal, default 300) has passed, with stop reason
-`capped`. Its steady-state throughput is the rows received between the first and last samples of
-its measurement window over the time between them, and it prints the run id, the rows received,
-that throughput, and the stop reason.
+end. Every `--poll-period` it takes a progress sample: the time since execution started and the
+rows the sink has received. After each progress sample it applies a stopping rule, a pure
+function of its settings, the samples so far and the first partition end:
+1. It batches the samples into batches spanning at least `--batch` each, and takes each batch's
+   rate as its rows over the time between its end samples.
+2. It picks the end of warmup with MSER: the number of batches d that minimizes
+   Σ_{i>d} (Yᵢ − Ȳ_d)² / (n − d)² over the batch rates Yᵢ. Only cuts that leave at least 5 batches
+   count, since the variance of the last few rates is too noisy to compare. If the minimum lies
+   past n/2, the run is still too short to judge, and the probe keeps running.
+3. Its measurement window runs from the end of warmup to the latest sample, or to the first
+   partition end.
+4. At each batch end, it checks whether the window is tight: split into `--window-groups` groups
+   of equal duration, with boundaries snapped to the nearest sample, the group rates' 95%
+   t-interval has a half-width below `--precision` of its mean.
+5. It stops with stop reason `steady` at a batch end past `--min-duration` once the last
+   `--consecutive` checks were all tight.
+
+It also stops at the first finished partition of the plan, with stop reason `completed`, or once
+`--max-duration` has passed, with stop reason `capped`, unless the same sample stops it steady.
+Whatever the reason, its steady-state throughput is the rows received between the two end samples
+of its measurement window over the time between them, and when MSER has found no end of warmup,
+the window starts at the first sample. It prints the run id, the rows received, that throughput,
+and the stop reason. Each setting requires `--probe`:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--poll-period SECONDS` | 0.1 | the time between progress samples |
+| `--batch SECONDS` | 1 | the least time a batch spans |
+| `--precision FRACTION` | 0.02 | the relative half-width below which a check is tight |
+| `--consecutive COUNT` | 3 | the tight checks in a row that stop the probe |
+| `--window-groups COUNT` | 10 | the groups, 2 to 1000, the window splits into for its interval |
+| `--min-duration SECONDS` | 20 | the execution time before which it does not stop steady |
+| `--max-duration SECONDS` | 300 | the execution time at which it stops, capped |
+
+Durations are in decimal seconds. The window's group count is not `--groups`, which grouped-merge
+takes.
 A probe records three tables under `DIR`, all Parquet and one file per run: the run record in
 `DIR/runs/<id>.parquet`, the run metrics as they stood at the stop in `DIR/metrics/<id>.parquet`,
 and its progress samples, one row each of run id, sample index, elapsed nanoseconds, and rows, in
 `DIR/progress/<id>.parquet`. Its run record holds the rows received as `rows_written`, times
 `execute_ns` to the stop, and fills the probe columns a measured write leaves empty: `action`,
-`stop_reason`, `steady_state_throughput`, `window_end_ns`, `window_rows`,
-`first_partition_end_ns`, `poll_period_ns`, and `max_duration_ns`. `--run-id` works as for a
-measured write, a repeated id is refused before anything runs, and a probe that fails records
-nothing. `--probe` refuses `--limit`, which would change the plan measured. See
+`stop_reason`, `steady_state_throughput`, `warmup_end_ns`, `window_end_ns`, `window_rows`,
+`first_partition_end_ns`, and every setting, as `poll_period_ns`, `batch_duration_ns`,
+`precision`, `consecutive_checks`, `window_groups`, `min_duration_ns`, and `max_duration_ns`. `warmup_end_ns` is empty
+when MSER found no end of warmup, and `first_partition_end_ns` when no partition finished before
+the stop. `--run-id` works as for a measured write, a repeated id is refused before anything
+runs, and a probe that fails records nothing. `--probe` refuses `--limit`, which would change the
+plan measured. See
 [ADR 0017](docs/adr/0017-estimate-throughput-by-stopping-full-plan-runs.md).
 ```
 cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --probe --metrics data/runs --run-id grouped-8-probe --max-duration 60

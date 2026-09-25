@@ -23,7 +23,11 @@ use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::split_points;
 use datafusion_sandbox::throughput_probe::ProbeSettings;
 use datafusion_sandbox::write::WriteTarget;
-use std::{num::NonZeroUsize, path::Path, time::Duration};
+use std::{
+    num::{NonZeroU32, NonZeroUsize},
+    path::Path,
+    time::Duration,
+};
 use uuid::Uuid;
 
 const DEFAULT_SHOW_LIMIT: usize = 20;
@@ -50,6 +54,15 @@ fn parse_thread_count(value: &str) -> std::result::Result<NonZeroUsize, String> 
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// A precision target, which must be positive and finite.
+fn parse_precision(value: &str) -> std::result::Result<f64, String> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|precision| *precision > 0.0 && precision.is_finite())
+        .ok_or_else(|| format!("expected a positive, finite fraction, got '{value}'"))
 }
 
 /// A duration given in decimal seconds, which must be positive and finite.
@@ -189,18 +202,8 @@ struct CombinerArgs {
     /// The id naming this run in the metrics tables. Defaults to a generated UUID.
     #[arg(long, value_name = "ID", requires = "metrics")]
     run_id: Option<String>,
-    /// With --probe, stop the probe, capped, once it has executed for SECONDS, in decimal
-    /// seconds. Defaults to 300.
-    // Every conflict of `--probe` is repeated here: clap drops a `requires` whose target
-    // conflicts with a present argument, so `--max-duration --limit` would otherwise parse.
-    #[arg(
-        long,
-        value_name = "SECONDS",
-        value_parser = parse_seconds,
-        requires = "probe",
-        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
-    )]
-    max_duration: Option<Duration>,
+    #[command(flatten)]
+    probe_settings: ProbeArgs,
     /// Return at most ROWS combined rows. Defaults to 20 with --show and unlimited otherwise.
     #[arg(long, value_name = "ROWS")]
     limit: Option<usize>,
@@ -263,6 +266,98 @@ impl OutputFormatArg {
     }
 }
 
+/// The settings of a throughput probe, each of which requires `--probe`. Durations are in decimal
+/// seconds.
+// Every conflict of `--probe` is repeated on each: clap drops a `requires` whose target
+// conflicts with a present argument, so `--max-duration --limit` would otherwise parse.
+#[derive(Args)]
+struct ProbeArgs {
+    /// With --probe, take a progress sample every SECONDS. Defaults to 0.1.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        value_parser = parse_seconds,
+        requires = "probe",
+        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+    )]
+    poll_period: Option<Duration>,
+    /// With --probe, batch progress samples into batches of at least SECONDS, over which MSER
+    /// judges the end of warmup and after each of which the rule checks its interval. Defaults
+    /// to 1.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        value_parser = parse_seconds,
+        requires = "probe",
+        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+    )]
+    batch: Option<Duration>,
+    /// With --probe, count a check as tight when its interval's half-width is below FRACTION of
+    /// its estimate. Defaults to 0.02.
+    #[arg(
+        long,
+        value_name = "FRACTION",
+        value_parser = parse_precision,
+        requires = "probe",
+        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+    )]
+    precision: Option<f64>,
+    /// With --probe, stop, steady, after COUNT consecutive tight checks. Defaults to 3.
+    #[arg(
+        long,
+        value_name = "COUNT",
+        value_parser = clap::value_parser!(NonZeroU32),
+        requires = "probe",
+        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+    )]
+    consecutive: Option<NonZeroU32>,
+    /// With --probe, split the measurement window into COUNT groups of equal duration for its
+    /// interval, from 2 to 1000. Defaults to 10.
+    #[arg(
+        long,
+        value_name = "COUNT",
+        value_parser = clap::value_parser!(u32).range(2..=1000),
+        requires = "probe",
+        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+    )]
+    window_groups: Option<u32>,
+    /// With --probe, stop steady no sooner than SECONDS of execution. Defaults to 20.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        value_parser = parse_seconds,
+        requires = "probe",
+        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+    )]
+    min_duration: Option<Duration>,
+    /// With --probe, stop the probe, capped, once it has executed for SECONDS, unless the same
+    /// progress sample stops it steady. Defaults to 300.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        value_parser = parse_seconds,
+        requires = "probe",
+        conflicts_with_all = ["write", "show", "explain", "explain_analyze", "limit"]
+    )]
+    max_duration: Option<Duration>,
+}
+
+impl ProbeArgs {
+    /// The probe settings, each at its default unless given.
+    fn settings(self) -> ProbeSettings {
+        let defaults = ProbeSettings::default();
+        ProbeSettings {
+            poll_period: self.poll_period.unwrap_or(defaults.poll_period),
+            batch_duration: self.batch.unwrap_or(defaults.batch_duration),
+            precision: self.precision.unwrap_or(defaults.precision),
+            consecutive_checks: self.consecutive.unwrap_or(defaults.consecutive_checks),
+            window_groups: self.window_groups.unwrap_or(defaults.window_groups),
+            min_duration: self.min_duration.unwrap_or(defaults.min_duration),
+            max_duration: self.max_duration.unwrap_or(defaults.max_duration),
+        }
+    }
+}
+
 /// The action flags. At least one is required. `--explain` and `--explain-analyze` may combine
 /// with `--write`, in which case they render or analyze the write's plan; every other pair
 /// conflicts. `--write` and `--probe` are the recorded actions, one of which `--metrics`
@@ -287,10 +382,10 @@ struct ActionArgs {
     /// Execute the plan and print it with per-operator metrics.
     #[arg(long)]
     explain_analyze: bool,
-    /// Drain the combined rows as a throughput probe, taking a progress sample every 100 ms,
-    /// until a partition of the plan finishes or --max-duration passes. Records the run and its
-    /// progress samples under --metrics, which it requires, and prints its steady-state
-    /// throughput and stop reason.
+    /// Drain the combined rows as a throughput probe, taking a progress sample every
+    /// --poll-period, until its steady-state throughput settles, a partition of the plan
+    /// finishes, or --max-duration passes. Records the run and its progress samples under
+    /// --metrics, which it requires, and prints its steady-state throughput and stop reason.
     // The explicit conflicts matter: clap drops a `requires` whose target conflicts with a
     // present argument, so each conflict of `--metrics` is stated here too, and so is
     // `--compression`, whose required `--write` conflicts with `--probe`.
@@ -366,7 +461,7 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
         compression,
         metrics,
         run_id,
-        max_duration,
+        probe_settings,
         limit,
         sample_set,
     } = args;
@@ -402,10 +497,7 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
                 DataFusionError::Configuration("--probe requires --metrics".to_string())
             })?),
             run_id: run_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
-            settings: ProbeSettings {
-                max_duration: max_duration.unwrap_or_else(|| ProbeSettings::default().max_duration),
-                ..ProbeSettings::default()
-            },
+            settings: probe_settings.settings(),
         },
         CliAction::Show => Action::Collect,
         CliAction::Explain { write } => Action::Explain {
@@ -1236,28 +1328,41 @@ mod tests {
         }
     }
 
-    /// `--max-duration` requires `--probe`, and is rejected even beside an argument `--probe`
+    /// Every probe setting, as a flag and a valid value.
+    const PROBE_SETTINGS: [[&str; 2]; 7] = [
+        ["--poll-period", "0.05"],
+        ["--batch", "2"],
+        ["--precision", "0.01"],
+        ["--consecutive", "2"],
+        ["--window-groups", "8"],
+        ["--min-duration", "10"],
+        ["--max-duration", "5"],
+    ];
+
+    /// Every probe setting requires `--probe`, and is rejected even beside an argument `--probe`
     /// conflicts with, where clap would drop the requirement.
     #[test]
-    fn max_duration_requires_a_probe() {
-        for args in [
-            vec!["--write", "out.vortex"],
-            vec!["--write", "out.vortex", "--limit", "5"],
-            vec!["--show"],
-            vec!["--explain"],
-            vec!["--explain-analyze"],
-        ] {
-            let diagnostic = combiner_diagnostic(
-                &["--max-duration", "5"]
-                    .into_iter()
-                    .chain(args.iter().copied())
-                    .collect::<Vec<_>>(),
-            );
+    fn every_probe_setting_requires_a_probe() {
+        for setting in PROBE_SETTINGS {
+            for args in [
+                vec!["--write", "out.vortex"],
+                vec!["--write", "out.vortex", "--limit", "5"],
+                vec!["--show"],
+                vec!["--explain"],
+                vec!["--explain-analyze"],
+            ] {
+                let diagnostic = combiner_diagnostic(
+                    &setting
+                        .into_iter()
+                        .chain(args.iter().copied())
+                        .collect::<Vec<_>>(),
+                );
 
-            assert!(
-                diagnostic.contains("--max-duration"),
-                "{args:?} diagnostic:\n{diagnostic}"
-            );
+                assert!(
+                    diagnostic.contains(setting[0]),
+                    "{setting:?} {args:?} diagnostic:\n{diagnostic}"
+                );
+            }
         }
     }
 
@@ -1280,16 +1385,12 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_honors_its_run_id_and_maximum_duration_in_decimal_seconds() {
-        let run = resolve(parse_combiner([
-            "--probe",
-            "--metrics",
-            "runs",
-            "--run-id",
-            "sweep-4",
-            "--max-duration",
-            "2.5",
-        ]))
+    fn a_probe_honors_its_run_id_and_settings_with_durations_in_decimal_seconds() {
+        let run = resolve(parse_combiner(
+            ["--probe", "--metrics", "runs", "--run-id", "sweep-4"]
+                .into_iter()
+                .chain(PROBE_SETTINGS.into_iter().flatten()),
+        ))
         .unwrap();
 
         let Action::Probe {
@@ -1299,17 +1400,49 @@ mod tests {
             panic!("expected a probe, got {:?}", run.action);
         };
         assert_eq!(run_id, "sweep-4");
-        assert_eq!(settings.max_duration, Duration::from_millis(2_500));
-        assert_eq!(settings.poll_period, ProbeSettings::default().poll_period);
+        assert_eq!(
+            settings,
+            ProbeSettings {
+                poll_period: Duration::from_millis(50),
+                batch_duration: Duration::from_secs(2),
+                precision: 0.01,
+                consecutive_checks: NonZeroU32::new(2).unwrap(),
+                window_groups: 8,
+                min_duration: Duration::from_secs(10),
+                max_duration: Duration::from_secs(5),
+            }
+        );
     }
 
     #[test]
-    fn a_maximum_duration_is_a_positive_finite_number_of_seconds() {
+    fn a_duration_is_a_positive_finite_number_of_seconds() {
         assert_eq!(parse_seconds("300"), Ok(Duration::from_secs(300)));
         assert_eq!(parse_seconds("0.25"), Ok(Duration::from_millis(250)));
         for value in ["0", "-1", "inf", "NaN", "soon"] {
             let error = parse_seconds(value).unwrap_err();
             assert!(error.contains("positive"), "{value}: {error}");
+        }
+    }
+
+    /// A precision target is a positive finite fraction, a probe needs at least one tight check,
+    /// and an interval needs at least two groups.
+    #[test]
+    fn out_of_range_probe_settings_are_rejected() {
+        for [flag, value] in [
+            ["--precision", "0"],
+            ["--precision", "-0.1"],
+            ["--precision", "inf"],
+            ["--consecutive", "0"],
+            ["--window-groups", "1"],
+            ["--window-groups", "1001"],
+        ] {
+            let diagnostic =
+                combiner_diagnostic(&["--probe", "--metrics", "runs", &format!("{flag}={value}")]);
+
+            assert!(
+                diagnostic.contains(flag),
+                "{flag} {value} diagnostic:\n{diagnostic}"
+            );
         }
     }
 
@@ -1325,7 +1458,7 @@ mod tests {
         .to_string()
     }
 
-    fn parse_combiner<const N: usize>(args: [&str; N]) -> Cli {
+    fn parse_combiner<'a>(args: impl IntoIterator<Item = &'a str>) -> Cli {
         Cli::try_parse_from(
             [
                 "datafusion-sandbox",

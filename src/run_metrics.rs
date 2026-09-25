@@ -116,8 +116,19 @@ enum RecordCell {
     OptionalString(fn(&RunRecord) -> Option<&str>),
     UInt64(fn(&RunRecord) -> u64),
     OptionalUInt64(fn(&RunRecord) -> Option<u64>),
-    OptionalFloat64(fn(&RunRecord) -> Option<f64>),
     Timestamp(fn(&RunRecord) -> SystemTime),
+    /// A fact of a throughput probe, null for a measured write.
+    Probe(ProbeCell),
+}
+
+/// How a probe column reads its cell from a probe's record. Every probe column is nullable, since
+/// a measured write has no probe; the optional variants are null for some probes too.
+enum ProbeCell {
+    String(fn(&ProbeRecord) -> &'static str),
+    UInt64(fn(&ProbeRecord) -> u64),
+    OptionalUInt64(fn(&ProbeRecord) -> Option<u64>),
+    Float64(fn(&ProbeRecord) -> f64),
+    OptionalFloat64(fn(&ProbeRecord) -> Option<f64>),
 }
 
 /// The run record table's columns, in schema order. The schema and the batch both derive from
@@ -204,70 +215,77 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
     },
     RecordColumn {
         name: "action",
-        cell: RecordCell::OptionalString(|record| record.probe.as_ref().map(|_| "probe")),
+        cell: RecordCell::Probe(ProbeCell::String(|_| "probe")),
     },
     RecordColumn {
         name: "stop_reason",
-        cell: RecordCell::OptionalString(|record| {
-            record
-                .probe
-                .as_ref()
-                .map(|probe| probe.decision.stop_reason.name())
-        }),
+        cell: RecordCell::Probe(ProbeCell::String(|probe| probe.decision.stop_reason.name())),
     },
     RecordColumn {
         name: "steady_state_throughput",
-        cell: RecordCell::OptionalFloat64(|record| {
-            record
-                .probe
-                .as_ref()
-                .and_then(|probe| probe.decision.steady_state_throughput)
-        }),
+        cell: RecordCell::Probe(ProbeCell::OptionalFloat64(|probe| {
+            probe.decision.steady_state_throughput
+        })),
+    },
+    RecordColumn {
+        name: "warmup_end_ns",
+        cell: RecordCell::Probe(ProbeCell::OptionalUInt64(|probe| {
+            probe.decision.warmup_end_ns
+        })),
     },
     RecordColumn {
         name: "window_end_ns",
-        cell: RecordCell::OptionalUInt64(|record| {
-            record
-                .probe
-                .as_ref()
-                .map(|probe| probe.decision.window_end_ns)
-        }),
+        cell: RecordCell::Probe(ProbeCell::UInt64(|probe| probe.decision.window_end_ns)),
     },
     RecordColumn {
         name: "window_rows",
-        cell: RecordCell::OptionalUInt64(|record| {
-            record
-                .probe
-                .as_ref()
-                .map(|probe| probe.decision.window_rows)
-        }),
+        cell: RecordCell::Probe(ProbeCell::UInt64(|probe| probe.decision.window_rows)),
     },
     RecordColumn {
         name: "first_partition_end_ns",
-        cell: RecordCell::OptionalUInt64(|record| {
-            record
-                .probe
-                .as_ref()
-                .and_then(|probe| probe.first_partition_end_ns)
-        }),
+        cell: RecordCell::Probe(ProbeCell::OptionalUInt64(|probe| {
+            probe.first_partition_end_ns
+        })),
     },
     RecordColumn {
         name: "poll_period_ns",
-        cell: RecordCell::OptionalUInt64(|record| {
-            record
-                .probe
-                .as_ref()
-                .map(|probe| duration_ns(probe.settings.poll_period))
-        }),
+        cell: RecordCell::Probe(ProbeCell::UInt64(|probe| {
+            duration_ns(probe.settings.poll_period)
+        })),
+    },
+    RecordColumn {
+        name: "batch_duration_ns",
+        cell: RecordCell::Probe(ProbeCell::UInt64(|probe| {
+            duration_ns(probe.settings.batch_duration)
+        })),
+    },
+    RecordColumn {
+        name: "precision",
+        cell: RecordCell::Probe(ProbeCell::Float64(|probe| probe.settings.precision)),
+    },
+    RecordColumn {
+        name: "consecutive_checks",
+        cell: RecordCell::Probe(ProbeCell::UInt64(|probe| {
+            u64::from(probe.settings.consecutive_checks.get())
+        })),
+    },
+    RecordColumn {
+        name: "window_groups",
+        cell: RecordCell::Probe(ProbeCell::UInt64(|probe| {
+            u64::from(probe.settings.window_groups)
+        })),
+    },
+    RecordColumn {
+        name: "min_duration_ns",
+        cell: RecordCell::Probe(ProbeCell::UInt64(|probe| {
+            duration_ns(probe.settings.min_duration)
+        })),
     },
     RecordColumn {
         name: "max_duration_ns",
-        cell: RecordCell::OptionalUInt64(|record| {
-            record
-                .probe
-                .as_ref()
-                .map(|probe| duration_ns(probe.settings.max_duration))
-        }),
+        cell: RecordCell::Probe(ProbeCell::UInt64(|probe| {
+            duration_ns(probe.settings.max_duration)
+        })),
     },
 ];
 
@@ -276,14 +294,14 @@ impl RecordCell {
         match self {
             Self::String(_) | Self::OptionalString(_) => DataType::Utf8,
             Self::UInt64(_) | Self::OptionalUInt64(_) => DataType::UInt64,
-            Self::OptionalFloat64(_) => DataType::Float64,
             Self::Timestamp(_) => timestamp_type(),
+            Self::Probe(cell) => cell.data_type(),
         }
     }
 
     const fn nullable(&self) -> bool {
         match self {
-            Self::OptionalString(_) | Self::OptionalUInt64(_) | Self::OptionalFloat64(_) => true,
+            Self::OptionalString(_) | Self::OptionalUInt64(_) | Self::Probe(_) => true,
             Self::String(_) | Self::UInt64(_) | Self::Timestamp(_) => false,
         }
     }
@@ -295,11 +313,32 @@ impl RecordCell {
             Self::OptionalString(cell) => Arc::new(StringArray::from(vec![cell(record)])),
             Self::UInt64(cell) => Arc::new(UInt64Array::from(vec![cell(record)])),
             Self::OptionalUInt64(cell) => Arc::new(UInt64Array::from(vec![cell(record)])),
-            Self::OptionalFloat64(cell) => Arc::new(Float64Array::from(vec![cell(record)])),
             Self::Timestamp(cell) => {
                 Arc::new(timestamp_array(vec![Some(timestamp_nanos(cell(record))?)]))
             }
+            Self::Probe(cell) => cell.array(record.probe.as_ref()),
         })
+    }
+}
+
+impl ProbeCell {
+    const fn data_type(&self) -> DataType {
+        match self {
+            Self::String(_) => DataType::Utf8,
+            Self::UInt64(_) | Self::OptionalUInt64(_) => DataType::UInt64,
+            Self::Float64(_) | Self::OptionalFloat64(_) => DataType::Float64,
+        }
+    }
+
+    /// The one-cell column this reads from `probe`, null without one.
+    fn array(&self, probe: Option<&ProbeRecord>) -> ArrayRef {
+        match self {
+            Self::String(cell) => Arc::new(StringArray::from(vec![probe.map(cell)])),
+            Self::UInt64(cell) => Arc::new(UInt64Array::from(vec![probe.map(cell)])),
+            Self::OptionalUInt64(cell) => Arc::new(UInt64Array::from(vec![probe.and_then(cell)])),
+            Self::Float64(cell) => Arc::new(Float64Array::from(vec![probe.map(cell)])),
+            Self::OptionalFloat64(cell) => Arc::new(Float64Array::from(vec![probe.and_then(cell)])),
+        }
     }
 }
 
