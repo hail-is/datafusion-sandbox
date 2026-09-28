@@ -37,6 +37,11 @@ measurement window closes. It records the run like a measured write, plus its pr
 any rows it wrote are incomplete and are not kept.
 _Avoid_: benchmark run, early-stopped write, timed run
 
+**Shadow probe**:
+A throughput probe that evaluates when it would stop without stopping, and runs to completion, so
+its would-be estimate can be checked against the whole run.
+_Avoid_: dry run, calibration run
+
 **Outcome**:
 What a pipeline hands back after it runs: rows written, collected batches, or a plan rendered as
 text. A measured write's outcome also names what it could not record.

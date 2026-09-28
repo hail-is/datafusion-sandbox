@@ -27,7 +27,7 @@ use crate::{
     locus::StoredOrdering,
     ordered_frame::OrderedFrame,
     pipeline,
-    throughput_probe::{self, Decision, ProbeSettings, ProgressSample},
+    throughput_probe::{self, Decision, ProbeKind, ProbeSettings, ProbedKind, ProgressSample},
 };
 
 use datafusion::{
@@ -167,6 +167,7 @@ pub struct ProbedSink {
     /// operator feeding the sink, if one did before the stop.
     pub first_partition_end_ns: Option<u64>,
     pub decision: Decision,
+    pub kind: ProbedKind,
 }
 
 /// Executes `frame`, a sink frame, until [`throughput_probe::decide`] stops it, and keeps hold of
@@ -179,12 +180,20 @@ pub struct ProbedSink {
 /// execution. When the stream ends before a decision, the sampler takes one last reading at once.
 /// Stopping drops the stream, which aborts the plan's tasks.
 ///
+/// A shadow probe instead records what [`throughput_probe::would_stop`] decides after each
+/// reading, and runs the plan to completion. Its decision is the one the rule makes after the last
+/// reading, completed at the first partition end.
+///
 /// # Errors
 ///
 /// Returns an error if the poll period is zero, the session has no IO runtime, the plan cannot be
 /// built or executed, the sink has no single input, or that input reports no output rows or ends
 /// without a finished partition.
-pub async fn probe(frame: DataFrame, settings: &ProbeSettings) -> Result<ProbedSink> {
+pub async fn probe(
+    frame: DataFrame,
+    settings: &ProbeSettings,
+    kind: ProbeKind,
+) -> Result<ProbedSink> {
     if settings.poll_period.is_zero() {
         return Err(DataFusionError::Configuration(
             "a throughput probe's poll period must be positive".to_string(),
@@ -224,14 +233,22 @@ pub async fn probe(frame: DataFrame, settings: &ProbeSettings) -> Result<ProbedS
     let mut finish = Some(finish);
     let mut samples = Vec::new();
     let mut first_partition_end_ns = None;
+    let mut rule = RuleEvaluation {
+        settings,
+        kind: kind.into(),
+    };
     let decision = loop {
         tokio::select! {
             reading = readings.recv() => {
+                // The sampler closes the channel after its last reading, taken once the plan
+                // ended.
                 let Some(Reading { elapsed_ns, rows, finished }) = reading else {
-                    return Err(DataFusionError::Internal(format!(
-                        "the plan ended, but {}, the operator feeding its sink, reported no finished partition",
-                        feeding.name()
-                    )));
+                    break rule
+                        .at_end(&samples, first_partition_end_ns)
+                        .ok_or_else(|| DataFusionError::Internal(format!(
+                            "the plan ended, but {}, the operator feeding its sink, reported no finished partition",
+                            feeding.name()
+                        )))?;
                 };
                 let rows = rows.ok_or_else(|| DataFusionError::Internal(format!(
                     "{}, the operator feeding the sink, reports no output rows to sample",
@@ -241,9 +258,7 @@ pub async fn probe(frame: DataFrame, settings: &ProbeSettings) -> Result<ProbedS
                 if finished && first_partition_end_ns.is_none() {
                     first_partition_end_ns = Some(elapsed_ns);
                 }
-                if let Some(decision) =
-                    throughput_probe::decide(settings, &samples, first_partition_end_ns)
-                {
+                if let Some(decision) = rule.after_reading(&samples, first_partition_end_ns) {
                     break decision;
                 }
                 if let Some(stream) = unpolled.take() {
@@ -275,7 +290,53 @@ pub async fn probe(frame: DataFrame, settings: &ProbeSettings) -> Result<ProbedS
         samples,
         first_partition_end_ns,
         decision,
+        kind: rule.kind,
     })
+}
+
+/// How a probe acts on its stopping rule: a probe stops at the rule's first decision, and a shadow
+/// probe keeps the first steady one as its would-stop and runs its plan to completion.
+struct RuleEvaluation<'a> {
+    settings: &'a ProbeSettings,
+    kind: ProbedKind,
+}
+
+impl RuleEvaluation<'_> {
+    /// The decision that stops the probe after `samples`, if one does. A shadow probe is never
+    /// stopped here: it records [`throughput_probe::would_stop`] until that decides.
+    fn after_reading(
+        &mut self,
+        samples: &[ProgressSample],
+        first_partition_end_ns: Option<u64>,
+    ) -> Option<Decision> {
+        match &mut self.kind {
+            ProbedKind::Probe => {
+                throughput_probe::decide(self.settings, samples, first_partition_end_ns)
+            }
+            ProbedKind::Shadow { would_stop } => {
+                if would_stop.is_none() {
+                    *would_stop = throughput_probe::would_stop(
+                        self.settings,
+                        samples,
+                        first_partition_end_ns,
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    /// The decision after the last reading, taken once the plan ended: completed at the first
+    /// partition end, or `None` if no partition finished. Only a shadow probe gets that far, since
+    /// a probe completes at the first partition end.
+    fn at_end(
+        &self,
+        samples: &[ProgressSample],
+        first_partition_end_ns: Option<u64>,
+    ) -> Option<Decision> {
+        first_partition_end_ns
+            .and_then(|_| throughput_probe::decide(self.settings, samples, first_partition_end_ns))
+    }
 }
 
 /// One reading of the operator feeding a probed sink.

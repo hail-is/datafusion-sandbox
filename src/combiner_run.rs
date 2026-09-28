@@ -10,7 +10,7 @@ use crate::{
     run_metrics::{FormulationRecord, ProbeRecord, RunRecord, WriteRecord},
     sink,
     stored::dataset::Dataset,
-    throughput_probe::{ProbeSettings, StopReason},
+    throughput_probe::{ProbeKind, ProbeSettings, StopReason},
     write::{VacantTarget, WriteTarget},
 };
 
@@ -45,12 +45,14 @@ pub enum Action {
     /// Write the rows to the target, or drain them without one, until the throughput probe's
     /// settings stop the run, and record it as `run_id` under the metrics directory with its
     /// progress samples. Everything under the target's output path is removed afterwards, so it
-    /// must not exist beforehand. See ADR 0017.
+    /// must not exist beforehand. A shadow probe runs to completion instead, recording when the
+    /// settings would have stopped it. See ADR 0017.
     Probe {
         write: Option<WriteTarget>,
         metrics_directory: MetricsDirectory,
         run_id: String,
         settings: ProbeSettings,
+        kind: ProbeKind,
     },
     /// Collect the rows in memory.
     Collect,
@@ -218,13 +220,14 @@ impl CombinerRun {
                 metrics_directory,
                 run_id,
                 settings,
+                kind,
             } => {
                 let run = metrics_directory.unrecorded(ctx, &run_id).await?;
                 let write = probe_output(ctx, write, &metrics_directory).await?;
                 let (ordered, samples) = rows().await?;
                 let probed = match &write {
-                    Some(target) => target.probe(ordered, &settings).await?,
-                    None => sink::probe(sink::drain(ordered)?, &settings).await?,
+                    Some(target) => target.probe(ordered, &settings, kind).await?,
+                    None => sink::probe(sink::drain(ordered)?, &settings, kind).await?,
                 };
                 let record = facts.record(
                     run_id,
@@ -236,6 +239,7 @@ impl CombinerRun {
                         settings,
                         decision: probed.decision.clone(),
                         first_partition_end_ns: probed.first_partition_end_ns,
+                        kind: probed.kind,
                     }),
                 )?;
                 let unrecorded_metrics = run

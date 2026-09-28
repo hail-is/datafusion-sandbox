@@ -13,7 +13,7 @@ use crate::{
             f64_values, grouped_merge, interval_merge, string_values, timestamp_values, u64_values,
         },
     },
-    throughput_probe::{self, Decision, ProbeSettings, ProgressSample, StopReason},
+    throughput_probe::{self, Decision, ProbeKind, ProbeSettings, ProgressSample, StopReason},
     write::WriteTarget,
 };
 use datafusion::{
@@ -1187,6 +1187,7 @@ fn a_recorded_probe_replays_to_its_recorded_decision() {
                 metrics_directory: directory.clone(),
                 run_id: "run-a".to_string(),
                 settings: settings.clone(),
+                kind: ProbeKind::Probe,
             },
             ..probe_run(&input, directory.clone(), "run-a")
         };
@@ -1643,6 +1644,73 @@ fn a_written_probe_refuses_an_existing_output_path_before_discovery() {
     }
 }
 
+/// A shadow probe runs past a maximum duration it reaches at its first sample, to the end of its
+/// plan, so it completes having received every row. Its rule never stopped steady over a fixture
+/// this small, so its record says it is a shadow probe and leaves the would-stop columns empty.
+#[test]
+fn a_shadow_probe_runs_past_its_maximum_duration_to_completion_without_a_would_stop() {
+    let input = memory_dataset();
+    for formulation in [grouped_merge(2), interval_merge("1:3,2:2")] {
+        let store = MemoryStore::new("shadowed");
+        let directory = MetricsDirectory::new(&format!("{}metrics", store.url().as_str()));
+        let run = CombinerRun {
+            formulation: formulation.clone(),
+            action: Action::Probe {
+                write: None,
+                metrics_directory: directory.clone(),
+                run_id: "run-a".to_string(),
+                settings: ProbeSettings {
+                    max_duration: Duration::from_nanos(1),
+                    ..ProbeSettings::default()
+                },
+                kind: ProbeKind::Shadow,
+            },
+            ..probe_run(&input, directory.clone(), "run-a")
+        };
+
+        let (outcome, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
+            let outcome = run.execute_in(&ctx).await?;
+            Ok((
+                outcome,
+                fixture::read_recorded_run(&ctx, &directory, "run-a").await?,
+            ))
+        });
+
+        let Outcome::Probed {
+            rows_received,
+            stop_reason,
+            ..
+        } = outcome
+        else {
+            panic!("{formulation}: expected a probe, got {outcome:?}");
+        };
+        assert_eq!(rows_received, 32, "{formulation}");
+        assert_eq!(stop_reason, StopReason::Completed, "{formulation}");
+        let record = recorded.record.unwrap();
+        for (column, expected) in [
+            ("action", "shadow"),
+            ("stop_reason", "completed"),
+            ("rows_written", "32"),
+            ("max_duration_ns", "1"),
+            ("would_stop_ns", ""),
+            ("would_be_steady_state_throughput", ""),
+            ("would_be_warmup_end_ns", ""),
+        ] {
+            assert_eq!(
+                string_values(&record, column),
+                [expected],
+                "{formulation}: {column}"
+            );
+        }
+        let samples = recorded.progress_samples.unwrap();
+        assert_eq!(
+            u64_values(&samples, "rows").last(),
+            Some(&Some(32)),
+            "{formulation}"
+        );
+    }
+}
+
 /// A written probe of `input` with `settings` to `write`, a grouped-merge unless the caller swaps
 /// the formulation, recorded as `run_id` under `metrics_directory`.
 fn written_probe_run(
@@ -1658,6 +1726,7 @@ fn written_probe_run(
             metrics_directory,
             run_id: run_id.to_string(),
             settings,
+            kind: ProbeKind::Probe,
         },
         ..probe_run(input, MetricsDirectory::new(""), run_id)
     }
@@ -1679,6 +1748,7 @@ fn probe_run(
             metrics_directory,
             run_id: run_id.to_string(),
             settings: ProbeSettings::default(),
+            kind: ProbeKind::Probe,
         },
         sample_set: None,
         row_limit: None,

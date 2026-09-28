@@ -14,7 +14,7 @@ use crate::{
     ordered_frame::{OrderedFrame, OutputLayout},
     run_metrics::WriteRecord,
     sink::{self, ExecutedSink, PartitionedSinkExec, ProbedSink, SinkTarget},
-    throughput_probe::ProbeSettings,
+    throughput_probe::{ProbeKind, ProbeSettings},
 };
 
 use datafusion::{
@@ -201,9 +201,9 @@ impl VacantTarget {
         Ok(url.object_store() == self.store_url && url.prefix().prefix_matches(&self.location))
     }
 
-    /// Probes the write of `ordered` to this target with `settings`, through the sink a plain
-    /// write chooses for the frame's output layout, and then removes everything under the output
-    /// path, whether the probe stopped, completed or failed.
+    /// Probes the write of `ordered` to this target with a probe of `kind` and `settings`, through
+    /// the sink a plain write chooses for the frame's output layout, and then removes everything
+    /// under the output path, whether the probe stopped, completed or failed.
     ///
     /// The removal deletes every object under the output path and lists it again after a pause,
     /// until a listing finds nothing and a local directory it is to remove is gone, for at most
@@ -218,9 +218,10 @@ impl VacantTarget {
         &self,
         ordered: OrderedFrame,
         settings: &ProbeSettings,
+        kind: ProbeKind,
     ) -> Result<ProbedSink> {
         let probed = match self.target.sink_frame(ordered) {
-            Ok(frame) => sink::probe(frame, settings).await,
+            Ok(frame) => sink::probe(frame, settings, kind).await,
             Err(error) => Err(error),
         };
         match (probed, self.remove_output().await) {
