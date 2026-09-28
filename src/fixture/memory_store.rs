@@ -1,6 +1,7 @@
 use super::failing_writes::FailingWrites;
 
 use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
+use futures_util::TryStreamExt;
 use object_store::{ObjectStore, memory::InMemory, path::Path};
 use std::sync::Arc;
 
@@ -56,6 +57,24 @@ impl MemoryStore {
     #[must_use]
     pub fn store(&self) -> &Arc<dyn ObjectStore> {
         &self.store
+    }
+
+    /// The location of every object under `prefix`, a path within the store such as `out`, in
+    /// path order: what a test's writes left there.
+    ///
+    /// # Panics
+    ///
+    /// Panics if listing fails.
+    pub async fn locations_under(&self, prefix: &str) -> Vec<Path> {
+        let mut locations: Vec<Path> = self
+            .store
+            .list(Some(&Path::from(prefix)))
+            .map_ok(|meta| meta.location)
+            .try_collect()
+            .await
+            .unwrap_or_else(|error| panic!("listing {prefix} in {}: {error}", self.url.as_str()));
+        locations.sort();
+        locations
     }
 
     /// Registers the store on the session's runtime under `url`.

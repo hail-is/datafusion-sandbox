@@ -322,6 +322,112 @@ fn a_drained_probe_prints_its_estimate_and_records_three_tables() {
     );
 }
 
+/// `--probe --write PATH --metrics` probes the write of either output layout, prints what a
+/// drained probe prints, records the three tables with the write's columns filled, and leaves
+/// nothing beside the metrics directory: no file or directory at PATH, and no staging file of an
+/// aborted upload next to it. Interval-merge writes a directory of one file per interval and
+/// completes at the first finished interval; grouped-merge writes one file and completes with
+/// every row.
+#[test]
+fn a_written_probe_records_three_tables_and_leaves_nothing_on_disk() {
+    let dataset = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    for (formulation, formulation_args, output_name, output_format, compression) in [
+        (
+            "interval-merge",
+            ["--split-points", "1:3,2:2"],
+            "combined",
+            "vortex",
+            "compact",
+        ),
+        (
+            "grouped-merge",
+            ["--groups", "2"],
+            "combined.parquet",
+            "parquet",
+            "snappy",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let metrics_directory = dir.path().join("metrics").to_str().unwrap().to_string();
+        let output_path = dir.path().join(output_name);
+
+        let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+            .args(["--threads", "1", "combine-refs", dataset.table_path()])
+            .args(["--formulation", formulation])
+            .args(formulation_args)
+            .args(["--output-format", output_format])
+            .args(["--probe", "--write", output_path.to_str().unwrap()])
+            .args(["--compression", compression])
+            .args(["--metrics", &metrics_directory])
+            .args(["--run-id", "cli-written-probe"])
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{formulation} stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let lines: Vec<&str> = stdout.lines().collect();
+        let [formulation_line, run_id, rows, throughput, stop_reason] = lines.as_slice() else {
+            panic!("stdout:\n{stdout}");
+        };
+        assert_eq!(
+            [*formulation_line, *run_id, *stop_reason],
+            [
+                format!("formulation: {formulation}").as_str(),
+                "run id: cli-written-probe",
+                "stop reason: completed"
+            ]
+        );
+        // Interval-merge's first interval to finish stops the probe, whichever it is and however
+        // far the others got, so its rows received are only known to be some of the 32.
+        let rows_received: u64 = rows.parse().unwrap_or_else(|_| panic!("stdout:\n{stdout}"));
+        if formulation == "interval-merge" {
+            assert!((1..=32).contains(&rows_received), "stdout:\n{stdout}");
+        } else {
+            assert_eq!(rows_received, 32, "stdout:\n{stdout}");
+        }
+        assert!(
+            throughput.starts_with("steady-state throughput: "),
+            "stdout:\n{stdout}"
+        );
+
+        let recorded = read_recorded_run(&metrics_directory, "cli-written-probe");
+        let record = recorded.record.expect("a run record");
+        assert!(
+            recorded
+                .metrics
+                .is_some_and(|metrics| metrics.num_rows() > 0)
+        );
+        assert!(
+            recorded
+                .progress_samples
+                .is_some_and(|samples| samples.num_rows() > 0)
+        );
+        for (column, expected) in [
+            ("action", "probe"),
+            ("stop_reason", "completed"),
+            ("rows_written", rows),
+            ("output_path", output_path.to_str().unwrap()),
+            ("output_format", output_format),
+            ("compression", compression),
+        ] {
+            assert_eq!(
+                column_strings(&record, column),
+                [expected],
+                "{formulation}: {column}"
+            );
+        }
+        let left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["metrics"], "{formulation}");
+    }
+}
+
 /// The values of the column `name` of `batch`, rendered.
 fn column_strings(batch: &RecordBatch, name: &str) -> Vec<String> {
     let column = batch.column_by_name(name).unwrap();
