@@ -13,7 +13,7 @@ use datafusion::{
     error::{DataFusionError, Result},
 };
 
-use datafusion_sandbox::combiner_run::{Action, CombinerRun};
+use datafusion_sandbox::combiner_run::{Action, CombinerRun, PlanInputs};
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::formulation::Formulation;
 use datafusion_sandbox::locus::SplitPoints;
@@ -529,12 +529,14 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
     };
     let sample_set = (!sample_set.is_empty()).then_some(sample_set);
     Ok(CombinerRun {
-        formulation,
-        input_path: path,
-        input_format,
+        inputs: PlanInputs {
+            formulation,
+            input_path: path,
+            input_format,
+            sample_set,
+            row_limit: limit,
+        },
         action,
-        sample_set,
-        row_limit: limit,
         threads,
     })
 }
@@ -561,7 +563,7 @@ fn main() -> Result<()> {
         }
         command => {
             let run = resolve(Cli { command, threads })?;
-            println!("formulation: {}", run.formulation);
+            println!("formulation: {}", run.inputs.formulation);
             if let Action::MeasuredWrite { run_id, .. } | Action::Probe { run_id, .. } = &run.action
             {
                 println!("run id: {run_id}");
@@ -730,7 +732,7 @@ mod tests {
             panic!("expected an explained write");
         };
         assert_eq!(target.output_path, "out.vortex");
-        assert_eq!(run.row_limit, None);
+        assert_eq!(run.inputs.row_limit, None);
 
         let run = resolve(parse_combiner([
             "--explain-analyze",
@@ -913,7 +915,7 @@ mod tests {
         assert_eq!(write.output_format.compression(), Some("compact"));
         assert_eq!(metrics_directory, MetricsDirectory::new("runs"));
         assert!(Uuid::parse_str(&run_id).is_ok(), "run id {run_id:?}");
-        assert_eq!(run.row_limit, None);
+        assert_eq!(run.inputs.row_limit, None);
     }
 
     #[test]
@@ -973,7 +975,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            run.formulation,
+            run.inputs.formulation,
             Formulation::CombineRefsGroupedMerge {
                 groups: NonZeroUsize::new(3).unwrap()
             }
@@ -993,7 +995,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            run.formulation,
+            run.inputs.formulation,
             Formulation::CombineRefsGroupedMerge {
                 groups: NonZeroUsize::new(5).unwrap()
             }
@@ -1094,7 +1096,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            run.formulation,
+            run.inputs.formulation,
             Formulation::CombineRefsIntervalMerge {
                 split_points: "22:1000,22:2000".parse().unwrap()
             }
@@ -1103,7 +1105,7 @@ mod tests {
             panic!("expected a write");
         };
         assert_eq!(target.output_path, "out");
-        assert_eq!(run.row_limit, None);
+        assert_eq!(run.inputs.row_limit, None);
     }
 
     #[test]
@@ -1203,7 +1205,7 @@ mod tests {
             )
             .unwrap();
 
-            assert_eq!(run.row_limit, Some(5), "{action}");
+            assert_eq!(run.inputs.row_limit, Some(5), "{action}");
         }
     }
 
@@ -1286,7 +1288,7 @@ mod tests {
         let run = resolve(parse_combiner(["--show"])).unwrap();
 
         assert!(matches!(run.action, Action::Collect));
-        assert_eq!(run.row_limit, Some(20));
+        assert_eq!(run.inputs.row_limit, Some(20));
     }
 
     #[test]
@@ -1294,7 +1296,7 @@ mod tests {
         let run = resolve(parse_combiner(["--show", "--limit", "7"])).unwrap();
 
         assert!(matches!(run.action, Action::Collect));
-        assert_eq!(run.row_limit, Some(7));
+        assert_eq!(run.inputs.row_limit, Some(7));
     }
 
     #[test]
@@ -1302,7 +1304,7 @@ mod tests {
         let run = resolve(parse_combiner(["--samples", "HG00308,HG00309", "--show"])).unwrap();
 
         assert_eq!(
-            run.sample_set,
+            run.inputs.sample_set,
             Some(vec!["HG00308".to_string(), "HG00309".to_string()])
         );
     }
@@ -1403,7 +1405,7 @@ mod tests {
         assert!(Uuid::parse_str(&run_id).is_ok(), "run id {run_id:?}");
         assert_eq!(settings, ProbeSettings::default());
         assert_eq!(kind, ProbeKind::Probe);
-        assert_eq!(run.row_limit, None);
+        assert_eq!(run.inputs.row_limit, None);
     }
 
     /// A probe with `--write` probes the write a plain write would perform, validated and

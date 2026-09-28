@@ -3,7 +3,7 @@
 use crate::{
     format::InputFormat,
     formulation::Formulation,
-    metrics_directory::MetricsDirectory,
+    metrics_directory::{MetricsDirectory, UnrecordedRun},
     ordered_frame::OrderedFrame,
     pipeline::{self, PipelineOptions},
     process,
@@ -103,16 +103,51 @@ impl Action {
             }
         }
     }
+
+    /// Makes every refusal this action owes before dataset discovery, and hands back the action
+    /// with what the checks produced: a measured write's or a probe's unrecorded run id, and a
+    /// writing probe's vacant output path, refused if it holds the metrics directory.
+    async fn check(self, ctx: &SessionContext) -> Result<CheckedAction> {
+        Ok(match self {
+            Self::Write(target) => CheckedAction::Write(target),
+            Self::MeasuredWrite {
+                write,
+                metrics_directory,
+                run_id,
+            } => CheckedAction::MeasuredWrite(CheckedMeasuredWrite {
+                run: metrics_directory.unrecorded(ctx, &run_id).await?,
+                write,
+            }),
+            Self::Probe {
+                write,
+                metrics_directory,
+                run_id,
+                settings,
+                kind,
+            } => CheckedAction::Probe(Box::new(CheckedProbe {
+                run: metrics_directory.unrecorded(ctx, &run_id).await?,
+                write: probe_output(ctx, write, &metrics_directory).await?,
+                settings,
+                kind,
+            })),
+            Self::Collect => CheckedAction::Collect,
+            Self::Explain { write } => CheckedAction::Explain {
+                write,
+                analyze: false,
+            },
+            Self::ExplainAnalyze { write } => CheckedAction::Explain {
+                write,
+                analyze: true,
+            },
+        })
+    }
 }
 
-/// One execution of a combiner against a dataset.
+/// One execution of a combiner against a dataset: the rows `inputs` plan, run through `action` on
+/// `threads` threads.
 pub struct CombinerRun {
-    pub formulation: Formulation,
-    pub input_path: String,
-    pub input_format: InputFormat,
+    pub inputs: PlanInputs,
     pub action: Action,
-    pub sample_set: Option<Vec<String>>,
-    pub row_limit: Option<usize>,
     pub threads: NonZeroUsize,
 }
 
@@ -128,7 +163,7 @@ impl CombinerRun {
         let options = PipelineOptions::for_paths(
             self.threads,
             [
-                Some(self.input_path.as_str()),
+                Some(self.inputs.input_path.as_str()),
                 self.action.output_path(),
                 self.action.metrics_directory().map(MetricsDirectory::path),
             ]
@@ -163,106 +198,145 @@ impl CombinerRun {
     }
 
     async fn run(self, ctx: &SessionContext, started: Started) -> Result<Outcome> {
-        let Self {
-            formulation,
-            input_path,
-            input_format,
-            action,
-            sample_set,
-            row_limit,
-            threads,
-        } = self;
-        let facts = RunFacts {
-            started,
-            formulation: (&formulation).into(),
-            dataset_path: input_path.clone(),
-            input_format: input_format.name().to_string(),
-            threads: threads.get(),
-        };
-        let rows = || {
-            plan_rows(
-                ctx,
-                &formulation,
-                &input_path,
-                &input_format,
-                sample_set.as_deref(),
-                row_limit,
-            )
-        };
+        let facts = RunFacts::new(started, &self.inputs, self.threads);
+        self.action
+            .check(ctx)
+            .await?
+            .execute(ctx, &self.inputs, facts)
+            .await
+    }
+}
 
-        match action {
-            Action::Write(target) => Ok(Outcome::RowsWritten(
-                target.write(rows().await?.0).await?.rows_written,
-            )),
-            Action::MeasuredWrite {
-                write,
-                metrics_directory,
-                run_id,
-            } => {
-                let run = metrics_directory.unrecorded(ctx, &run_id).await?;
-                let (ordered, samples) = rows().await?;
-                let executed = write.write(ordered).await?;
-                let record = facts.record(
-                    run_id,
-                    samples,
-                    Some((&write).into()),
-                    executed.rows_written,
-                    executed.execute_ns,
-                    None,
-                )?;
-                Ok(Outcome::Measured {
-                    rows_written: executed.rows_written,
-                    unrecorded_metrics: run.record(ctx, &record, &executed.plan).await?,
-                })
-            }
-            Action::Probe {
-                write,
-                metrics_directory,
-                run_id,
-                settings,
-                kind,
-            } => {
-                let run = metrics_directory.unrecorded(ctx, &run_id).await?;
-                let write = probe_output(ctx, write, &metrics_directory).await?;
-                let (ordered, samples) = rows().await?;
-                let probed = match &write {
-                    Some(target) => target.probe(ordered, &settings, kind).await?,
-                    None => sink::probe(sink::drain(ordered)?, &settings, kind).await?,
-                };
-                let record = facts.record(
-                    run_id,
-                    samples,
-                    write.as_ref().map(|target| target.target().into()),
-                    probed.rows_received,
-                    probed.execute_ns,
-                    Some(ProbeRecord {
-                        settings,
-                        decision: probed.decision.clone(),
-                        first_partition_end_ns: probed.first_partition_end_ns,
-                        kind: probed.kind,
-                    }),
-                )?;
-                let unrecorded_metrics = run
-                    .record_probe(ctx, &record, &probed.plan, &probed.samples)
-                    .await?;
-                Ok(Outcome::Probed {
-                    rows_received: probed.rows_received,
-                    steady_state_throughput: probed.decision.steady_state_throughput,
-                    stop_reason: probed.decision.stop_reason,
-                    unrecorded_metrics,
-                })
-            }
-            Action::Collect => {
-                let (frame, sink) = sink::collect(rows().await?.0)?;
-                frame.collect().await?;
-                Ok(Outcome::Batches(sink.take()))
-            }
-            Action::Explain { write } => explain(sink_frame(rows().await?.0, write)?, false).await,
-            Action::ExplainAnalyze { write } => {
-                explain(sink_frame(rows().await?.0, write)?, true).await
+/// An action whose refusals before dataset discovery have all passed. [`Action::check`] is the
+/// only way to get one, and executing one is the only way a run discovers its dataset.
+enum CheckedAction {
+    Write(WriteTarget),
+    MeasuredWrite(CheckedMeasuredWrite),
+    Probe(Box<CheckedProbe>),
+    Collect,
+    /// An explain, or with `analyze` an explain analyze.
+    Explain {
+        write: Option<WriteTarget>,
+        analyze: bool,
+    },
+}
+
+impl CheckedAction {
+    /// Plans the rows `inputs` describe and runs them through this action.
+    async fn execute(
+        self,
+        ctx: &SessionContext,
+        inputs: &PlanInputs,
+        facts: RunFacts,
+    ) -> Result<Outcome> {
+        let rows = inputs.plan(ctx).await?;
+        match self {
+            Self::Write(target) => write_rows(&target, rows.ordered).await,
+            Self::MeasuredWrite(measured) => measured.execute(ctx, rows, facts).await,
+            Self::Probe(probe) => probe.execute(ctx, rows, facts).await,
+            Self::Collect => collect_rows(rows.ordered).await,
+            Self::Explain { write, analyze } => {
+                explain(sink_frame(rows.ordered, write)?, analyze).await
             }
         }
     }
+}
+
+/// A measured write whose run id had no run record.
+struct CheckedMeasuredWrite {
+    write: WriteTarget,
+    run: UnrecordedRun,
+}
+
+impl CheckedMeasuredWrite {
+    /// Writes the rows and records the run.
+    async fn execute(
+        self,
+        ctx: &SessionContext,
+        rows: PlannedRows,
+        facts: RunFacts,
+    ) -> Result<Outcome> {
+        let Self { write, run } = self;
+        let executed = write.write(rows.ordered).await?;
+        let record = facts.record(
+            run.run_id().to_string(),
+            rows.samples,
+            Some((&write).into()),
+            executed.rows_written,
+            executed.execute_ns,
+            None,
+        )?;
+        Ok(Outcome::Measured {
+            rows_written: executed.rows_written,
+            unrecorded_metrics: run.record(ctx, &record, &executed.plan).await?,
+        })
+    }
+}
+
+/// A probe whose run id had no run record, and whose output path, if it writes, was vacant and
+/// did not hold its metrics directory.
+struct CheckedProbe {
+    write: Option<VacantTarget>,
+    run: UnrecordedRun,
+    settings: ProbeSettings,
+    kind: ProbeKind,
+}
+
+impl CheckedProbe {
+    /// Probes the rows, writing or draining them, and records the run with its progress samples.
+    async fn execute(
+        self,
+        ctx: &SessionContext,
+        rows: PlannedRows,
+        facts: RunFacts,
+    ) -> Result<Outcome> {
+        let Self {
+            write,
+            run,
+            settings,
+            kind,
+        } = self;
+        let probed = match &write {
+            Some(target) => target.probe(rows.ordered, &settings, kind).await?,
+            None => sink::probe(sink::drain(rows.ordered)?, &settings, kind).await?,
+        };
+        let record = facts.record(
+            run.run_id().to_string(),
+            rows.samples,
+            write.as_ref().map(|target| target.target().into()),
+            probed.rows_received,
+            probed.execute_ns,
+            Some(ProbeRecord {
+                settings,
+                decision: probed.decision.clone(),
+                first_partition_end_ns: probed.first_partition_end_ns,
+                kind: probed.kind,
+            }),
+        )?;
+        let unrecorded_metrics = run
+            .record_probe(ctx, &record, &probed.plan, &probed.samples)
+            .await?;
+        Ok(Outcome::Probed {
+            rows_received: probed.rows_received,
+            steady_state_throughput: probed.decision.steady_state_throughput,
+            stop_reason: probed.decision.stop_reason,
+            unrecorded_metrics,
+        })
+    }
+}
+
+/// Writes the rows to `target`.
+async fn write_rows(target: &WriteTarget, ordered: OrderedFrame) -> Result<Outcome> {
+    Ok(Outcome::RowsWritten(
+        target.write(ordered).await?.rows_written,
+    ))
+}
+
+/// Collects the rows in memory.
+async fn collect_rows(ordered: OrderedFrame) -> Result<Outcome> {
+    let (frame, sink) = sink::collect(ordered)?;
+    frame.collect().await?;
+    Ok(Outcome::Batches(sink.take()))
 }
 
 /// When a run started, by the wall clock it records and the monotonic clock it times with.
@@ -291,6 +365,18 @@ struct RunFacts {
 }
 
 impl RunFacts {
+    /// The facts of a run started at `started` on `threads` threads over the rows `inputs`
+    /// describe.
+    fn new(started: Started, inputs: &PlanInputs, threads: NonZeroUsize) -> Self {
+        Self {
+            started,
+            formulation: (&inputs.formulation).into(),
+            dataset_path: inputs.input_path.clone(),
+            input_format: inputs.input_format.name().to_string(),
+            threads: threads.get(),
+        }
+    }
+
     /// The run record of `run_id`, a run over `samples` samples that ends now. Its action wrote
     /// `write`, if any, wrote `rows_written` rows, or received them for a probe, and executed for
     /// `execute_ns`. A probe's settings and decision are `probe`.
@@ -321,35 +407,45 @@ impl RunFacts {
     }
 }
 
-/// The formulation's rows over the dataset at `input_path`, restricted to `sample_set` and
-/// limited to `row_limit` rows when given, and the size of the sample set they cover.
-async fn plan_rows(
-    ctx: &SessionContext,
-    formulation: &Formulation,
-    input_path: &str,
-    input_format: &InputFormat,
-    sample_set: Option<&[String]>,
-    row_limit: Option<usize>,
-) -> Result<(OrderedFrame, usize)> {
-    let dataset = Dataset::discover(
-        ctx,
-        ListingTableUrl::parse(input_path)?,
-        input_format.clone(),
-        formulation.required_ordering(),
-        None,
-    )
-    .await?;
-    let dataset = match sample_set {
-        Some(sample_set) => dataset.restrict_to(sample_set)?,
-        None => dataset,
-    };
-    let samples = dataset.sample_set().len();
-    let ordered = formulation.plan(ctx, &dataset).await?;
-    let ordered = match row_limit {
-        Some(limit) => ordered.limit(limit)?,
-        None => ordered,
-    };
-    Ok((ordered, samples))
+/// What a run plans its rows from: the formulation's rows over the dataset at `input_path`,
+/// restricted to `sample_set` and limited to `row_limit` rows when given.
+pub struct PlanInputs {
+    pub formulation: Formulation,
+    pub input_path: String,
+    pub input_format: InputFormat,
+    pub sample_set: Option<Vec<String>>,
+    pub row_limit: Option<usize>,
+}
+
+impl PlanInputs {
+    /// Discovers the dataset and plans the rows over it.
+    async fn plan(&self, ctx: &SessionContext) -> Result<PlannedRows> {
+        let dataset = Dataset::discover(
+            ctx,
+            ListingTableUrl::parse(&self.input_path)?,
+            self.input_format.clone(),
+            self.formulation.required_ordering(),
+            None,
+        )
+        .await?;
+        let dataset = match &self.sample_set {
+            Some(sample_set) => dataset.restrict_to(sample_set)?,
+            None => dataset,
+        };
+        let samples = dataset.sample_set().len();
+        let ordered = self.formulation.plan(ctx, &dataset).await?;
+        let ordered = match self.row_limit {
+            Some(limit) => ordered.limit(limit)?,
+            None => ordered,
+        };
+        Ok(PlannedRows { ordered, samples })
+    }
+}
+
+/// A run's planned rows, and the size of the sample set they cover.
+struct PlannedRows {
+    ordered: OrderedFrame,
+    samples: usize,
 }
 
 /// Wall-clock nanoseconds since `since`, saturating at `u64::MAX`.
