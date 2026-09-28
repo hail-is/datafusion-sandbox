@@ -16,7 +16,7 @@ use crate::{
         grouped_merge, interval_merge, rows_of_operator, run_record, string_values,
         timestamp_values, u64_values,
     },
-    throughput_probe::{Decision, ProbeSettings, ProgressSample, StopReason},
+    throughput_probe::{Decision, ProbeSettings, ProbedKind, ProgressSample, StopReason},
     write::WriteTarget,
 };
 
@@ -88,6 +88,9 @@ fn the_run_record_schema_names_its_columns_in_order() {
             ("window_groups", &DataType::UInt64, true),
             ("min_duration_ns", &DataType::UInt64, true),
             ("max_duration_ns", &DataType::UInt64, true),
+            ("would_stop_ns", &DataType::UInt64, true),
+            ("would_be_steady_state_throughput", &DataType::Float64, true),
+            ("would_be_warmup_end_ns", &DataType::UInt64, true),
         ]
     );
 }
@@ -135,6 +138,15 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
                 window_rows: 120_000,
             },
             first_partition_end_ns: Some(1_400_000_001),
+            kind: ProbedKind::Shadow {
+                would_stop: Some(Decision {
+                    stop_reason: StopReason::Steady,
+                    steady_state_throughput: Some(2_400.25),
+                    warmup_end_ns: Some(300_000_000),
+                    window_end_ns: 1_200_000_000,
+                    window_rows: 100_000,
+                }),
+            },
         }),
     };
 
@@ -159,7 +171,7 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
         ("run_ns", "2000000000"),
         ("execute_ns", "1500000000"),
         ("peak_rss_bytes", "3221225472"),
-        ("action", "probe"),
+        ("action", "shadow"),
         ("stop_reason", "completed"),
         ("steady_state_throughput", "2500.5"),
         ("warmup_end_ns", "400000000"),
@@ -173,6 +185,9 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
         ("window_groups", "12"),
         ("min_duration_ns", "30000000000"),
         ("max_duration_ns", "300000000000"),
+        ("would_stop_ns", "1200000000"),
+        ("would_be_steady_state_throughput", "2400.25"),
+        ("would_be_warmup_end_ns", "300000000"),
     ] {
         assert_eq!(string_values(&batch, column), [expected], "{column}");
     }
@@ -215,6 +230,9 @@ fn unset_run_record_settings_are_null() {
         "window_groups",
         "min_duration_ns",
         "max_duration_ns",
+        "would_stop_ns",
+        "would_be_steady_state_throughput",
+        "would_be_warmup_end_ns",
     ] {
         assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");
     }
@@ -222,7 +240,8 @@ fn unset_run_record_settings_are_null() {
 }
 
 /// A drained probe writes nothing, so its write settings are null; a probe with no estimate, no
-/// end of warmup and no finished partition leaves those three columns null too.
+/// end of warmup and no finished partition leaves those three columns null too, and a probe that
+/// is no shadow probe leaves the would-stop columns null.
 #[test]
 fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
     let record = RunRecord {
@@ -237,6 +256,7 @@ fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
                 window_rows: 0,
             },
             first_partition_end_ns: None,
+            kind: ProbedKind::Probe,
         }),
         ..run_record("run-1")
     };
@@ -250,11 +270,47 @@ fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
         "steady_state_throughput",
         "warmup_end_ns",
         "first_partition_end_ns",
+        "would_stop_ns",
+        "would_be_steady_state_throughput",
+        "would_be_warmup_end_ns",
     ] {
         assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");
     }
     assert_eq!(string_values(&batch, "action"), ["probe"]);
     assert_eq!(string_values(&batch, "stop_reason"), ["capped"]);
+}
+
+/// A shadow probe whose rule never stopped steady records that it is a shadow probe, completed,
+/// and leaves its would-stop columns null.
+#[test]
+fn a_shadow_probe_that_never_would_have_stopped_leaves_its_would_stop_columns_null() {
+    let record = RunRecord {
+        probe: Some(ProbeRecord {
+            settings: ProbeSettings::default(),
+            decision: Decision {
+                stop_reason: StopReason::Completed,
+                steady_state_throughput: Some(1_000.0),
+                warmup_end_ns: None,
+                window_end_ns: 1_000,
+                window_rows: 32,
+            },
+            first_partition_end_ns: Some(1_000),
+            kind: ProbedKind::Shadow { would_stop: None },
+        }),
+        ..run_record("run-1")
+    };
+
+    let batch = run_metrics::run_record_batch(&record).unwrap();
+
+    for column in [
+        "would_stop_ns",
+        "would_be_steady_state_throughput",
+        "would_be_warmup_end_ns",
+    ] {
+        assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");
+    }
+    assert_eq!(string_values(&batch, "action"), ["shadow"]);
+    assert_eq!(string_values(&batch, "stop_reason"), ["completed"]);
 }
 
 /// The progress samples table holds one row per sample, in the order taken, each with its index

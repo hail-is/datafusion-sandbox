@@ -25,7 +25,7 @@
 //! `DataFusion`'s fallback grouped hash aggregate stream; the streams it picks for the allele
 //! combiner's distinct do not report it, so the column is null for every current plan.
 
-use crate::throughput_probe::{Decision, ProbeSettings, ProgressSample};
+use crate::throughput_probe::{Decision, ProbeSettings, ProbedKind, ProgressSample};
 
 use datafusion::{
     arrow::{
@@ -81,6 +81,9 @@ pub struct ProbeRecord {
     /// The elapsed nanoseconds of the first sample that showed a finished partition; `None` if
     /// none did before the stop.
     pub first_partition_end_ns: Option<u64>,
+    /// Whether it is a shadow probe, and if so, its first steady decision, which stopped at the
+    /// end of its window.
+    pub kind: ProbedKind,
 }
 
 /// The settings of a formulation the run record holds. A formulation describes itself as one.
@@ -215,7 +218,7 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
     },
     RecordColumn {
         name: "action",
-        cell: RecordCell::Probe(ProbeCell::String(|_| "probe")),
+        cell: RecordCell::Probe(ProbeCell::String(|probe| probe.kind.name())),
     },
     RecordColumn {
         name: "stop_reason",
@@ -285,6 +288,33 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
         name: "max_duration_ns",
         cell: RecordCell::Probe(ProbeCell::UInt64(|probe| {
             duration_ns(probe.settings.max_duration)
+        })),
+    },
+    RecordColumn {
+        name: "would_stop_ns",
+        cell: RecordCell::Probe(ProbeCell::OptionalUInt64(|probe| {
+            probe
+                .kind
+                .would_stop()
+                .map(|decision| decision.window_end_ns)
+        })),
+    },
+    RecordColumn {
+        name: "would_be_steady_state_throughput",
+        cell: RecordCell::Probe(ProbeCell::OptionalFloat64(|probe| {
+            probe
+                .kind
+                .would_stop()
+                .and_then(|decision| decision.steady_state_throughput)
+        })),
+    },
+    RecordColumn {
+        name: "would_be_warmup_end_ns",
+        cell: RecordCell::Probe(ProbeCell::OptionalUInt64(|probe| {
+            probe
+                .kind
+                .would_stop()
+                .and_then(|decision| decision.warmup_end_ns)
         })),
     },
 ];

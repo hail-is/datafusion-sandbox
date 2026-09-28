@@ -376,6 +376,57 @@ fn completes_at_the_first_partition_end_which_closes_the_window() {
     );
 }
 
+/// A shadow evaluation ignores the maximum duration: where the probe caps, it keeps running, and
+/// it stops steady where a probe that had not been capped would.
+#[test]
+fn a_shadow_evaluation_ignores_the_maximum_duration() {
+    let settings = ProbeSettings {
+        max_duration: Duration::from_secs(10),
+        ..ProbeSettings::default()
+    };
+    let samples = ramp_then_flat(20);
+    let (capped, settled) = (samples.get(..=110).unwrap(), samples.as_slice());
+
+    assert_eq!(
+        throughput_probe::decide(&settings, capped, None).map(|decision| decision.stop_reason),
+        Some(StopReason::Capped)
+    );
+    assert_eq!(throughput_probe::would_stop(&settings, capped, None), None);
+    assert_eq!(
+        throughput_probe::would_stop(&settings, settled, None),
+        Some(settled_at_20_s())
+    );
+}
+
+/// In a shadow evaluation, the first partition end closes the window but does not stop: where
+/// the probe completes, it keeps running, and since a probe would have completed there, no later
+/// sample stops it steady. At the end of the run, the estimate is still over the closed window.
+#[test]
+fn a_first_partition_end_closes_a_shadow_evaluation_s_window_without_stopping_it() {
+    let settings = ProbeSettings::default();
+    let samples = ramp_then_flat(30);
+    let first_partition_end_ns = Some(19_000 * MS);
+    let settled = samples.get(..=200).unwrap();
+
+    assert_eq!(
+        throughput_probe::would_stop(&settings, settled, None),
+        Some(settled_at_20_s())
+    );
+    assert_eq!(
+        throughput_probe::would_stop(&settings, settled, first_partition_end_ns),
+        None
+    );
+    assert_eq!(
+        throughput_probe::decide(&settings, &samples, first_partition_end_ns),
+        Some(Decision {
+            stop_reason: StopReason::Completed,
+            window_end_ns: 19_000 * MS,
+            window_rows: 15_000,
+            ..settled_at_20_s()
+        })
+    );
+}
+
 /// A window of one sample spans no time, so it has no estimate.
 #[test]
 fn a_window_of_one_sample_has_no_estimate() {

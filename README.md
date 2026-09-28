@@ -176,6 +176,32 @@ gcloud storage buckets update gs://BUCKET --lifecycle-file=lifecycle.json
 ```
 cargo run -r -- combine-refs data/vortices_chr22 --formulation interval-merge --probe --write data/probe-out --metrics data/runs --run-id interval-probe --max-duration 60
 ```
+A shadow probe, `--probe --shadow`, drained or written, applies the stopping rule after each
+progress sample exactly as a probe does, but never acts on it: it ignores `--max-duration` and
+the first partition end, runs the plan to completion, and always stops with stop reason
+`completed`. Its measurement window still closes at the first partition end, and its
+`steady_state_throughput` is the rule's estimate at the end of the run. Its run record has
+`action` `shadow`, and records the first `steady` decision the rule reached before the first
+partition end, the decision a probe would have stopped at, in three more columns:
+`would_stop_ns`, the elapsed nanoseconds at which it would have stopped,
+`would_be_steady_state_throughput`, and `would_be_warmup_end_ns`. Since the cap stops nothing,
+`would_stop_ns` may lie past `--max-duration`, where a probe would have stopped capped instead.
+They are empty when the rule never stopped steady, and for every other run.
+```
+cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --probe --shadow --metrics data/runs --run-id grouped-8-shadow
+```
+Calibrate the stopping rule with shadow probes before relying on it in a sweep:
+1. Run shadow probes on a few extreme configurations: the smallest and the largest branching
+   factor, one thread and all threads, and interval-merge with many intervals.
+2. Compare each run's `would_be_steady_state_throughput` with its full-run truth: its
+   `steady_state_throughput`, the rate over the whole measurement window, and `rows_written`
+   over `execute_ns`, the rate over the whole run. An empty `would_stop_ns` means the rule never
+   settled on that configuration.
+3. Check that the work per row holds steady along the genome: the rate between progress samples
+   should not drift over the run, since the estimate stands for the whole run only if it doesn't.
+4. Tune `--batch` from the recorded progress samples. Their row counts are cumulative, so merging
+   samples replays the rule offline with any longer batch duration, and with any other setting.
+
 An earlier variant of the reference combiner is still available as `cargo run -r --example combiner1`.
 
 ### Building for a specific GCE instance family

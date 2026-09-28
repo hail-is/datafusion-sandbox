@@ -15,17 +15,19 @@ use crate::{
     },
     stored::dataset::Dataset,
     tests::support::{rows_of_operator, u64_values},
-    throughput_probe::{ProbeSettings, StopReason},
+    throughput_probe::{self, ProbeKind, ProbeSettings, ProbedKind, StopReason},
 };
 
 use datafusion::{
     arrow::{
-        array::{Array, UInt64Array},
+        array::{Array, Int32Array, UInt64Array},
+        datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
     },
-    catalog::Session,
+    catalog::{Session, streaming::StreamingTable},
     datasource::sink::DataSinkExec,
     error::{DataFusionError, Result},
+    execution::{SendableRecordBatchStream, TaskContext},
     physical_expr::LexRequirement,
     physical_plan::{
         ChildrenPropertiesMode, Distribution, ExecutionPlan, ExecutionPlanProperties,
@@ -33,13 +35,18 @@ use datafusion::{
         coalesce_partitions::CoalescePartitionsExec,
         projection::ProjectionExec,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
+        stream::RecordBatchStreamAdapter,
+        streaming::PartitionStream,
         union::UnionExec,
     },
     prelude::{DataFrame, SessionContext, col, lit},
 };
 
+use futures_util::StreamExt;
+
 use std::{
     fmt,
+    num::NonZeroU32,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -554,6 +561,178 @@ fn probing_with_a_zero_poll_period_is_refused() {
     assert!(message.contains("poll period"), "{message}");
 }
 
+/// A shadow probe runs its plan to completion, past its maximum duration and past its first
+/// partition end, which still closes its window: it ends completed, having received every row.
+/// Its rule never stopped steady, so it records no would-stop.
+#[test]
+fn shadow_probing_runs_past_the_cap_and_the_first_partition_end_to_completion() {
+    let settings = ProbeSettings {
+        poll_period: Duration::from_millis(10),
+        max_duration: Duration::from_millis(50),
+        ..ProbeSettings::default()
+    };
+    let quick = PacedStream::new(1, Duration::ZERO);
+    let paced = PacedStream::new(20, Duration::from_millis(10));
+
+    let probed = shadow_probe_paced(settings, vec![quick, paced]).unwrap();
+
+    assert_eq!(probed.decision.stop_reason, StopReason::Completed);
+    let last = probed.samples.last().unwrap();
+    assert_eq!(last.rows, 21 * PACED_BATCH_ROWS);
+    assert_eq!(probed.rows_received, 21 * PACED_BATCH_ROWS);
+    assert!(
+        u128::from(last.elapsed_ns) >= Duration::from_millis(200).as_nanos(),
+        "{last:?}"
+    );
+    let first_partition_end_ns = probed.first_partition_end_ns.unwrap();
+    assert!(first_partition_end_ns < last.elapsed_ns, "{probed:?}");
+    assert!(
+        probed.decision.window_end_ns <= first_partition_end_ns,
+        "{probed:?}"
+    );
+    assert_eq!(probed.kind, ProbedKind::Shadow { would_stop: None });
+}
+
+/// A shadow probe records the first steady decision its rule reached, which is the decision a
+/// probe replaying its samples first stops steady at, and still runs to completion.
+#[test]
+fn a_shadow_probe_records_the_first_steady_decision_its_samples_replay_to() {
+    let settings = ProbeSettings {
+        poll_period: Duration::from_millis(5),
+        batch_duration: Duration::from_millis(20),
+        precision: 1e9,
+        consecutive_checks: NonZeroU32::MIN,
+        window_groups: 2,
+        min_duration: Duration::ZERO,
+        max_duration: Duration::from_millis(10),
+    };
+
+    let probed = shadow_probe_paced(
+        settings.clone(),
+        vec![PacedStream::new(60, Duration::from_millis(5))],
+    )
+    .unwrap();
+
+    assert_eq!(probed.decision.stop_reason, StopReason::Completed);
+    assert_eq!(probed.rows_received, 60 * PACED_BATCH_ROWS);
+    let replayed = (1..=probed.samples.len()).find_map(|taken| {
+        let seen = probed.samples.get(..taken)?;
+        let latest_ns = seen.last()?.elapsed_ns;
+        let decision = throughput_probe::decide(
+            &settings,
+            seen,
+            probed
+                .first_partition_end_ns
+                .filter(|&end_ns| end_ns <= latest_ns),
+        )?;
+        (decision.stop_reason == StopReason::Steady).then_some(decision)
+    });
+    assert!(replayed.is_some(), "{probed:?}");
+    assert_eq!(
+        probed.kind,
+        ProbedKind::Shadow {
+            would_stop: replayed
+        }
+    );
+}
+
+/// The rows in each batch a [`PacedStream`] emits.
+const PACED_BATCH_ROWS: u64 = 64;
+
+/// A partition of a generated table that emits `batches` batches of the integers 1 through
+/// [`PACED_BATCH_ROWS`], each `pace` after the one before, so that it takes a known time.
+#[derive(Debug)]
+struct PacedStream {
+    schema: SchemaRef,
+    batches: usize,
+    pace: Duration,
+}
+
+impl PacedStream {
+    fn new(batches: usize, pace: Duration) -> Self {
+        Self {
+            schema: Arc::new(Schema::new(vec![Field::new("idx", DataType::Int32, false)])),
+            batches,
+            pace,
+        }
+    }
+}
+
+impl PartitionStream for PacedStream {
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let rows = i32::try_from(PACED_BATCH_ROWS).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::clone(&self.schema),
+            vec![Arc::new(Int32Array::from_iter_values(1..=rows))],
+        )
+        .unwrap();
+        let pace = self.pace;
+        let stream = futures::stream::iter(0..self.batches).then(move |_| {
+            let batch = batch.clone();
+            async move {
+                tokio::time::sleep(pace).await;
+                Ok(batch)
+            }
+        });
+        Box::pin(RecordBatchStreamAdapter::new(
+            Arc::clone(&self.schema),
+            stream,
+        ))
+    }
+}
+
+/// Shadow-probes, with `settings`, a table with one partition per stream of `partitions`,
+/// filtered so that the operator feeding the sink counts its rows, into one collecting sink per
+/// partition. Round-robin repartitioning is off, so the filter keeps the table's partitions, and
+/// the batch size is a paced batch, so the filter emits each batch as it arrives.
+fn shadow_probe_paced(settings: ProbeSettings, partitions: Vec<PacedStream>) -> Result<ProbedSink> {
+    pipeline::run(
+        move |ctx| async move {
+            let options = [
+                (
+                    "datafusion.optimizer.enable_round_robin_repartition",
+                    "false".to_string(),
+                ),
+                (
+                    "datafusion.execution.batch_size",
+                    PACED_BATCH_ROWS.to_string(),
+                ),
+            ];
+            for (key, value) in options {
+                ctx.state_ref()
+                    .write()
+                    .config_mut()
+                    .options_mut()
+                    .set(key, &value)?;
+            }
+            let schema = partitions
+                .first()
+                .map(|partition| Arc::clone(&partition.schema))
+                .ok_or_else(|| DataFusionError::Plan("no partitions".to_string()))?;
+            let partitions = partitions
+                .into_iter()
+                .map(|partition| -> Arc<dyn PartitionStream> { Arc::new(partition) })
+                .collect();
+            let table = StreamingTable::try_new(schema, partitions)?;
+            let frame = ctx
+                .read_table(Arc::new(table))?
+                .filter(col("idx").gt_eq(lit(0)))?;
+            let target = Arc::new(CollectingPartitions::default());
+            sink::probe(
+                sink::run_into(frame, "paced", None, target)?,
+                &settings,
+                ProbeKind::Shadow,
+            )
+            .await
+        },
+        PipelineOptions::single_threaded(),
+    )
+}
+
 /// Probes a drain of the generated table `build` makes, sampling every 10 ms, and returns what
 /// [`try_probe_generated`] returns.
 fn probe_generated(
@@ -580,8 +759,12 @@ fn try_probe_generated(
             let frame = build(&ctx)?.filter(col("idx").gt_eq(lit(0)))?;
             let sink = Arc::new(DrainingSink::new(Arc::clone(frame.schema().inner())));
             let target = Arc::new(DataSinkTarget::new(sink));
-            let probed =
-                sink::probe(sink::run_into(frame, "drain", None, target)?, &settings).await?;
+            let probed = sink::probe(
+                sink::run_into(frame, "drain", None, target)?,
+                &settings,
+                ProbeKind::Probe,
+            )
+            .await?;
             let metrics = run_metrics::run_metrics_batch("probe", &probed.plan)?.batch;
             let output_rows = u64_values(&metrics, "output_rows");
             let filter_rows = rows_of_operator(&metrics, "FilterExec")

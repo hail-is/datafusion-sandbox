@@ -136,6 +136,82 @@ pub fn decide(
     })
 }
 
+/// Whether a throughput probe acts on its stopping rule, as a caller asks for one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProbeKind {
+    /// Stops at the rule's first decision.
+    Probe,
+    /// A shadow probe: runs to completion, recording when the rule would have stopped it.
+    Shadow,
+}
+
+/// A throughput probe's kind as it ended, with what a shadow probe recorded.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProbedKind {
+    Probe,
+    /// A shadow probe, with the first decision [`would_stop`] made; `None` if its rule never
+    /// stopped steady.
+    Shadow {
+        would_stop: Option<Decision>,
+    },
+}
+
+impl ProbedKind {
+    /// The name of the kind's action, as the run record holds it.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Probe => "probe",
+            Self::Shadow { .. } => "shadow",
+        }
+    }
+
+    /// A shadow probe's first steady decision; `None` if its rule never stopped steady, and for
+    /// a probe that is not a shadow probe.
+    #[must_use]
+    pub const fn would_stop(&self) -> Option<&Decision> {
+        match self {
+            Self::Probe => None,
+            Self::Shadow { would_stop } => would_stop.as_ref(),
+        }
+    }
+}
+
+impl From<ProbeKind> for ProbedKind {
+    /// The kind a probe of `kind` starts as, having recorded nothing.
+    fn from(kind: ProbeKind) -> Self {
+        match kind {
+            ProbeKind::Probe => Self::Probe,
+            ProbeKind::Shadow => Self::Shadow { would_stop: None },
+        }
+    }
+}
+
+/// The decision a shadow probe with `settings` records after `samples`, taking the rule as
+/// [`decide`] does but never acting on it: the decision, if it stops steady. `None` otherwise.
+///
+/// The maximum duration stops nothing, so past it the rule may still stop steady. The first
+/// partition end closes the window, and a probe would have completed there, so after it no
+/// decision is steady. The first decision a shadow probe records is when, and with what estimate,
+/// a probe would have stopped.
+#[must_use]
+pub fn would_stop(
+    settings: &ProbeSettings,
+    samples: &[ProgressSample],
+    first_partition_end_ns: Option<u64>,
+) -> Option<Decision> {
+    if first_partition_end_ns.is_some() {
+        return None;
+    }
+    // Without a cap, the rule takes no capped estimate only for it to be discarded, and the one
+    // decision left to it is steady.
+    let uncapped = ProbeSettings {
+        max_duration: Duration::MAX,
+        ..settings.clone()
+    };
+    decide(&uncapped, samples, None)
+}
+
 /// Whether `samples` end at a batch end past the minimum duration, and the checks at the last
 /// `consecutive_checks` batch ends were all tight.
 fn steady(settings: &ProbeSettings, samples: &[ProgressSample]) -> bool {

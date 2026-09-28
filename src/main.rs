@@ -21,7 +21,7 @@ use datafusion_sandbox::metrics_directory::MetricsDirectory;
 use datafusion_sandbox::ordered_frame::OutputLayout;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::split_points;
-use datafusion_sandbox::throughput_probe::ProbeSettings;
+use datafusion_sandbox::throughput_probe::{ProbeKind, ProbeSettings};
 use datafusion_sandbox::write::WriteTarget;
 use std::{
     num::{NonZeroU32, NonZeroUsize},
@@ -266,12 +266,21 @@ impl OutputFormatArg {
     }
 }
 
-/// The settings of a throughput probe, each of which requires `--probe`. Durations are in decimal
-/// seconds.
+/// Whether a throughput probe is a shadow probe, and its settings, each of which requires
+/// `--probe`. Durations are in decimal seconds.
 // Every conflict of `--probe` is repeated on each: clap drops a `requires` whose target
 // conflicts with a present argument, so `--max-duration --limit` would otherwise parse.
 #[derive(Args)]
 struct ProbeArgs {
+    /// With --probe, run a shadow probe: evaluate when the probe would stop without stopping,
+    /// ignoring --max-duration and the first partition end, and run to completion. Records the
+    /// first steady decision as the would-stop fields.
+    #[arg(
+        long,
+        requires = "probe",
+        conflicts_with_all = ["show", "explain", "explain_analyze", "limit"]
+    )]
+    shadow: bool,
     /// With --probe, take a progress sample every SECONDS. Defaults to 0.1.
     #[arg(
         long,
@@ -503,6 +512,11 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
                 DataFusionError::Configuration("--probe requires --metrics".to_string())
             })?),
             run_id: run_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            kind: if probe_settings.shadow {
+                ProbeKind::Shadow
+            } else {
+                ProbeKind::Probe
+            },
             settings: probe_settings.settings(),
         },
         CliAction::Show => Action::Collect,
@@ -1379,6 +1393,7 @@ mod tests {
             metrics_directory,
             run_id,
             settings,
+            kind,
         } = run.action
         else {
             panic!("expected a probe, got {:?}", run.action);
@@ -1387,6 +1402,7 @@ mod tests {
         assert_eq!(metrics_directory, MetricsDirectory::new("runs"));
         assert!(Uuid::parse_str(&run_id).is_ok(), "run id {run_id:?}");
         assert_eq!(settings, ProbeSettings::default());
+        assert_eq!(kind, ProbeKind::Probe);
         assert_eq!(run.row_limit, None);
     }
 
@@ -1443,6 +1459,50 @@ mod tests {
             "diagnostic:\n{diagnostic}"
         );
         assert!(diagnostic.contains("--write"), "diagnostic:\n{diagnostic}");
+    }
+
+    /// `--shadow` requires `--probe`, alone and beside an argument `--probe` conflicts with, where
+    /// clap would drop the requirement.
+    #[test]
+    fn shadow_requires_a_probe() {
+        for args in [
+            vec![],
+            vec!["--write", "out.vortex"],
+            vec!["--write", "out.vortex", "--metrics", "runs"],
+            vec!["--write", "out.vortex", "--limit", "5"],
+            vec!["--show"],
+            vec!["--explain"],
+            vec!["--explain-analyze"],
+        ] {
+            let diagnostic = combiner_diagnostic(
+                &std::iter::once("--shadow")
+                    .chain(args.iter().copied())
+                    .collect::<Vec<_>>(),
+            );
+
+            assert!(
+                diagnostic.contains("--shadow"),
+                "{args:?} diagnostic:\n{diagnostic}"
+            );
+        }
+    }
+
+    /// `--shadow` turns a probe, drained or written, into a shadow probe.
+    #[test]
+    fn shadow_resolves_to_a_shadow_probe() {
+        for args in [vec![], vec!["--write", "out.vortex"]] {
+            let run = resolve(parse_combiner(
+                ["--probe", "--shadow", "--metrics", "runs"]
+                    .into_iter()
+                    .chain(args.iter().copied()),
+            ))
+            .unwrap();
+
+            let Action::Probe { kind, .. } = run.action else {
+                panic!("expected a probe, got {:?}", run.action);
+            };
+            assert_eq!(kind, ProbeKind::Shadow, "{args:?}");
+        }
     }
 
     #[test]
