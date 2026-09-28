@@ -1,7 +1,7 @@
 use crate::fixture;
 
 use crate::{
-    combiner_run::{Action, CombinerRun, Outcome},
+    combiner_run::{Action, CombinerRun, Outcome, PlanInputs},
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
     locus::{Locus, LocusOrdering, LocusRepresentation},
@@ -980,14 +980,15 @@ fn refuses_a_run_id_that_already_has_a_run_record_before_discovery() {
     let url = store.url().as_str().to_string();
     let metrics_directory = MetricsDirectory::new(&format!("{url}metrics"));
     let record_path = metrics_directory.run_record_path("run-a");
-    let measured_write = |input_path: String, output: &str| CombinerRun {
-        input_path,
-        ..measured_run(
+    let measured_write = |input_path: String, output: &str| {
+        let mut run = measured_run(
             &input,
             format!("{url}{output}"),
             metrics_directory.clone(),
             "run-a",
-        )
+        );
+        run.inputs.input_path = input_path;
+        run
     };
     let first = measured_write(input.table_path().to_string(), "first.parquet");
     let second = measured_write(format!("{url}no-such-dataset/"), "second.parquet");
@@ -1064,10 +1065,8 @@ fn a_drained_probe_of_every_formulation_completes_and_records_three_tables() {
     ] {
         let store = MemoryStore::new("probed");
         let directory = MetricsDirectory::new(&format!("{}metrics", store.url().as_str()));
-        let run = CombinerRun {
-            formulation: formulation.clone(),
-            ..probe_run(&input, directory.clone(), "run-a")
-        };
+        let mut run = probe_run(&input, directory.clone(), "run-a");
+        run.inputs.formulation = formulation.clone();
 
         let (outcome, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
             let outcome = run.execute_in(&ctx).await?;
@@ -1180,16 +1179,14 @@ fn a_recorded_probe_replays_to_its_recorded_decision() {
     ] {
         let store = MemoryStore::new("replayed");
         let directory = MetricsDirectory::new(&format!("{}metrics", store.url().as_str()));
-        let run = CombinerRun {
-            formulation: formulation.clone(),
-            action: Action::Probe {
-                write: None,
-                metrics_directory: directory.clone(),
-                run_id: "run-a".to_string(),
-                settings: settings.clone(),
-                kind: ProbeKind::Probe,
-            },
-            ..probe_run(&input, directory.clone(), "run-a")
+        let mut run = probe_run(&input, directory.clone(), "run-a");
+        run.inputs.formulation = formulation.clone();
+        run.action = Action::Probe {
+            write: None,
+            metrics_directory: directory.clone(),
+            run_id: "run-a".to_string(),
+            settings: settings.clone(),
+            kind: ProbeKind::Probe,
         };
 
         let (outcome, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
@@ -1279,10 +1276,8 @@ fn a_probe_refuses_a_run_id_that_already_has_a_run_record_before_discovery() {
     let url = store.url().as_str().to_string();
     let directory = MetricsDirectory::new(&format!("{url}metrics"));
     let first = probe_run(&input, directory.clone(), "run-a");
-    let second = CombinerRun {
-        input_path: format!("{url}no-such-dataset/"),
-        ..probe_run(&input, directory.clone(), "run-a")
-    };
+    let mut second = probe_run(&input, directory.clone(), "run-a");
+    second.inputs.input_path = format!("{url}no-such-dataset/");
 
     let (before, refused, after) = on_memory_stores(&input, &store, move |ctx| async move {
         first.execute_in(&ctx).await?;
@@ -1352,19 +1347,17 @@ fn a_written_probe_of_each_output_layout_writes_through_the_plain_writes_sink_an
         let url = store.url().as_str().to_string();
         let directory = MetricsDirectory::new(&format!("{url}metrics"));
         let output_path = format!("{url}{output}");
-        let run = CombinerRun {
-            formulation: formulation.clone(),
-            ..written_probe_run(
-                &input,
-                WriteTarget {
-                    output_path: output_path.clone(),
-                    output_format: output_format.clone(),
-                },
-                directory.clone(),
-                "run-a",
-                ProbeSettings::default(),
-            )
-        };
+        let mut run = written_probe_run(
+            &input,
+            WriteTarget {
+                output_path: output_path.clone(),
+                output_format: output_format.clone(),
+            },
+            directory.clone(),
+            "run-a",
+            ProbeSettings::default(),
+        );
+        run.inputs.formulation = formulation.clone();
 
         let (outcome, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
             let outcome = run.execute_in(&ctx).await?;
@@ -1441,22 +1434,20 @@ fn a_capped_or_failed_written_probe_keeps_nothing() {
     let capped = MemoryStore::new("capped-probe");
     let url = capped.url().as_str().to_string();
     let directory = MetricsDirectory::new(&format!("{url}metrics"));
-    let run = CombinerRun {
-        formulation: interval_merge("1:3,2:2"),
-        ..written_probe_run(
-            &input,
-            WriteTarget {
-                output_path: format!("{url}out/combined"),
-                output_format: OutputFormat::VORTEX,
-            },
-            directory,
-            "run-a",
-            ProbeSettings {
-                max_duration: Duration::from_nanos(1),
-                ..ProbeSettings::default()
-            },
-        )
-    };
+    let mut run = written_probe_run(
+        &input,
+        WriteTarget {
+            output_path: format!("{url}out/combined"),
+            output_format: OutputFormat::VORTEX,
+        },
+        directory,
+        "run-a",
+        ProbeSettings {
+            max_duration: Duration::from_nanos(1),
+            ..ProbeSettings::default()
+        },
+    );
+    run.inputs.formulation = interval_merge("1:3,2:2");
     let outcome = on_memory_stores(&input, &capped, move |ctx| async move {
         run.execute_in(&ctx).await
     });
@@ -1486,19 +1477,17 @@ fn a_capped_or_failed_written_probe_keeps_nothing() {
         let failing = MemoryStore::failing_writes_under("failed-probe", failing_prefix);
         let url = failing.url().as_str().to_string();
         let directory = MetricsDirectory::new(&format!("{url}metrics"));
-        let run = CombinerRun {
-            formulation: formulation.clone(),
-            ..written_probe_run(
-                &input,
-                WriteTarget {
-                    output_path: format!("{url}{output_path}"),
-                    output_format,
-                },
-                directory.clone(),
-                "run-a",
-                ProbeSettings::default(),
-            )
-        };
+        let mut run = written_probe_run(
+            &input,
+            WriteTarget {
+                output_path: format!("{url}{output_path}"),
+                output_format,
+            },
+            directory.clone(),
+            "run-a",
+            ProbeSettings::default(),
+        );
+        run.inputs.formulation = formulation.clone();
         let (failed, recorded) = on_memory_stores(&input, &failing, move |ctx| async move {
             let failed = run.execute_in(&ctx).await;
             let recorded = fixture::read_recorded_run(&ctx, &directory, "run-a").await?;
@@ -1539,24 +1528,22 @@ fn a_written_probe_refuses_a_symlinked_local_output_path_before_discovery() {
         let target = dir.path().join(target);
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let output_path = link.to_str().unwrap().to_string();
-        let run = CombinerRun {
-            input_path: dir
-                .path()
-                .join("no-such-dataset/")
-                .to_str()
-                .unwrap()
-                .to_string(),
-            ..written_probe_run(
-                &input,
-                WriteTarget {
-                    output_path: output_path.clone(),
-                    output_format: OutputFormat::PARQUET,
-                },
-                MetricsDirectory::new(dir.path().join("metrics").to_str().unwrap()),
-                "run-a",
-                ProbeSettings::default(),
-            )
-        };
+        let mut run = written_probe_run(
+            &input,
+            WriteTarget {
+                output_path: output_path.clone(),
+                output_format: OutputFormat::PARQUET,
+            },
+            MetricsDirectory::new(dir.path().join("metrics").to_str().unwrap()),
+            "run-a",
+            ProbeSettings::default(),
+        );
+        run.inputs.input_path = dir
+            .path()
+            .join("no-such-dataset/")
+            .to_str()
+            .unwrap()
+            .to_string();
 
         let message = run.execute().unwrap_err().to_string();
 
@@ -1576,19 +1563,17 @@ fn a_written_probe_refuses_a_metrics_directory_under_its_output_path_before_disc
     let input = memory_dataset();
     let store = MemoryStore::new("metrics-under-output");
     let url = store.url().as_str().to_string();
-    let run = CombinerRun {
-        input_path: format!("{url}no-such-dataset/"),
-        ..written_probe_run(
-            &input,
-            WriteTarget {
-                output_path: format!("{url}out"),
-                output_format: OutputFormat::VORTEX,
-            },
-            MetricsDirectory::new(&format!("{url}out/metrics")),
-            "run-a",
-            ProbeSettings::default(),
-        )
-    };
+    let mut run = written_probe_run(
+        &input,
+        WriteTarget {
+            output_path: format!("{url}out"),
+            output_format: OutputFormat::VORTEX,
+        },
+        MetricsDirectory::new(&format!("{url}out/metrics")),
+        "run-a",
+        ProbeSettings::default(),
+    );
+    run.inputs.input_path = format!("{url}no-such-dataset/");
 
     let refused = on_memory_stores(&input, &store, move |ctx| async move {
         Ok(run.execute_in(&ctx).await)
@@ -1614,20 +1599,18 @@ fn a_written_probe_refuses_an_existing_output_path_before_discovery() {
         .unwrap();
         let url = store.url().as_str().to_string();
         let output_path = format!("{url}out/combined");
-        let run = CombinerRun {
-            formulation: interval_merge("1:3,2:2"),
-            input_path: format!("{url}no-such-dataset/"),
-            ..written_probe_run(
-                &input,
-                WriteTarget {
-                    output_path: output_path.clone(),
-                    output_format: OutputFormat::VORTEX,
-                },
-                MetricsDirectory::new(&format!("{url}metrics")),
-                "run-a",
-                ProbeSettings::default(),
-            )
-        };
+        let mut run = written_probe_run(
+            &input,
+            WriteTarget {
+                output_path: output_path.clone(),
+                output_format: OutputFormat::VORTEX,
+            },
+            MetricsDirectory::new(&format!("{url}metrics")),
+            "run-a",
+            ProbeSettings::default(),
+        );
+        run.inputs.formulation = interval_merge("1:3,2:2");
+        run.inputs.input_path = format!("{url}no-such-dataset/");
 
         let refused = on_memory_stores(&input, &store, move |ctx| async move {
             Ok(run.execute_in(&ctx).await)
@@ -1653,19 +1636,17 @@ fn a_shadow_probe_runs_past_its_maximum_duration_to_completion_without_a_would_s
     for formulation in [grouped_merge(2), interval_merge("1:3,2:2")] {
         let store = MemoryStore::new("shadowed");
         let directory = MetricsDirectory::new(&format!("{}metrics", store.url().as_str()));
-        let run = CombinerRun {
-            formulation: formulation.clone(),
-            action: Action::Probe {
-                write: None,
-                metrics_directory: directory.clone(),
-                run_id: "run-a".to_string(),
-                settings: ProbeSettings {
-                    max_duration: Duration::from_nanos(1),
-                    ..ProbeSettings::default()
-                },
-                kind: ProbeKind::Shadow,
+        let mut run = probe_run(&input, directory.clone(), "run-a");
+        run.inputs.formulation = formulation.clone();
+        run.action = Action::Probe {
+            write: None,
+            metrics_directory: directory.clone(),
+            run_id: "run-a".to_string(),
+            settings: ProbeSettings {
+                max_duration: Duration::from_nanos(1),
+                ..ProbeSettings::default()
             },
-            ..probe_run(&input, directory.clone(), "run-a")
+            kind: ProbeKind::Shadow,
         };
 
         let (outcome, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
@@ -1740,9 +1721,13 @@ fn probe_run(
     run_id: &str,
 ) -> CombinerRun {
     CombinerRun {
-        formulation: grouped_merge(2),
-        input_path: input.table_path().to_string(),
-        input_format: input.input_format(),
+        inputs: PlanInputs {
+            formulation: grouped_merge(2),
+            input_path: input.table_path().to_string(),
+            input_format: input.input_format(),
+            sample_set: None,
+            row_limit: None,
+        },
         action: Action::Probe {
             write: None,
             metrics_directory,
@@ -1750,8 +1735,6 @@ fn probe_run(
             settings: ProbeSettings::default(),
             kind: ProbeKind::Probe,
         },
-        sample_set: None,
-        row_limit: None,
         threads: NonZeroUsize::MIN,
     }
 }
@@ -1773,9 +1756,13 @@ fn measured_run(
     run_id: &str,
 ) -> CombinerRun {
     CombinerRun {
-        formulation: grouped_merge(2),
-        input_path: input.table_path().to_string(),
-        input_format: input.input_format(),
+        inputs: PlanInputs {
+            formulation: grouped_merge(2),
+            input_path: input.table_path().to_string(),
+            input_format: input.input_format(),
+            sample_set: None,
+            row_limit: None,
+        },
         action: Action::MeasuredWrite {
             write: WriteTarget {
                 output_path,
@@ -1784,8 +1771,6 @@ fn measured_run(
             metrics_directory,
             run_id: run_id.to_string(),
         },
-        sample_set: None,
-        row_limit: None,
         threads: NonZeroUsize::MIN,
     }
 }
@@ -1978,12 +1963,14 @@ fn run(
     row_limit: Option<usize>,
 ) -> Result<Outcome> {
     CombinerRun {
-        formulation,
-        input_path: input_path.to_string(),
-        input_format,
+        inputs: PlanInputs {
+            formulation,
+            input_path: input_path.to_string(),
+            input_format,
+            sample_set,
+            row_limit,
+        },
         action,
-        sample_set,
-        row_limit,
         threads: NonZeroUsize::MIN,
     }
     .execute()
