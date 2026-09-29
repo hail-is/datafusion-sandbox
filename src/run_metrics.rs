@@ -231,6 +231,12 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
         })),
     },
     RecordColumn {
+        name: "relative_half_width",
+        cell: RecordCell::Probe(ProbeCell::OptionalFloat64(|probe| {
+            probe.decision.relative_half_width
+        })),
+    },
+    RecordColumn {
         name: "warmup_end_ns",
         cell: RecordCell::Probe(ProbeCell::OptionalUInt64(|probe| {
             probe.decision.warmup_end_ns
@@ -306,6 +312,15 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
                 .kind
                 .would_stop()
                 .and_then(|decision| decision.steady_state_throughput)
+        })),
+    },
+    RecordColumn {
+        name: "would_be_relative_half_width",
+        cell: RecordCell::Probe(ProbeCell::OptionalFloat64(|probe| {
+            probe
+                .kind
+                .would_stop()
+                .and_then(|decision| decision.relative_half_width)
         })),
     },
     RecordColumn {

@@ -67,6 +67,7 @@ fn a_ramp_then_a_flat_stretch_puts_the_end_of_warmup_at_the_end_of_the_ramp() {
             warmup_end_ns: Some(4_000 * MS),
             window_end_ns: 20_000 * MS,
             window_rows: 16_000,
+            relative_half_width: Some(0.0),
         })
     );
 }
@@ -101,6 +102,7 @@ fn a_cap_without_an_end_of_warmup_estimates_over_every_sample() {
             warmup_end_ns: None,
             window_end_ns: 20_000 * MS,
             window_rows: 21_000,
+            relative_half_width: Some(0.412_550_781_555_502_5),
         })
     );
 }
@@ -120,6 +122,7 @@ fn settled_at_20_s() -> Decision {
         warmup_end_ns: Some(4_000 * MS),
         window_end_ns: 20_000 * MS,
         window_rows: 16_000,
+        relative_half_width: Some(0.0),
     }
 }
 
@@ -142,6 +145,7 @@ fn keeps_running_through_a_noisy_stretch_until_the_interval_tightens() {
             warmup_end_ns: Some(0),
             window_end_ns: 20_000 * MS,
             window_rows: 20_000,
+            relative_half_width: Some(0.0),
         })
     );
 }
@@ -173,6 +177,7 @@ fn a_single_tight_check_does_not_stop_a_probe_that_needs_several() {
             warmup_end_ns: Some(12_000 * MS),
             window_end_ns: 26_000 * MS,
             window_rows: 18_200,
+            relative_half_width: Some(0.0),
         })
     );
 }
@@ -263,6 +268,7 @@ fn unevenly_spaced_samples_give_the_exact_rows_over_time_estimate() {
         throughput_probe::decide(&settings, &samples, None),
         Some(Decision {
             stop_reason: StopReason::Capped,
+            relative_half_width: Some(0.183_743_086_094_726_3),
             ..settled_at_20_s()
         })
     );
@@ -283,8 +289,9 @@ fn a_steady_stop_at_the_maximum_duration_is_steady() {
     );
 }
 
-/// More groups than the window has samples leave some group spanning no time, so the check is
-/// never tight, and a group count far past the samples costs no more than one within them.
+/// More groups than the window has samples leave some group spanning no time, so the window has
+/// no estimate interval and the check is never tight, and a group count far past the samples costs
+/// no more than one within them.
 #[test]
 fn more_window_groups_than_samples_are_never_tight() {
     let settings = ProbeSettings {
@@ -297,6 +304,7 @@ fn more_window_groups_than_samples_are_never_tight() {
         throughput_probe::decide(&settings, &ramp_then_flat(20), None),
         Some(Decision {
             stop_reason: StopReason::Capped,
+            relative_half_width: None,
             ..settled_at_20_s()
         })
     );
@@ -356,6 +364,7 @@ fn caps_at_the_maximum_duration_with_rows_over_time_between_the_window_ends() {
             warmup_end_ns: None,
             window_end_ns: 410 * MS,
             window_rows: 700,
+            relative_half_width: None,
         })
     );
 }
@@ -372,6 +381,7 @@ fn completes_at_the_first_partition_end_which_closes_the_window() {
             warmup_end_ns: None,
             window_end_ns: 110 * MS,
             window_rows: 100,
+            relative_half_width: None,
         })
     );
 }
@@ -438,6 +448,7 @@ fn a_window_of_one_sample_has_no_estimate() {
             warmup_end_ns: None,
             window_end_ns: 10 * MS,
             window_rows: 0,
+            relative_half_width: None,
         })
     );
 }
@@ -456,5 +467,75 @@ fn defaults_every_setting_to_its_documented_value() {
             min_duration: Duration::from_secs(20),
             max_duration: Duration::from_secs(300),
         }
+    );
+}
+
+/// A ramp of 4 batches, then 16 that alternate between 950 and 1,050 rows/s, whose estimate
+/// interval has some width.
+fn ramp_then_noisy() -> Vec<ProgressSample> {
+    let mut rates = vec![100, 200, 300, 400];
+    rates.extend([950, 1_050].into_iter().cycle().take(16));
+    series(&rates)
+}
+
+/// The recorded relative half-width is the one the tightness check compared with the precision:
+/// a precision equal to it is not tight, and the next precision up is.
+#[test]
+fn a_decision_records_the_relative_half_width_its_check_compared() {
+    let samples = ramp_then_noisy();
+    let with_precision = |precision| ProbeSettings {
+        precision,
+        ..eager()
+    };
+    let recorded = throughput_probe::decide(&with_precision(1.0), &samples, None)
+        .and_then(|decision| decision.relative_half_width)
+        .unwrap();
+
+    assert!(recorded > 0.0);
+    assert_eq!(
+        throughput_probe::decide(&with_precision(recorded), &samples, None),
+        None
+    );
+    assert_eq!(
+        throughput_probe::decide(&with_precision(recorded.next_up()), &samples, None)
+            .map(|decision| (decision.stop_reason, decision.relative_half_width)),
+        Some((StopReason::Steady, Some(recorded)))
+    );
+}
+
+/// A shadow evaluation's decision records the same relative half-width as a probe's over the
+/// same samples.
+#[test]
+fn a_shadow_evaluation_records_the_relative_half_width_a_probe_would() {
+    let samples = ramp_then_noisy();
+    let settings = ProbeSettings {
+        precision: 1.0,
+        ..eager()
+    };
+
+    assert_eq!(
+        throughput_probe::would_stop(&settings, &samples, None),
+        throughput_probe::decide(&settings, &samples, None)
+    );
+}
+
+/// With two groups, the halfway boundary snaps to the first of two equally near samples, so the
+/// first group spans no time and the window has no estimate interval.
+#[test]
+fn a_group_spanning_no_time_leaves_no_relative_half_width() {
+    let samples: Vec<ProgressSample> = [(0, 0), (10_000 * MS, 1_000), (10_000 * MS + 1, 1_000)]
+        .into_iter()
+        .map(|(elapsed_ns, rows)| ProgressSample { elapsed_ns, rows })
+        .collect();
+    let settings = ProbeSettings {
+        window_groups: 2,
+        max_duration: Duration::ZERO,
+        ..eager()
+    };
+
+    assert_eq!(
+        throughput_probe::decide(&settings, &samples, None)
+            .map(|decision| (decision.stop_reason, decision.relative_half_width)),
+        Some((StopReason::Capped, None))
     );
 }

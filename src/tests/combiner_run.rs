@@ -1229,6 +1229,7 @@ fn a_recorded_probe_replays_to_its_recorded_decision() {
             warmup_end_ns: u64_values(&record, "warmup_end_ns")[0],
             window_end_ns: u64_values(&record, "window_end_ns")[0].unwrap(),
             window_rows: u64_values(&record, "window_rows")[0].unwrap(),
+            relative_half_width: f64_values(&record, "relative_half_width")[0],
         };
         assert_eq!(replayed, recorded_decision, "{formulation}");
         assert_eq!(
@@ -1675,6 +1676,7 @@ fn a_shadow_probe_runs_past_its_maximum_duration_to_completion_without_a_would_s
             ("max_duration_ns", "1"),
             ("would_stop_ns", ""),
             ("would_be_steady_state_throughput", ""),
+            ("would_be_relative_half_width", ""),
             ("would_be_warmup_end_ns", ""),
         ] {
             assert_eq!(
