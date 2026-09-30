@@ -12,6 +12,7 @@ from pathlib import Path, PurePath
 import re
 import subprocess
 import tempfile
+from typing import Annotated
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -22,7 +23,7 @@ import hail as hl
 from hail.vds.combiner import transform_gvcf
 from hail.vds.combiner.combine import combine_references
 
-from . import gce
+from . import gce, probe_viewer
 
 app = typer.Typer(
     help="Utilities for creating parquet and vortex files from Hail data.",
@@ -70,6 +71,22 @@ def gce_features(family: str) -> None:
 def gce_verify(family: str | None = None) -> None:
     """Run on a GCE VM: check the instance really has the features we computed."""
     _gce_run(gce.cmd_verify, family)
+
+
+@app.command("probe-viewer")
+def probe_viewer_page(
+    metrics_dir: Path,
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+) -> None:
+    """Write a page about every shadow probe recorded in METRICS_DIR, by default to
+    METRICS_DIR/probe-viewer.html. Relative paths are under data/."""
+    metrics_dir = resolve_path(metrics_dir)
+    try:
+        written = probe_viewer.write_page(metrics_dir, output and resolve_path(output))
+    except probe_viewer.ProbeViewerError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from None
+    print(f"wrote {written}")
 
 
 @app.command()

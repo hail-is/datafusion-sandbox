@@ -6,6 +6,7 @@ import hail as hl
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from typer.testing import CliRunner
 import vortex
 
 from hailtools import cli
@@ -385,3 +386,34 @@ def test_setup_builds_both_locus_representations_for_both_datasets(monkeypatch):
             Path("vortices_alleles_packed_chr22"),
         ),
     ]
+
+
+def test_probe_viewer_writes_the_page_where_it_is_told(tmp_path):
+    metrics = tmp_path / "metrics"
+    (metrics / "runs").mkdir(parents=True)
+    pq.write_table(
+        pa.table({
+            "run_id": ["shadow-union-j1"],
+            "formulation": ["union"],
+            "threads": pa.array([1], type=pa.uint64()),
+            "action": ["shadow"],
+            "steady_state_throughput": [100.0],
+            "would_stop_ns": pa.array([None], type=pa.uint64()),
+        }),
+        metrics / "runs" / "shadow-union-j1.parquet",
+    )
+    page = tmp_path / "page.html"
+
+    result = CliRunner().invoke(cli.app, ["probe-viewer", str(metrics), "-o", str(page)])
+
+    assert result.exit_code == 0, result.output
+    assert "shadow-union-j1" in page.read_text()
+    assert str(page) in result.output
+
+
+def test_probe_viewer_says_why_it_writes_no_page(tmp_path):
+    result = CliRunner().invoke(cli.app, ["probe-viewer", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "no run records" in result.output
+    assert not (tmp_path / "probe-viewer.html").exists()
