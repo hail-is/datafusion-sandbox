@@ -210,7 +210,8 @@ Calibrate the stopping rule with shadow probes before relying on it in a sweep:
    under `data/`.
 3. Check that the work per row holds steady along the genome: the rate between progress samples
    should not drift over the run, since the estimate stands for the loci a probe does not reach
-   only if it doesn't.
+   only if it doesn't. The probe viewer's detail chart for each shadow run draws its batch rates
+   over the run, with the stopping rule's decisions and the running estimate on them.
 4. Tune `--batch` from the recorded progress samples. Their row counts are cumulative, so merging
    samples replays the rule offline with any longer batch duration, and with any other setting.
 

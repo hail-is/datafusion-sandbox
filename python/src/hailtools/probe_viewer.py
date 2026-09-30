@@ -6,8 +6,8 @@ relative to that end-of-run estimate, and each estimate interval as its relative
 the estimate it belongs to.
 """
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass
 import html
 import json
 from pathlib import Path
@@ -132,17 +132,208 @@ def _shadow_runs(metrics_dir: Path) -> pa.Table:
     return runs.sort_by("run_id")
 
 
+@dataclass(frozen=True)
+class ProgressSample:
+    """A progress sample: the rows the sink had received `elapsed_ns` after execution started."""
+
+    elapsed_ns: int
+    rows: int
+
+
+@dataclass(frozen=True)
+class Rate:
+    """Rows per second between two progress samples, in seconds since execution started."""
+
+    start_s: float
+    end_s: float
+    rate: float
+
+
+def batch_rates(samples: Sequence[ProgressSample], batch_duration_ns: int) -> list[Rate]:
+    """The rate of each batch: a batch ends at the first sample at least `batch_duration_ns` after
+    the previous batch end, or after the first sample.
+
+    This rebuilds the stopping rule's batches for display only. Samples after the last batch end
+    that do not span a batch duration are left out.
+    """
+    batches = []
+    if not samples:
+        return batches
+    start = samples[0]
+    for sample in samples[1:]:
+        # A batch spans some time even when the batch duration is zero, as in the stopping rule.
+        if sample.elapsed_ns > start.elapsed_ns and sample.elapsed_ns - start.elapsed_ns >= batch_duration_ns:
+            batches.append(_rate(start, sample))
+            start = sample
+    return batches
+
+
+@dataclass(frozen=True)
+class Point:
+    """A rate in rows per second, at `elapsed_s` seconds since execution started."""
+
+    elapsed_s: float
+    rate: float
+
+
+def running_estimate(samples: Sequence[ProgressSample], warmup_end_ns: int, from_ns: int) -> list[Point]:
+    """At each sample from `from_ns` on, the rows since the warmup end over the time since.
+
+    A warmup end is the elapsed time of a sample; if none is at it exactly, the last sample before
+    it stands in.
+    """
+    before = [sample for sample in samples if sample.elapsed_ns <= warmup_end_ns]
+    if not before:
+        return []
+    start = before[-1]
+    return [
+        Point(sample.elapsed_ns / 1e9, _rate(start, sample).rate)
+        for sample in samples
+        if sample.elapsed_ns >= from_ns and sample.elapsed_ns > start.elapsed_ns
+    ]
+
+
+@dataclass(frozen=True)
+class Marker:
+    """A labelled rule on a detail chart: a time in seconds, or a rate in rows per second."""
+
+    label: str
+    value: float
+
+
+@dataclass(frozen=True)
+class EstimateInterval:
+    """An estimate interval in rows per second, drawn as a bar at `elapsed_s`."""
+
+    label: str
+    elapsed_s: float
+    low: float
+    high: float
+
+
+@dataclass(frozen=True)
+class RunDetail:
+    """How one shadow run's throughput evolved, and where its stopping rule's decisions fall.
+
+    `samples` are the rates between consecutive progress samples and `batches` the rates of the
+    batches rebuilt from them. `times` mark the warmup ends, the would-stop point and the first
+    partition end, and `levels` the steady-state throughputs, each where the run recorded it.
+    `precision_band` is the end-of-run estimate plus or minus the run's precision. `running` is the
+    running estimate from the would-stop point to the end of the run. A run that never `settled`
+    has no would-be marks and no running estimate.
+    """
+
+    run_id: str
+    settled: bool
+    samples: list[Rate]
+    batches: list[Rate]
+    times: list[Marker]
+    levels: list[Marker]
+    precision_band: tuple[float, float] | None
+    running: list[Point]
+    intervals: list[EstimateInterval]
+
+
+WOULD_BE_ESTIMATE = "would-be estimate"
+END_OF_RUN_ESTIMATE = "end-of-run estimate"
+
+
+def run_details(metrics_dir: Path, calibration: Calibration) -> list[RunDetail]:
+    """The detail of each shadow run in `calibration`, from its progress samples under `metrics_dir`."""
+    return [
+        _run_detail(record, _progress(metrics_dir, record["run_id"]))
+        for record in calibration.runs.to_pylist()
+    ]
+
+
+def _progress(metrics_dir: Path, run_id: str) -> list[ProgressSample]:
+    path = metrics_dir / "progress" / f"{run_id}.parquet"
+    if not path.exists():
+        return []
+    table = pq.read_table(path, columns=["sample_index", "elapsed_ns", "rows"]).sort_by("sample_index")
+    return [ProgressSample(record["elapsed_ns"], record["rows"]) for record in table.to_pylist()]
+
+
+def _run_detail(record: dict[str, Any], samples: list[ProgressSample]) -> RunDetail:
+    # Records written before a column existed lack it; every such mark is left off.
+    def seconds(column: str) -> float | None:
+        ns = record.get(column)
+        return None if ns is None else ns / 1e9
+
+    def markers(pairs: list[tuple[str, float | None]]) -> list[Marker]:
+        return [Marker(label, value) for label, value in pairs if value is not None]
+
+    end_of_run = record.get("steady_state_throughput")
+    would_be = record.get("would_be_steady_state_throughput")
+    would_stop_ns = record.get("would_stop_ns")
+    would_be_warmup_end_ns = record.get("would_be_warmup_end_ns")
+    batch_duration_ns = record.get("batch_duration_ns")
+    precision = record.get("precision")
+    would_be_width = record.get("would_be_relative_half_width")
+    end_of_run_width = record.get("relative_half_width")
+
+    # Each estimate interval is drawn where its measurement window ends.
+    window_end = seconds("window_end_ns")
+    intervals = []
+    if would_be is not None and would_stop_ns is not None and would_be_width is not None:
+        intervals.append(
+            EstimateInterval(WOULD_BE_ESTIMATE, would_stop_ns / 1e9, *_around(would_be, would_be_width))
+        )
+    if end_of_run is not None and window_end is not None and end_of_run_width is not None:
+        intervals.append(
+            EstimateInterval(END_OF_RUN_ESTIMATE, window_end, *_around(end_of_run, end_of_run_width))
+        )
+
+    running = []
+    if would_stop_ns is not None and would_be_warmup_end_ns is not None:
+        running = running_estimate(samples, would_be_warmup_end_ns, would_stop_ns)
+
+    return RunDetail(
+        run_id=record["run_id"],
+        settled=would_stop_ns is not None,
+        samples=[
+            _rate(first, second)
+            for first, second in zip(samples, samples[1:])
+            if second.elapsed_ns > first.elapsed_ns
+        ],
+        batches=[] if batch_duration_ns is None else batch_rates(samples, batch_duration_ns),
+        times=markers(
+            [
+                ("would-be warmup end", seconds("would_be_warmup_end_ns")),
+                ("end-of-run warmup end", seconds("warmup_end_ns")),
+                ("would-stop", seconds("would_stop_ns")),
+                ("first partition end", seconds("first_partition_end_ns")),
+            ]
+        ),
+        levels=markers([(WOULD_BE_ESTIMATE, would_be), (END_OF_RUN_ESTIMATE, end_of_run)]),
+        precision_band=None if end_of_run is None or precision is None else _around(end_of_run, precision),
+        running=running,
+        intervals=intervals,
+    )
+
+
+def _around(centre: float, relative_half_width: float) -> tuple[float, float]:
+    return centre * (1 - relative_half_width), centre * (1 + relative_half_width)
+
+
+def _rate(start: ProgressSample, end: ProgressSample) -> Rate:
+    seconds = (end.elapsed_ns - start.elapsed_ns) / 1e9
+    return Rate(start.elapsed_ns / 1e9, end.elapsed_ns / 1e9, (end.rows - start.rows) / seconds)
+
+
 def write_page(metrics_dir: Path, output: Path | None = None) -> Path:
     """Write the page about the shadow runs under `metrics_dir`, by default into it."""
-    page = render_page(calibration(metrics_dir))
+    runs = calibration(metrics_dir)
+    page = render_page(runs, run_details(metrics_dir, runs))
     output = output if output is not None else metrics_dir / "probe-viewer.html"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(page)
     return output
 
 
-def render_page(calibration: Calibration) -> str:
-    """The page about `calibration`: fixed framing, the settings table and the headline chart."""
+def render_page(calibration: Calibration, details: list[RunDetail]) -> str:
+    """The page about `calibration`: fixed framing, the settings table, the headline chart and a
+    detail chart per run in `details`."""
     return _PAGE.substitute(
         vega=alt.VEGA_VERSION,
         vega_lite=alt.VEGALITE_VERSION,
@@ -150,6 +341,13 @@ def render_page(calibration: Calibration) -> str:
         caption=_caption(calibration),
         settings=_settings_table(calibration.runs),
         headline=_embedded_spec("headline", headline_chart(calibration)),
+        details="\n".join(
+            f'<section class="detail" data-run="{html.escape(detail.run_id)}">\n'
+            f"<h3>{html.escape(detail.run_id)}</h3>\n"
+            f"{_embedded_spec(f'detail-{index}', detail_chart(detail))}\n"
+            "</section>"
+            for index, detail in enumerate(details)
+        ),
     )
 
 
@@ -230,6 +428,110 @@ def _runs_chart(title: str, rows: list[dict[str, Any]], *marks: alt.Chart) -> al
     ).properties(title=title, width=600)
 
 
+# Would-be marks are warm and end-of-run marks cool, so a legend entry is not needed to pair them.
+_DETAIL_COLOURS = {
+    "sample rate": "#999999",
+    "batch rate": "#333333",
+    "would-be warmup end": "#fdae6b",
+    "would-stop": "#d62728",
+    WOULD_BE_ESTIMATE: "#e6550d",
+    "running estimate": "#fd8d3c",
+    "end-of-run warmup end": "#9ecae1",
+    END_OF_RUN_ESTIMATE: "#3182bd",
+    "first partition end": "#756bb1",
+}
+
+
+def detail_chart(detail: RunDetail) -> alt.TopLevelMixin:
+    """The run's sample and batch rates over time, with its stopping rule's decisions on them."""
+    # The legend lists only the marks the run has, each in its fixed colour.
+    present = {"sample rate": detail.samples, "batch rate": detail.batches, "running estimate": detail.running}
+    labels = {marker.label for marker in detail.times + detail.levels} | {bar.label for bar in detail.intervals}
+    labels |= {label for label, items in present.items() if items}
+    shown = {label: colour for label, colour in _DETAIL_COLOURS.items() if label in labels}
+    colour = alt.Color(
+        "mark:N",
+        title=None,
+        scale=alt.Scale(domain=list(shown), range=list(shown.values())),
+        legend=alt.Legend(orient="bottom", columns=3),
+    )
+    seconds = alt.Axis(title="Seconds since execution started")
+    # Raw sample rates swing far wider than anything else, so they are clipped to the rest.
+    rates = [batch.rate for batch in detail.batches]
+    rates += [marker.value for marker in detail.levels]
+    rates += [point.rate for point in detail.running]
+    rates += [bound for bar in detail.intervals for bound in (bar.low, bar.high)]
+    rates += list(detail.precision_band or ())
+    y_scale = alt.Scale(zero=False)
+    if rates:
+        pad = (max(rates) - min(rates)) * 0.1 or max(rates) * 0.05
+        y_scale = alt.Scale(domain=[min(rates) - pad, max(rates) + pad])
+    y = alt.Y("rate:Q", title="Rows per second", scale=y_scale)
+
+    def rows(mark: str, items: list[Any]) -> alt.Data:
+        return alt.Data(values=[{"mark": mark, **asdict(item)} for item in items])
+
+    layers = [
+        alt.Chart(rows("sample rate", detail.samples))
+        .mark_rule(clip=True, strokeWidth=1.5)
+        .encode(alt.X("start_s:Q", axis=seconds), x2="end_s:Q", y=y, color=colour),
+        alt.Chart(rows("batch rate", detail.batches))
+        .mark_rule(strokeWidth=2.5)
+        .encode(
+            alt.X("start_s:Q", axis=seconds),
+            x2="end_s:Q",
+            y=y,
+            color=colour,
+            tooltip=[alt.Tooltip("rate:Q", title="Batch rate", format=",.0f")],
+        ),
+        alt.Chart(alt.Data(values=[{"mark": marker.label, "rate": marker.value} for marker in detail.levels]))
+        .mark_rule(strokeDash=[6, 3])
+        .encode(y=y, color=colour, tooltip=[alt.Tooltip("mark:N"), alt.Tooltip("rate:Q", format=",.0f")]),
+        alt.Chart(alt.Data(values=[{"mark": marker.label, "elapsed_s": marker.value} for marker in detail.times]))
+        .mark_rule(strokeDash=[4, 4])
+        .encode(
+            alt.X("elapsed_s:Q", axis=seconds),
+            color=colour,
+            tooltip=[alt.Tooltip("mark:N"), alt.Tooltip("elapsed_s:Q", title="Seconds", format=".1f")],
+        ),
+        alt.Chart(rows("running estimate", detail.running))
+        .mark_line(strokeWidth=2)
+        .encode(alt.X("elapsed_s:Q", axis=seconds), y=y, color=colour),
+        alt.Chart(alt.Data(values=[asdict(bar) | {"mark": bar.label} for bar in detail.intervals]))
+        .mark_rule(strokeWidth=4)
+        .encode(
+            alt.X("elapsed_s:Q", axis=seconds),
+            alt.Y("low:Q", scale=y_scale),
+            y2="high:Q",
+            color=colour,
+            tooltip=[
+                alt.Tooltip("mark:N"),
+                alt.Tooltip("low:Q", title="Interval from", format=",.0f"),
+                alt.Tooltip("high:Q", title="Interval to", format=",.0f"),
+            ],
+        ),
+    ]
+    if detail.precision_band is not None:
+        low, high = detail.precision_band
+        # The band has no x, so it spans the chart; it goes first to sit behind everything.
+        layers.insert(
+            0,
+            alt.Chart(alt.Data(values=[{"low": low, "high": high}]))
+            .mark_rect(color=_DETAIL_COLOURS[END_OF_RUN_ESTIMATE], opacity=0.12)
+            .encode(alt.Y("low:Q", scale=y_scale), y2="high:Q"),
+        )
+    subtitle = []
+    if not detail.settled:
+        subtitle.append("The stopping rule never settled.")
+    if not detail.samples:
+        subtitle.append("No progress samples were recorded.")
+    return (
+        alt.layer(*layers)
+        .properties(title=alt.TitleParams(detail.run_id, subtitle=subtitle), width=600, height=250)
+        .interactive()
+    )
+
+
 def _band(width: float | None) -> dict[str, float | None]:
     return {"band_low": None if width is None else -width, "band_high": width}
 
@@ -306,6 +608,8 @@ body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; 
 table { border-collapse: collapse; font-size: 0.85rem; }
 th, td { border: 1px solid #ccc; padding: 0.2rem 0.4rem; text-align: left; }
 .caption { font-weight: bold; }
+.detail { scroll-margin-top: 1rem; padding: 0.5rem; border-radius: 4px; }
+.detail.selected { outline: 3px solid #d62728; }
 </style>
 </head>
 <body>
@@ -347,14 +651,64 @@ interval.
 </p>
 $headline
 <p class="caption">$caption</p>
+<p>Click a run in the headline to bring its detail chart into view.</p>
+
+<h2>Reading the detail charts</h2>
+<p>
+Each shadow run has a chart of how its throughput evolved over the run, in rows per second against
+seconds since execution started, with the stopping rule's decisions drawn on it. It shows whether
+the warmup ends where the throughput levels off, whether the throughput drifts over the run,
+and whether the running estimate stays inside the would-be estimate interval.
+</p>
+<p>
+The dark horizontal segments are batch rates, one per batch. They are rebuilt from the progress
+samples using the run's batch duration: a batch ends at the first sample at least a batch duration
+after the previous batch end. This is for display, not a copy of the stopping rule. The thin grey
+segments behind them are the rates between consecutive progress samples, cut off where they leave
+the chart.
+</p>
+<p>
+Warm colours are the would-be decision and cool colours the end of the run. The dashed vertical
+rules mark the would-be warmup end, the would-stop point, the end-of-run warmup end and the first
+partition end, which closes the end-of-run measurement window. The dashed horizontal rules are the
+would-be and the end-of-run steady-state throughputs, and the pale blue band is the end-of-run
+estimate plus or minus the run's precision, the tightness the stopping rule asks of an estimate
+interval.
+</p>
+<p>
+The orange line from the would-stop point to the end of the run is the running estimate: the rows
+since the would-be warmup end over the time since. It starts at the would-be estimate. If it stays
+inside the would-be estimate interval, the thick bar at the would-stop point, the probe would have
+stopped on an estimate that holds; if it drifts steadily away, the throughput changes along the
+genome. The thick blue bar is the end-of-run estimate interval, drawn where its measurement window
+ends: at the first partition end if the run reached one, which can be before the end of the run. The bars are short
+beside the warmup: scroll over a chart to zoom, drag to pan, and double-click to reset.
+</p>
+<p>
+A run whose stopping rule never settled has no would-be marks and no running estimate, only its
+rates and its end-of-run marks.
+</p>
+$details
 
 <h2>Settings</h2>
 <p>The settings each shadow run was recorded with. An empty cell is a setting the run record leaves empty.</p>
 $settings
 
 <script>
+function showDetail(run) {
+  for (const section of document.querySelectorAll("section.detail")) {
+    const selected = section.dataset.run === run;
+    section.classList.toggle("selected", selected);
+    if (selected) section.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
 for (const spec of document.querySelectorAll('script[type="application/json"]')) {
-  vegaEmbed("#" + spec.id + "-chart", JSON.parse(spec.textContent));
+  vegaEmbed("#" + spec.id + "-chart", JSON.parse(spec.textContent)).then((result) => {
+    if (spec.id !== "headline") return;
+    result.view.addEventListener("click", (event, item) => {
+      if (item && item.datum && item.datum.run_id) showDetail(item.datum.run_id);
+    });
+  });
 }
 </script>
 </body>
