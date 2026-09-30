@@ -15,6 +15,7 @@ from hailtools import cli
 @pytest.fixture(scope="module")
 def hail_context(tmp_path_factory):
     hl.init(
+        backend="spark",
         master="local[2]",
         quiet=True,
         tmp_dir=str(tmp_path_factory.mktemp("hail")),
@@ -66,6 +67,154 @@ def test_allele_conversion_stores_the_contig(tmp_path, hail_context):
     assert table.column("contig").to_pylist() == ["chr22"] * 4
     assert table.column("position").to_pylist() == [1, 1, 2, 2]
     assert table.column("alleles").to_pylist() == ["A", "C", "A", "C"]
+
+
+def write_reference_table(path, sample, loci):
+    """Write a per-sample reference Hail Table shaped like the production ones.
+
+    `loci` holds `(contig, position, ploidy)` triples, with a `None` contig for a
+    missing locus. The table is keyed by locus and split into three partitions,
+    so a contig with three or more rows spans a partition boundary.
+    """
+    table = hl.Table.parallelize(
+        [
+            {
+                "locus": (
+                    None
+                    if contig is None
+                    else hl.Locus(contig, position, reference_genome="GRCh38")
+                ),
+                "DP": position + 1,
+                "GQ": position + 2,
+                "LGT": hl.Call([0] * ploidy),
+                "LEN": position + 3,
+            }
+            for contig, position, ploidy in loci
+        ],
+        schema=hl.tstruct(
+            locus=hl.tlocus("GRCh38"),
+            DP=hl.tint32,
+            GQ=hl.tint32,
+            LGT=hl.tcall,
+            LEN=hl.tint32,
+        ),
+        key="locus",
+        n_partitions=3,
+    )
+    table = table.annotate_globals(ref_block_max_length=10, s=sample)
+    table.write(str(path))
+
+
+def test_convert_hts_writes_one_parquet_per_contig_for_the_global_sample(
+    tmp_path, hail_context
+):
+    source = tmp_path / "hts"
+    write_reference_table(
+        source / "table-file-name.ht",
+        "SAMPLE-7.0",
+        [("chr8", 40, 1), ("chr1", 30, 2), ("chr1", 10, 2), ("chr8", 20, 1), ("chr1", 20, 2)],
+    )
+    destination = tmp_path / "parquets"
+
+    result = CliRunner().invoke(cli.app, ["convert-hts", str(source), str(destination)])
+
+    assert result.exit_code == 0, result.output
+    assert [p.name for p in destination.iterdir()] == ["s=SAMPLE-7.0"]
+    sample_dir = destination / "s=SAMPLE-7.0"
+    assert sorted(p.name for p in sample_dir.iterdir()) == [
+        "SAMPLE-7.0.reference.chr01.zstd.parquet",
+        "SAMPLE-7.0.reference.chr08.zstd.parquet",
+    ]
+    chr01 = pq.read_table(sample_dir / "SAMPLE-7.0.reference.chr01.zstd.parquet")
+    assert chr01.schema.remove_metadata() == pa.schema([
+        pa.field("contig", pa.string(), nullable=False),
+        pa.field("position", pa.int32(), nullable=False),
+        ("DP", pa.int32()),
+        ("GQ", pa.int32()),
+        ("LEN", pa.int32()),
+        ("ploidy", pa.int32()),
+    ])
+    assert chr01.to_pydict() == {
+        "contig": ["chr01"] * 3,
+        "position": [10, 20, 30],
+        "DP": [11, 21, 31],
+        "GQ": [12, 22, 32],
+        "LEN": [13, 23, 33],
+        "ploidy": [2, 2, 2],
+    }
+    chr08 = pq.read_table(sample_dir / "SAMPLE-7.0.reference.chr08.zstd.parquet")
+    assert chr08.to_pydict() == {
+        "contig": ["chr08"] * 2,
+        "position": [20, 40],
+        "DP": [21, 41],
+        "GQ": [22, 42],
+        "LEN": [23, 43],
+        "ploidy": [1, 1],
+    }
+
+
+def test_convert_hts_limit_converts_the_first_tables_in_sorted_order(
+    tmp_path, hail_context
+):
+    source = tmp_path / "hts"
+    for name, sample in [("c.ht", "S1"), ("a.ht", "S2"), ("b.ht", "S3")]:
+        write_reference_table(source / name, sample, [("chr1", 1, 2), ("chr1", 2, 2)])
+    destination = tmp_path / "parquets"
+
+    result = CliRunner().invoke(
+        cli.app, ["convert-hts", str(source), str(destination), "--limit", "2"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in destination.iterdir()) == ["s=S2", "s=S3"]
+
+
+def test_convert_hts_rejects_a_non_numeric_contig_without_leaving_output(
+    tmp_path, hail_context
+):
+    source = tmp_path / "hts"
+    write_reference_table(source / "sample.ht", "S1", [("chr1", 1, 2), ("chrX", 1, 1)])
+    destination = tmp_path / "parquets"
+
+    result = CliRunner().invoke(cli.app, ["convert-hts", str(source), str(destination)])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
+    assert "sample.ht" in str(result.exception)
+    assert "chrX" in str(result.exception)
+    assert list(destination.iterdir()) == []
+
+
+def test_convert_hts_rejects_a_missing_locus_without_leaving_output(
+    tmp_path, hail_context
+):
+    source = tmp_path / "hts"
+    write_reference_table(source / "sample.ht", "S1", [("chr1", 1, 2), (None, 2, 2)])
+    destination = tmp_path / "parquets"
+
+    result = CliRunner().invoke(cli.app, ["convert-hts", str(source), str(destination)])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
+    assert "sample.ht" in str(result.exception)
+    assert "missing locus" in str(result.exception)
+    assert list(destination.iterdir()) == []
+
+
+def test_convert_hts_refuses_an_existing_sample_directory(tmp_path, hail_context):
+    source = tmp_path / "hts"
+    write_reference_table(source / "sample.ht", "S1", [("chr1", 1, 2)])
+    earlier = tmp_path / "parquets" / "s=S1"
+    earlier.mkdir(parents=True)
+    (earlier / "earlier.parquet").write_bytes(b"earlier")
+
+    result = CliRunner().invoke(
+        cli.app, ["convert-hts", str(source), str(tmp_path / "parquets")]
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, FileExistsError)
+    assert [p.name for p in earlier.iterdir()] == ["earlier.parquet"]
 
 
 def test_pack_loci_writes_packed_values_and_normalizes_schema(tmp_path):

@@ -17,6 +17,7 @@ from typing import Annotated
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from pyspark.sql import functions as F
 import typer
 
 import hail as hl
@@ -236,6 +237,68 @@ def convert_vdss(path: Path, dest: Path, alleles_dest: Path | None = None) -> No
 
         convert_vds(gvcf, ref_dir, alleles_dir)
 
+def ht_to_reference(path: Path, dest: Path) -> None:
+    """Write a per-sample reference Hail Table as one Parquet file per contig.
+
+    The sample is the table's global `s`. Contigs are renamed to their ordinal
+    padded to two digits, so that string order agrees with ordinal order. The
+    contig and position are written non-null, so a missing locus is an error.
+    """
+    table = hl.read_table(str(path))
+    sample_id = hl.eval(table.s)
+    missing_loci, contigs = table.aggregate((
+        hl.agg.count_where(hl.is_missing(table.locus)),
+        hl.agg.collect_as_set(table.locus.contig),
+    ))
+    if missing_loci > 0:
+        raise ValueError(f"{path}: {missing_loci} rows with a missing locus")
+    ordinals = {}
+    for contig in contigs:
+        try:
+            ordinals[contig] = _contig_ordinal(contig)
+        except ValueError as e:
+            raise ValueError(f"{path}: {e}") from e
+
+    sample_dir = dest / f's={sample_id}'
+    sample_dir.mkdir()
+    table = table.select('DP', 'GQ', 'LEN', ploidy=table.LGT.ploidy)
+    for contig, ordinal in sorted(ordinals.items(), key=lambda item: item[1]):
+        contig_name = _contig_name(ordinal)
+        rows = table.filter(table.locus.contig == contig).naive_coalesce(1)
+        df = (
+            rows.to_spark()
+            .withColumnRenamed('locus.contig', 'contig')
+            .withColumnRenamed('locus.position', 'position')
+            .withColumn('contig', F.lit(contig_name))
+        )
+        name = f'{sample_id}.reference.{contig_name}'
+        spark_df_to_parquet(df, sample_dir, name)
+        # A table may store its locus as optional, which Spark writes as nullable
+        # columns. No locus is missing, so mark them non-null as pack-loci does.
+        parquet = sample_dir / f'{name}.zstd.parquet'
+        written = pq.read_table(parquet)
+        written = written.cast(_required_non_null_schema(written.schema))
+        pq.write_table(written, parquet, compression='zstd')
+
+@app.command()
+def convert_hts(
+    path: Path,
+    dest: Path,
+    limit: Annotated[
+        int | None,
+        typer.Option(min=0, help="Convert only the first N tables in sorted path order."),
+    ] = None,
+) -> None:
+    """Convert a directory of per-sample reference Hail Tables to a Parquet dataset."""
+    path = resolve_path(path)
+    dest = resolve_path(dest)
+
+    assert(path.is_dir())
+    dest.mkdir(parents=True, exist_ok=True)
+
+    for ht in sorted(path.glob('*.ht'))[:limit]:
+        ht_to_reference(ht, dest)
+
 
 def _iter_row_group_batches(parquet: pq.ParquetFile) -> Iterator[pa.RecordBatch]:
     for row_group in range(parquet.metadata.num_row_groups):
@@ -278,6 +341,11 @@ def _contig_ordinal(contig: str) -> int:
     if match is None:
         raise ValueError(f"invalid contig name: {contig}")
     return int(match.group(1))
+
+
+def _contig_name(ordinal: int) -> str:
+    """Name a contig by its ordinal padded to two digits, as Rust's `Locus::contig_name` does."""
+    return f"chr{ordinal:02d}"
 
 
 def _pack_locus(contig_ordinal: int, positions: pa.Array) -> pa.Array:
@@ -449,7 +517,7 @@ def _scale_parquets(path: Path, scale_factor: int) -> None:
     if scale_factor == 1:
         return
     for parquet in originals:
-        contigs = [f"chr{22 - offset:02d}" for offset in range(1, scale_factor)]
+        contigs = [_contig_name(22 - offset) for offset in range(1, scale_factor)]
         _write_scaled_parquets(parquet, contigs)
 
 
