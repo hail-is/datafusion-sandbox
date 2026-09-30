@@ -1,3 +1,4 @@
+import html
 import json
 import re
 
@@ -20,7 +21,29 @@ RUN_RECORD_TYPES = {
     "would_stop_ns": pa.uint64(),
     "would_be_steady_state_throughput": pa.float64(),
     "would_be_relative_half_width": pa.float64(),
+    "warmup_end_ns": pa.uint64(),
+    "first_partition_end_ns": pa.uint64(),
+    "window_end_ns": pa.uint64(),
+    "would_be_warmup_end_ns": pa.uint64(),
+    "batch_duration_ns": pa.uint64(),
+    "precision": pa.float64(),
 }
+
+# A synthetic progress series: (elapsed ns, cumulative rows).
+SERIES = [
+    (0, 0),
+    (400_000_000, 40),
+    (1_000_000_000, 100),
+    (1_500_000_000, 160),
+    (2_200_000_000, 300),
+    (2_600_000_000, 340),
+    (3_200_000_000, 400),
+    (3_500_000_000, 430),
+]
+
+
+def samples(series):
+    return [probe_viewer.ProgressSample(elapsed_ns, rows) for elapsed_ns, rows in series]
 
 
 def write_run_record(metrics, run_id, **columns):
@@ -33,7 +56,29 @@ def write_run_record(metrics, run_id, **columns):
     )
 
 
-def shadow(metrics, run_id, *, end, end_width, would_be=None, would_be_width=None, threads=1):
+def write_progress(metrics, run_id, series):
+    progress = metrics / "progress"
+    progress.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "run_id": pa.array([run_id] * len(series), type=pa.string()),
+                "sample_index": pa.array(range(len(series)), type=pa.uint64()),
+                "elapsed_ns": pa.array([elapsed_ns for elapsed_ns, _ in series], type=pa.uint64()),
+                "rows": pa.array([rows for _, rows in series], type=pa.uint64()),
+            }
+        ),
+        progress / f"{run_id}.parquet",
+    )
+
+
+def shadow(metrics, run_id, *, end, end_width, would_be=None, would_be_width=None, threads=1, progress=SERIES):
+    """A shadow run over `progress`, which settles at 2.2 s on a warmup end at 1.0 s if it has a
+    would-be estimate, and ends its run with a warmup end at 1.5 s and its first partition end at
+    3.2 s, which closes its end-of-run measurement window."""
+    settled = would_be is not None
+    if progress is not None:
+        write_progress(metrics, run_id, progress)
     write_run_record(
         metrics,
         run_id,
@@ -43,9 +88,15 @@ def shadow(metrics, run_id, *, end, end_width, would_be=None, would_be_width=Non
         stop_reason="completed",
         steady_state_throughput=end,
         relative_half_width=end_width,
-        would_stop_ns=None if would_be is None else 30_000_000_000,
+        would_stop_ns=2_200_000_000 if settled else None,
         would_be_steady_state_throughput=would_be,
         would_be_relative_half_width=would_be_width,
+        warmup_end_ns=1_500_000_000,
+        first_partition_end_ns=3_200_000_000,
+        window_end_ns=3_200_000_000,
+        would_be_warmup_end_ns=1_000_000_000 if settled else None,
+        batch_duration_ns=1_000_000_000,
+        precision=0.02,
     )
 
 
@@ -55,7 +106,16 @@ def metrics(tmp_path):
     # 3% fast, and its would-be estimate interval [100.94, 105.06] misses 100.
     shadow(metrics, "shadow-union-j1", end=100.0, end_width=0.005, would_be=103.0, would_be_width=0.02)
     # 1% slow, and its would-be estimate interval [194.04, 201.96] covers 200.
-    shadow(metrics, "shadow-union-j8", end=200.0, end_width=0.01, would_be=198.0, would_be_width=0.02, threads=8)
+    shadow(
+        metrics,
+        "shadow-union-j8",
+        end=200.0,
+        end_width=0.01,
+        would_be=198.0,
+        would_be_width=0.02,
+        threads=8,
+        progress=None,
+    )
     shadow(metrics, "shadow-union-j4", end=150.0, end_width=0.03, threads=4)
     write_run_record(
         metrics,
@@ -162,9 +222,7 @@ def test_page_frames_the_headline_chart_it_embeds(metrics):
     page = probe_viewer.write_page(metrics).read_text()
 
     assert "<h2>Reading the headline</h2>" in page
-    specs = embedded_specs(page)
-    assert specs.keys() == {"headline"}
-    headline = specs["headline"]
+    headline = embedded_specs(page)["headline"]
     assert "vega-lite" in headline["$schema"]
     assert data_urls(headline) == []
     assert {row["run_id"] for row in inline_rows(headline)} == {
@@ -214,3 +272,97 @@ def test_page_says_how_many_settled_runs_recorded_no_would_be_estimate_interval(
     assert (unmeasured.error, unmeasured.low, unmeasured.high) == (pytest.approx(-0.01), None, None)
     assert "0 of 1 would-be estimate intervals cover the end-of-run estimate" in page
     assert "1 settled run recorded no would-be estimate interval" in page
+
+
+def test_batch_rates_end_each_batch_at_the_first_sample_a_batch_duration_after_the_last_end():
+    batches = probe_viewer.batch_rates(samples(SERIES), batch_duration_ns=1_000_000_000)
+
+    # 0 s to 1.0 s: 100 rows in 1.0 s. 1.0 s to 2.2 s, as 2.0 s is not a sample: 200 rows in 1.2 s.
+    # 2.2 s to 3.2 s: 100 rows in 1.0 s. The samples after 3.2 s do not span a batch duration.
+    assert [(batch.start_s, batch.end_s) for batch in batches] == [
+        pytest.approx((0.0, 1.0)),
+        pytest.approx((1.0, 2.2)),
+        pytest.approx((2.2, 3.2)),
+    ]
+    assert [batch.rate for batch in batches] == [pytest.approx(100.0), pytest.approx(200 / 1.2), pytest.approx(100.0)]
+
+
+def test_running_estimate_is_the_rows_since_the_warmup_end_over_the_time_since():
+    running = probe_viewer.running_estimate(samples(SERIES), warmup_end_ns=1_000_000_000, from_ns=2_200_000_000)
+
+    # From 100 rows at 1.0 s: at the would-stop point it is the would-be steady-state throughput.
+    assert [point.elapsed_s for point in running] == [
+        pytest.approx(2.2),
+        pytest.approx(2.6),
+        pytest.approx(3.2),
+        pytest.approx(3.5),
+    ]
+    assert [point.rate for point in running] == [
+        pytest.approx(200 / 1.2),
+        pytest.approx(240 / 1.6),
+        pytest.approx(300 / 2.2),
+        pytest.approx(330 / 2.5),
+    ]
+
+
+def test_run_details_mark_where_the_stopping_rule_decided_on_a_run_that_settled(metrics):
+    details = {detail.run_id: detail for detail in probe_viewer.run_details(metrics, probe_viewer.calibration(metrics))}
+
+    detail = details["shadow-union-j1"]
+    assert {marker.label: marker.value for marker in detail.times} == {
+        "would-be warmup end": pytest.approx(1.0),
+        "end-of-run warmup end": pytest.approx(1.5),
+        "would-stop": pytest.approx(2.2),
+        "first partition end": pytest.approx(3.2),
+    }
+    assert {marker.label: marker.value for marker in detail.levels} == {
+        "would-be estimate": pytest.approx(103.0),
+        "end-of-run estimate": pytest.approx(100.0),
+    }
+    # The end-of-run estimate of 100 rows per second, plus or minus a precision of 2%.
+    assert detail.precision_band == (pytest.approx(98.0), pytest.approx(102.0))
+    assert (detail.running[0].elapsed_s, detail.running[0].rate) == (pytest.approx(2.2), pytest.approx(200 / 1.2))
+    assert detail.running[-1].elapsed_s == pytest.approx(3.5)
+    # Each estimate interval where its measurement window ends: the would-be one at the would-stop
+    # point, and the end-of-run one at the first partition end, before the last sample at 3.5 s.
+    assert {bar.label: (bar.elapsed_s, bar.low, bar.high) for bar in detail.intervals} == {
+        "would-be estimate": (pytest.approx(2.2), pytest.approx(100.94), pytest.approx(105.06)),
+        "end-of-run estimate": (pytest.approx(3.2), pytest.approx(99.5), pytest.approx(100.5)),
+    }
+
+
+def test_run_details_leave_would_be_marks_off_a_run_that_never_settled(metrics):
+    details = {detail.run_id: detail for detail in probe_viewer.run_details(metrics, probe_viewer.calibration(metrics))}
+
+    detail = details["shadow-union-j4"]
+    assert len(detail.batches) == 3
+    assert [marker.label for marker in detail.times] == ["end-of-run warmup end", "first partition end"]
+    assert [marker.label for marker in detail.levels] == ["end-of-run estimate"]
+    assert [bar.label for bar in detail.intervals] == ["end-of-run estimate"]
+    assert detail.running == []
+
+
+def detail_specs(page):
+    """Each detail chart's spec, by the run its section names."""
+    specs = embedded_specs(page)
+    sections = re.findall(r'<section class="detail" data-run="([^"]+)">.*?<script type="application/json" id="([^"]+)">', page, re.S)
+    return {html.unescape(run_id): specs[name] for run_id, name in sections}
+
+
+def test_page_carries_a_detail_chart_per_shadow_run_framed_by_how_to_read_it(metrics):
+    page = probe_viewer.write_page(metrics).read_text()
+
+    assert "<h2>Reading the detail charts</h2>" in page
+    details = detail_specs(page)
+    assert list(details) == ["shadow-union-j1", "shadow-union-j4", "shadow-union-j8"]
+    assert all(data_urls(spec) == [] for spec in details.values())
+    labels = {row.get("mark") for row in inline_rows(details["shadow-union-j1"])}
+    assert {"would-stop", "would-be estimate", "running estimate"} <= labels
+
+
+def test_page_draws_no_would_be_marks_on_the_detail_chart_of_a_run_that_never_settled(metrics):
+    page = probe_viewer.write_page(metrics).read_text()
+
+    rows = inline_rows(detail_specs(page)["shadow-union-j4"])
+    labels = {row["mark"] for row in rows if "mark" in row}
+    assert labels == {"end-of-run warmup end", "first partition end", "end-of-run estimate", "batch rate", "sample rate"}
