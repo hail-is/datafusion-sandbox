@@ -77,6 +77,7 @@ fn the_run_record_schema_names_its_columns_in_order() {
             ("action", &DataType::Utf8, true),
             ("stop_reason", &DataType::Utf8, true),
             ("steady_state_throughput", &DataType::Float64, true),
+            ("relative_half_width", &DataType::Float64, true),
             ("warmup_end_ns", &DataType::UInt64, true),
             ("window_end_ns", &DataType::UInt64, true),
             ("window_rows", &DataType::UInt64, true),
@@ -90,6 +91,7 @@ fn the_run_record_schema_names_its_columns_in_order() {
             ("max_duration_ns", &DataType::UInt64, true),
             ("would_stop_ns", &DataType::UInt64, true),
             ("would_be_steady_state_throughput", &DataType::Float64, true),
+            ("would_be_relative_half_width", &DataType::Float64, true),
             ("would_be_warmup_end_ns", &DataType::UInt64, true),
         ]
     );
@@ -136,6 +138,7 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
                 warmup_end_ns: Some(400_000_000),
                 window_end_ns: 1_400_000_000,
                 window_rows: 120_000,
+                relative_half_width: Some(0.0125),
             },
             first_partition_end_ns: Some(1_400_000_001),
             kind: ProbedKind::Shadow {
@@ -145,6 +148,7 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
                     warmup_end_ns: Some(300_000_000),
                     window_end_ns: 1_200_000_000,
                     window_rows: 100_000,
+                    relative_half_width: Some(0.015_625),
                 }),
             },
         }),
@@ -174,6 +178,7 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
         ("action", "shadow"),
         ("stop_reason", "completed"),
         ("steady_state_throughput", "2500.5"),
+        ("relative_half_width", "0.0125"),
         ("warmup_end_ns", "400000000"),
         ("window_end_ns", "1400000000"),
         ("window_rows", "120000"),
@@ -187,6 +192,7 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
         ("max_duration_ns", "300000000000"),
         ("would_stop_ns", "1200000000"),
         ("would_be_steady_state_throughput", "2400.25"),
+        ("would_be_relative_half_width", "0.015625"),
         ("would_be_warmup_end_ns", "300000000"),
     ] {
         assert_eq!(string_values(&batch, column), [expected], "{column}");
@@ -219,6 +225,7 @@ fn unset_run_record_settings_are_null() {
         "action",
         "stop_reason",
         "steady_state_throughput",
+        "relative_half_width",
         "warmup_end_ns",
         "window_end_ns",
         "window_rows",
@@ -232,6 +239,7 @@ fn unset_run_record_settings_are_null() {
         "max_duration_ns",
         "would_stop_ns",
         "would_be_steady_state_throughput",
+        "would_be_relative_half_width",
         "would_be_warmup_end_ns",
     ] {
         assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");
@@ -240,8 +248,8 @@ fn unset_run_record_settings_are_null() {
 }
 
 /// A drained probe writes nothing, so its write settings are null; a probe with no estimate, no
-/// end of warmup and no finished partition leaves those three columns null too, and a probe that
-/// is no shadow probe leaves the would-stop columns null.
+/// estimate interval, no end of warmup and no finished partition leaves those four columns null
+/// too, and a probe that is no shadow probe leaves the would-stop columns null.
 #[test]
 fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
     let record = RunRecord {
@@ -254,6 +262,7 @@ fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
                 warmup_end_ns: None,
                 window_end_ns: 0,
                 window_rows: 0,
+                relative_half_width: None,
             },
             first_partition_end_ns: None,
             kind: ProbedKind::Probe,
@@ -268,10 +277,12 @@ fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
         "compression",
         "output_path",
         "steady_state_throughput",
+        "relative_half_width",
         "warmup_end_ns",
         "first_partition_end_ns",
         "would_stop_ns",
         "would_be_steady_state_throughput",
+        "would_be_relative_half_width",
         "would_be_warmup_end_ns",
     ] {
         assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");
@@ -281,7 +292,7 @@ fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
 }
 
 /// A shadow probe whose rule never stopped steady records that it is a shadow probe, completed,
-/// and leaves its would-stop columns null.
+/// with the relative half-width it completed with, and leaves its would-stop columns null.
 #[test]
 fn a_shadow_probe_that_never_would_have_stopped_leaves_its_would_stop_columns_null() {
     let record = RunRecord {
@@ -293,6 +304,7 @@ fn a_shadow_probe_that_never_would_have_stopped_leaves_its_would_stop_columns_nu
                 warmup_end_ns: None,
                 window_end_ns: 1_000,
                 window_rows: 32,
+                relative_half_width: Some(0.5),
             },
             first_partition_end_ns: Some(1_000),
             kind: ProbedKind::Shadow { would_stop: None },
@@ -305,12 +317,14 @@ fn a_shadow_probe_that_never_would_have_stopped_leaves_its_would_stop_columns_nu
     for column in [
         "would_stop_ns",
         "would_be_steady_state_throughput",
+        "would_be_relative_half_width",
         "would_be_warmup_end_ns",
     ] {
         assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");
     }
     assert_eq!(string_values(&batch, "action"), ["shadow"]);
     assert_eq!(string_values(&batch, "stop_reason"), ["completed"]);
+    assert_eq!(string_values(&batch, "relative_half_width"), ["0.5"]);
 }
 
 /// The progress samples table holds one row per sample, in the order taken, each with its index

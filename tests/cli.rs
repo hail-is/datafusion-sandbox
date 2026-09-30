@@ -15,11 +15,12 @@ use datafusion_sandbox::{
     format::InputFormat,
     metrics_directory::MetricsDirectory,
     pipeline::{self, PipelineOptions},
+    throughput_probe::{self, ProbeSettings, ProgressSample},
 };
 
 use datafusion::arrow::{record_batch::RecordBatch, util::display::array_value_to_string};
 
-use std::process::Command;
+use std::{num::NonZeroU32, process::Command, time::Duration};
 
 #[test]
 fn successful_binary_prints_the_formulation_and_a_rendered_table() {
@@ -426,6 +427,112 @@ fn a_written_probe_records_three_tables_and_leaves_nothing_on_disk() {
             .collect();
         assert_eq!(left, ["metrics"], "{formulation}");
     }
+}
+
+/// `--probe --shadow` records the relative half-width of the estimate interval it completed
+/// with, and of the one it would have stopped with, as replaying its recorded progress samples
+/// through the stopping rule gives them. The fixture finishes in milliseconds, so fine settings
+/// give the rule samples to judge: the window it completes with always has an interval, since its
+/// last batch holds the rows, but it settles before the first partition end only sometimes.
+#[test]
+fn a_shadow_probe_records_the_relative_half_widths_its_samples_replay_to() {
+    let dataset = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let dir = tempfile::tempdir().unwrap();
+    let metrics_directory = dir.path().join("metrics").to_str().unwrap().to_string();
+    let settings = ProbeSettings {
+        poll_period: Duration::from_millis(1),
+        batch_duration: Duration::from_millis(2),
+        precision: 1e9,
+        consecutive_checks: NonZeroU32::MIN,
+        window_groups: 2,
+        min_duration: Duration::from_millis(1),
+        ..ProbeSettings::default()
+    };
+
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args([
+            "--threads",
+            "1",
+            "combine-refs",
+            dataset.table_path(),
+            "--probe",
+            "--shadow",
+            "--metrics",
+            &metrics_directory,
+            "--run-id",
+            "cli-shadow",
+            "--poll-period",
+            "0.001",
+            "--batch",
+            "0.002",
+            "--precision",
+            "1e9",
+            "--consecutive",
+            "1",
+            "--window-groups",
+            "2",
+            "--min-duration",
+            "0.001",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recorded = read_recorded_run(&metrics_directory, "cli-shadow");
+    let record = recorded.record.expect("a run record");
+    let progress = recorded.progress_samples.expect("progress samples");
+    let samples: Vec<ProgressSample> = column_strings(&progress, "elapsed_ns")
+        .into_iter()
+        .zip(column_strings(&progress, "rows"))
+        .map(|(elapsed_ns, rows)| ProgressSample {
+            elapsed_ns: elapsed_ns.parse().unwrap(),
+            rows: rows.parse().unwrap(),
+        })
+        .collect();
+    let first_partition_end_ns: Option<u64> = column_strings(&record, "first_partition_end_ns")[0]
+        .parse()
+        .ok();
+    let replayed_would_stop = (1..=samples.len()).find_map(|taken| {
+        let seen = samples.get(..taken)?;
+        let latest_ns = seen.last()?.elapsed_ns;
+        throughput_probe::would_stop(
+            &settings,
+            seen,
+            first_partition_end_ns.filter(|&end_ns| end_ns <= latest_ns),
+        )
+    });
+    let replayed_end = throughput_probe::decide(&settings, &samples, first_partition_end_ns);
+
+    assert_eq!(column_strings(&record, "action"), ["shadow"]);
+    assert!(
+        optional_f64(&record, "relative_half_width").is_some(),
+        "{samples:?}"
+    );
+    assert_eq!(
+        column_strings(&record, "stop_reason"),
+        [replayed_end.as_ref().unwrap().stop_reason.name()]
+    );
+    assert_eq!(
+        [
+            optional_f64(&record, "relative_half_width"),
+            optional_f64(&record, "would_be_relative_half_width"),
+        ],
+        [
+            replayed_end.and_then(|decision| decision.relative_half_width),
+            replayed_would_stop.and_then(|decision| decision.relative_half_width),
+        ],
+        "{samples:?}"
+    );
+}
+
+/// The one value of the Float64 column `name` of `batch`; `None` when it is empty.
+fn optional_f64(batch: &RecordBatch, name: &str) -> Option<f64> {
+    let [value] = column_strings(batch, name).try_into().unwrap();
+    (!value.is_empty()).then(|| value.parse().unwrap())
 }
 
 /// The values of the column `name` of `batch`, rendered.

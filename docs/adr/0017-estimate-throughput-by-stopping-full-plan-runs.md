@@ -17,7 +17,7 @@ decided in a grilling session on 2026-09-24.
   parameters, and a fixed prefix takes grouped-merge much longer than interval-merge at the same
   core count.
 - **A rule computed from the samples alone.** MSER picks the end of warmup, and the probe stops
-  once a confidence interval over the rest has been tight for several batches in a row. The rule is
+  once the estimate interval over the rest has been tight for several batches in a row. The rule is
   a pure function of the samples and its settings, so a recorded run replays exactly. Rejected: a
   fixed time budget, which gives a noisy configuration the same time as a quiet one and still needs
   a guess at warmup.
@@ -36,8 +36,9 @@ decided in a grilling session on 2026-09-24.
 ## Consequences
 
 The estimate is a rate over whatever loci the plan reached before stopping, and it stands for the
-whole run only if the work per row is the same along the genome. Shadow probes, which evaluate the
-rule but run to completion, check that assumption and calibrate the rule against the full-run
-rate. The rows a probe writes are incomplete, so the probe removes its output after every ending
-and refuses an output path that already exists. A probe also stops at the first finished partition,
-because the rate after it reflects fewer partitions running than the deployed step would see.
+loci after them only if the work per row is the same along the genome. Shadow probes, which
+evaluate the rule but run to completion, check that assumption and calibrate the rule against the
+estimate over the longest measurement window the dataset allows. The rows a probe writes are
+incomplete, so the probe removes its output after every ending and refuses an output path that
+already exists. A probe also stops at the first finished partition, because the rate after it
+reflects fewer partitions running than the deployed step would see.

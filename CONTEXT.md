@@ -39,7 +39,8 @@ _Avoid_: benchmark run, early-stopped write, timed run
 
 **Shadow probe**:
 A throughput probe that evaluates when it would stop without stopping, and runs to completion, so
-its would-be estimate can be checked against the whole run.
+the estimate it would have stopped with can be checked against its estimate over the longest
+measurement window the dataset allows.
 _Avoid_: dry run, calibration run
 
 **Outcome**:
@@ -287,6 +288,11 @@ _Avoid_: steady-state interval (**Locus interval** owns "interval"), sample wind
 **Steady-state throughput**:
 A throughput probe's estimate: the rows its sink received per second over its measurement window.
 _Avoid_: rate, speed, throughput (unqualified)
+
+**Estimate interval**:
+The uncertainty a throughput probe attaches to its steady-state throughput: the range its rate
+likely lies in, judged by how that rate varied over the measurement window.
+_Avoid_: confidence interval (unqualified), error bar, CI
 
 **Stop reason**:
 Why a throughput probe ended: its estimate settled (steady), a partition of its plan finished and

@@ -111,7 +111,7 @@ partition end:
    partition end.
 4. At each batch end, it checks whether the window is tight: split into `--window-groups` groups
    of equal duration, with boundaries snapped to the nearest sample, the group rates' 95%
-   t-interval has a half-width below `--precision` of its mean.
+   t-interval, the estimate interval, has a half-width below `--precision` of its mean.
 5. It stops with stop reason `steady` at a batch end past `--min-duration` once the last
    `--consecutive` checks were all tight.
 
@@ -139,13 +139,17 @@ A probe records three tables under `DIR`, all Parquet and one file per run: the 
 and its progress samples, one row each of run id, sample index, elapsed nanoseconds, and rows, in
 `DIR/progress/<id>.parquet`. Its run record holds the rows received as `rows_written`, times
 `execute_ns` to the stop, and fills the probe columns a measured write leaves empty: `action`,
-`stop_reason`, `steady_state_throughput`, `warmup_end_ns`, `window_end_ns`, `window_rows`,
-`first_partition_end_ns`, and every setting, as `poll_period_ns`, `batch_duration_ns`,
-`precision`, `consecutive_checks`, `window_groups`, `min_duration_ns`, and `max_duration_ns`. `warmup_end_ns` is empty
-when MSER found no end of warmup, and `first_partition_end_ns` when no partition finished before
-the stop. `--run-id` works as for a measured write, a repeated id is refused before anything
-runs, and a probe that fails records nothing. `--probe` refuses `--limit`, which would change the
-plan measured. See
+`stop_reason`, `steady_state_throughput`, `relative_half_width`, `warmup_end_ns`, `window_end_ns`,
+`window_rows`, `first_partition_end_ns`, and every setting, as `poll_period_ns`,
+`batch_duration_ns`, `precision`, `consecutive_checks`, `window_groups`, `min_duration_ns`, and
+`max_duration_ns`. `relative_half_width` is the estimate interval's half-width over its mean at
+the decision the probe stopped with, whatever its stop reason: the value a tightness check of its
+measurement window compares with `--precision`. It is empty when there is no estimate interval,
+because the window has no more samples than `--window-groups` or a group spans no time, and when
+the interval's mean is not positive. `warmup_end_ns` is empty when MSER found no end of warmup,
+and `first_partition_end_ns` when no partition finished before the stop. `--run-id` works as for
+a measured write, a repeated id is refused before anything runs, and a probe that fails records
+nothing. `--probe` refuses `--limit`, which would change the plan measured. See
 [ADR 0017](docs/adr/0017-estimate-throughput-by-stopping-full-plan-runs.md).
 ```
 cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --probe --metrics data/runs --run-id grouped-8-probe --max-duration 60
@@ -180,11 +184,12 @@ A shadow probe, `--probe --shadow`, drained or written, applies the stopping rul
 progress sample exactly as a probe does, but never acts on it: it ignores `--max-duration` and
 the first partition end, runs the plan to completion, and always stops with stop reason
 `completed`. Its measurement window still closes at the first partition end, and its
-`steady_state_throughput` is the rule's estimate at the end of the run. Its run record has
-`action` `shadow`, and records the first `steady` decision the rule reached before the first
-partition end, the decision a probe would have stopped at, in three more columns:
-`would_stop_ns`, the elapsed nanoseconds at which it would have stopped,
-`would_be_steady_state_throughput`, and `would_be_warmup_end_ns`. Since the cap stops nothing,
+`steady_state_throughput` and `relative_half_width` are the rule's estimate and estimate interval
+at the end of the run. Its run record has `action` `shadow`, and records the first `steady`
+decision the rule reached before the first partition end, the decision a probe would have stopped
+at, in four more columns: `would_stop_ns`, the elapsed nanoseconds at which it would have stopped,
+`would_be_steady_state_throughput`, `would_be_relative_half_width`, the relative half-width of the
+estimate interval at that decision, and `would_be_warmup_end_ns`. Since the cap stops nothing,
 `would_stop_ns` may lie past `--max-duration`, where a probe would have stopped capped instead.
 They are empty when the rule never stopped steady, and for every other run.
 ```
@@ -193,12 +198,14 @@ cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --p
 Calibrate the stopping rule with shadow probes before relying on it in a sweep:
 1. Run shadow probes on a few extreme configurations: the smallest and the largest branching
    factor, one thread and all threads, and interval-merge with many intervals.
-2. Compare each run's `would_be_steady_state_throughput` with its full-run truth: its
-   `steady_state_throughput`, the rate over the whole measurement window, and `rows_written`
-   over `execute_ns`, the rate over the whole run. An empty `would_stop_ns` means the rule never
-   settled on that configuration.
+2. Compare each run's would-be steady-state throughput and its estimate interval,
+   `would_be_steady_state_throughput` and `would_be_relative_half_width`, with its steady-state
+   throughput at the end of the run and its estimate interval, `steady_state_throughput` and
+   `relative_half_width`, the estimate over the longest measurement window the dataset allows. An
+   empty `would_stop_ns` means the rule never settled on that configuration.
 3. Check that the work per row holds steady along the genome: the rate between progress samples
-   should not drift over the run, since the estimate stands for the whole run only if it doesn't.
+   should not drift over the run, since the estimate stands for the loci a probe does not reach
+   only if it doesn't.
 4. Tune `--batch` from the recorded progress samples. Their row counts are cumulative, so merging
    samples replays the rule offline with any longer batch duration, and with any other setting.
 

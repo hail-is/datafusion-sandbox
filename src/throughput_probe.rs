@@ -6,7 +6,7 @@
 //! samples so far, and the first partition end, and a recorded probe replays exactly.
 //!
 //! The rule batches the samples, picks the end of warmup with MSER over the batch rates, and
-//! stops, steady, once a confidence interval for the rate over the measurement window that
+//! stops, steady, once the estimate interval for the rate over the measurement window that
 //! follows has been tight at several consecutive batch ends. See
 //! [ADR 0017](../docs/adr/0017-estimate-throughput-by-stopping-full-plan-runs.md).
 
@@ -94,6 +94,10 @@ pub struct Decision {
     pub window_end_ns: u64,
     /// The rows the sink received between the window's end samples.
     pub window_rows: u64,
+    /// The half-width of the window's estimate interval over its mean, as a tightness check of
+    /// the window compares it with the precision, whatever the stop reason; `None` when the
+    /// window has no interval, or its mean is not positive.
+    pub relative_half_width: Option<f64>,
 }
 
 /// Whether a probe with `settings` stops after `samples`, in the order taken, given the elapsed
@@ -133,6 +137,7 @@ pub fn decide(
         warmup_end_ns: window.warmup_end_ns,
         window_end_ns: window_end.elapsed_ns,
         window_rows: window_end.rows.saturating_sub(first.rows),
+        relative_half_width: window.relative_half_width(settings),
     })
 }
 
@@ -291,19 +296,24 @@ impl<'a> Window<'a> {
         })
     }
 
-    /// Whether the relative half-width of the window's interval is below the precision target.
+    /// Whether the relative half-width of the window's estimate interval is below the precision.
+    fn tight(&self, settings: &ProbeSettings) -> bool {
+        self.relative_half_width(settings)
+            .is_some_and(|half_width| half_width < settings.precision)
+    }
+
+    /// The half-width of the window's estimate interval over its mean; `None` when there is no
+    /// interval, or its mean is not positive.
     ///
     /// The window splits into `window_groups` groups of equal duration, their boundaries snapped
     /// to the nearest sample, and the interval is a 95% t-interval over the groups' rates. A group
     /// that snaps to no time gives no interval, as some must when there are as many groups as
     /// samples, which is checked first so that no group count costs more than the samples.
-    fn tight(&self, settings: &ProbeSettings) -> bool {
-        let (Some(first), Some(last)) = (self.samples.first(), self.samples.last()) else {
-            return false;
-        };
+    fn relative_half_width(&self, settings: &ProbeSettings) -> Option<f64> {
+        let (first, last) = (self.samples.first()?, self.samples.last()?);
         let groups = settings.window_groups;
         if usize::try_from(groups).map_or(true, |groups| groups >= self.samples.len()) {
-            return false;
+            return None;
         }
         let span_ns = last.elapsed_ns.saturating_sub(first.elapsed_ns);
         let boundaries: Vec<&ProgressSample> = (0..=groups)
@@ -322,7 +332,7 @@ impl<'a> Window<'a> {
             .zip(boundaries.iter().skip(1))
             .map(|(start, end)| rate_between(start, end))
             .collect();
-        rates.is_some_and(|rates| relative_half_width(&rates) < settings.precision)
+        relative_half_width(&rates?)
     }
 
     /// The window's sample nearest `target_ns`, the earlier of two equally near.
@@ -379,21 +389,15 @@ fn warmup_batches(rates: &[f64]) -> Option<usize> {
 /// The fewest batches a cut may leave for MSER to judge it.
 const MSER_MIN_TAIL: usize = 5;
 
-/// The half-width of a 95% t-interval for the mean of `rates` over that mean; infinite when the
+/// The half-width of a 95% t-interval for the mean of `rates` over that mean; `None` when the
 /// mean is not positive or there are fewer than two rates.
-fn relative_half_width(rates: &[f64]) -> f64 {
-    let Some(freedom) = rates.len().checked_sub(1).filter(|&freedom| freedom > 0) else {
-        return f64::INFINITY;
-    };
+fn relative_half_width(rates: &[f64]) -> Option<f64> {
+    let freedom = rates.len().checked_sub(1).filter(|&freedom| freedom > 0)?;
     let (count, freedom) = (count_f64(rates.len()), count_f64(freedom));
     let mean = rates.iter().sum::<f64>() / count;
     let variance = rates.iter().map(|rate| (rate - mean).powi(2)).sum::<f64>() / freedom;
     let half_width = t_quantile(freedom) * (variance / count).sqrt();
-    if mean > 0.0 {
-        half_width / mean
-    } else {
-        f64::INFINITY
-    }
+    (mean > 0.0).then(|| half_width / mean)
 }
 
 /// The 97.5th percentile of Student's t with `freedom` degrees of freedom, from a table up to 30
