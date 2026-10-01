@@ -320,8 +320,10 @@ After changing `provision.sh`, give the VM the new version with
 Stop the build VM at the end of a session rather than between builds: a stop takes about 20 s and
 a start 10–50 s, and an idle half hour costs well under a dollar. A stopped VM keeps no capacity,
 so a start can fail when its family is stocked out; then delete it and create it again, which
-falls back to n2. On `c4d-standard-16`, provisioning a fresh VM takes about a minute and a release
-build into an empty target dir about 13 minutes, nearly all of it the single-threaded fat-LTO step.
+falls back to n2. On `c4d-standard-16`, `create-build-vm.sh` takes 2–3 minutes, returning once the
+VM is provisioned with the pinned toolchain, and the first release build about 12 minutes, nearly
+all of it the single-threaded fat-LTO step. So deleting the VM only pays when it would otherwise
+sit unused for about a week.
 
 A **runner** is a throwaway VM of the family a binary was built for, on the build VM's image,
 which carries `gcloud`. A run needs nothing else installed:
