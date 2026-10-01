@@ -13,6 +13,8 @@
 //!   there.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
 //! - [`run_metrics`] fills the run record and run metrics tables of a measured write.
+//! - [`sample_annotation_table`] names and writes the table that declares a written input table's
+//!   sample set.
 //! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of
 //!   every partition.
 //! - [`sorted_table`] scans files as one ordered partition.
@@ -56,6 +58,7 @@ pub mod ordered_frame;
 pub mod pipeline;
 pub mod process;
 pub mod run_metrics;
+pub mod sample_annotation_table;
 pub mod sink;
 pub mod sorted_table;
 pub mod split_points;

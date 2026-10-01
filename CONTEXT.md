@@ -156,6 +156,13 @@ table's rows each carry their sample, and its sample set is declared beside it. 
 written output is a multi-sample input table to the runs above it.
 _Avoid_: per-sample table (now the single-sample case), source, part
 
+**Sample annotation table**:
+The table stored beside a multi-sample input table, with one row per sample in its sample set:
+the declaration of that sample set, and the place per-sample data about those samples lives. Its
+presence marks the input table as complete. See
+[ADR 0018](docs/adr/0018-declare-a-multi-sample-input-tables-samples-in-a-sample-annotation-table.md).
+_Avoid_: sidecar, manifest, sample list, cols table
+
 **Split point**:
 A locus at which one locus interval ends and the next begins. `j - 1` split points, strictly
 increasing in the locus ordering, define `j` locus intervals.

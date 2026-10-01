@@ -84,6 +84,18 @@ impl Formulation {
         }
     }
 
+    /// Whether a write of this formulation's rows is a multi-sample input table to a later run, and
+    /// so writes a sample annotation table beside its data: true for the reference combiner.
+    #[must_use]
+    pub const fn writes_sample_annotation_table(&self) -> bool {
+        match self {
+            Self::CombineAllelesUnion => false,
+            Self::CombineRefsUnion
+            | Self::CombineRefsGroupedMerge { .. }
+            | Self::CombineRefsIntervalMerge { .. } => true,
+        }
+    }
+
     /// Builds this formulation's plan over `dataset`.
     ///
     /// # Errors

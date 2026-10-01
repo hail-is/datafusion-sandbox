@@ -4,11 +4,12 @@ use crate::{
     format::InputFormat,
     formulation::Formulation,
     metrics_directory::{MetricsDirectory, UnrecordedRun},
-    ordered_frame::OrderedFrame,
+    ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
     process,
     run_metrics::{FormulationRecord, ProbeRecord, RunRecord, WriteRecord},
-    sink,
+    sample_annotation_table,
+    sink::{self, ExecutedSink},
     stored::dataset::Dataset,
     throughput_probe::{ProbeKind, ProbeSettings, StopReason},
     write::{VacantTarget, WriteTarget},
@@ -33,10 +34,11 @@ use std::{
 /// See ADR 0014 for why the plan ends in a sink rather than a sort.
 #[derive(Debug)]
 pub enum Action {
-    /// Write the rows to the target.
+    /// Write the rows to the target, then, for the reference combiner, the sample annotation table
+    /// of the run's sample set beside them. See ADR 0018.
     Write(WriteTarget),
-    /// Write the rows to the target and record the run as `run_id` under the metrics directory.
-    /// See ADR 0016.
+    /// Write the rows to the target as a write does, sample annotation table included, and record
+    /// the run as `run_id` under the metrics directory. See ADR 0016.
     MeasuredWrite {
         write: WriteTarget,
         metrics_directory: MetricsDirectory,
@@ -106,17 +108,19 @@ impl Action {
 
     /// Makes every refusal this action owes before dataset discovery, and hands back the action
     /// with what the checks produced: a measured write's or a probe's unrecorded run id, and a
-    /// writing probe's vacant output path, refused if it holds the metrics directory.
-    async fn check(self, ctx: &SessionContext) -> Result<CheckedAction> {
+    /// writing probe's vacant output path, refused if it holds the metrics directory. A write
+    /// that executes, measured or analyzed, in `layout` of one file per partition is refused if
+    /// anything exists at its output path.
+    async fn check(self, ctx: &SessionContext, layout: OutputLayout) -> Result<CheckedAction> {
         Ok(match self {
-            Self::Write(target) => CheckedAction::Write(target),
+            Self::Write(target) => CheckedAction::Write(written_in(ctx, target, layout).await?),
             Self::MeasuredWrite {
                 write,
                 metrics_directory,
                 run_id,
             } => CheckedAction::MeasuredWrite(CheckedMeasuredWrite {
                 run: metrics_directory.unrecorded(ctx, &run_id).await?,
-                write,
+                write: written_in(ctx, write, layout).await?,
             }),
             Self::Probe {
                 write,
@@ -136,7 +140,10 @@ impl Action {
                 analyze: false,
             },
             Self::ExplainAnalyze { write } => CheckedAction::Explain {
-                write,
+                write: match write {
+                    Some(write) => Some(written_in(ctx, write, layout).await?),
+                    None => None,
+                },
                 analyze: true,
             },
         })
@@ -187,12 +194,13 @@ impl CombinerRun {
     ///
     /// Returns an error if a measured write's or a probe's run id already has a run record under
     /// its metrics directory, a writing probe's output path already exists or holds its metrics
-    /// directory, the input dataset cannot be resolved, the formulation cannot be planned or
-    /// executed, or the requested output cannot be written. A measured write or a probe that
-    /// fails records nothing: the refusals of a repeated id and of a probe's output path come
-    /// before dataset discovery, and the run is recorded only after the data write or the probe
-    /// succeeds. A probe also fails on a session the pipeline runner did not build, which has no
-    /// IO runtime to sample on.
+    /// directory, an executed write of one file per partition has something at its output path, the
+    /// input dataset cannot be resolved, the formulation cannot be planned or executed, or the
+    /// requested output or its sample annotation table cannot be written. A measured write or a
+    /// probe that fails records nothing: the refusals of a repeated id and of an occupied output
+    /// path come before dataset discovery, and the run is recorded only after the data write and
+    /// its sample annotation table, or the probe, succeed. A probe also fails on a session the
+    /// pipeline runner did not build, which has no IO runtime to sample on.
     pub async fn execute_in(self, ctx: &SessionContext) -> Result<Outcome> {
         self.run(ctx, Started::now()).await
     }
@@ -200,7 +208,7 @@ impl CombinerRun {
     async fn run(self, ctx: &SessionContext, started: Started) -> Result<Outcome> {
         let facts = RunFacts::new(started, &self.inputs, self.threads);
         self.action
-            .check(ctx)
+            .check(ctx, self.inputs.formulation.output_layout())
             .await?
             .execute(ctx, &self.inputs, facts)
             .await
@@ -223,6 +231,11 @@ enum CheckedAction {
 
 impl CheckedAction {
     /// Plans the rows `inputs` describe and runs them through this action.
+    ///
+    /// An action that writes to an output path first removes any sample annotation table an
+    /// earlier write left beside it, whether or not it writes one itself, so a table only ever
+    /// marks the data the last write left there, and only once that write is complete. See
+    /// ADR 0018.
     async fn execute(
         self,
         ctx: &SessionContext,
@@ -230,8 +243,13 @@ impl CheckedAction {
         facts: RunFacts,
     ) -> Result<Outcome> {
         let rows = inputs.plan(ctx).await?;
+        if let Some(target) = self.written_target() {
+            sample_annotation_table::remove(ctx, target, rows.ordered.layout).await?;
+        }
         match self {
-            Self::Write(target) => write_rows(&target, rows.ordered).await,
+            Self::Write(target) => Ok(Outcome::RowsWritten(
+                rows.write(ctx, &target).await?.rows_written,
+            )),
             Self::MeasuredWrite(measured) => measured.execute(ctx, rows, facts).await,
             Self::Probe(probe) => probe.execute(ctx, rows, facts).await,
             Self::Collect => collect_rows(rows.ordered).await,
@@ -240,6 +258,34 @@ impl CheckedAction {
             }
         }
     }
+
+    /// The target this action writes rows to when executed, if any. An explain writes only when
+    /// it is analyzed.
+    fn written_target(&self) -> Option<&WriteTarget> {
+        match self {
+            Self::Write(target)
+            | Self::Explain {
+                write: Some(target),
+                analyze: true,
+            } => Some(target),
+            Self::MeasuredWrite(measured) => Some(&measured.write),
+            Self::Probe(probe) => probe.write.as_ref().map(VacantTarget::target),
+            Self::Collect | Self::Explain { .. } => None,
+        }
+    }
+}
+
+/// Hands back `write` for a write in `layout`, refused if the layout is one file per partition and
+/// something exists at its output path.
+async fn written_in(
+    ctx: &SessionContext,
+    write: WriteTarget,
+    layout: OutputLayout,
+) -> Result<WriteTarget> {
+    if layout == OutputLayout::FilePerPartition {
+        write.check_vacant_directory(ctx).await?;
+    }
+    Ok(write)
 }
 
 /// A measured write whose run id had no run record.
@@ -257,10 +303,11 @@ impl CheckedMeasuredWrite {
         facts: RunFacts,
     ) -> Result<Outcome> {
         let Self { write, run } = self;
-        let executed = write.write(rows.ordered).await?;
+        let coverage = rows.coverage;
+        let executed = rows.write(ctx, &write).await?;
         let record = facts.record(
             run.run_id().to_string(),
-            rows.coverage,
+            coverage,
             Some((&write).into()),
             executed.rows_written,
             executed.execute_ns,
@@ -323,13 +370,6 @@ impl CheckedProbe {
             unrecorded_metrics,
         })
     }
-}
-
-/// Writes the rows to `target`.
-async fn write_rows(target: &WriteTarget, ordered: OrderedFrame) -> Result<Outcome> {
-    Ok(Outcome::RowsWritten(
-        target.write(ordered).await?.rows_written,
-    ))
 }
 
 /// Collects the rows in memory.
@@ -442,14 +482,22 @@ impl PlanInputs {
             Some(limit) => ordered.limit(limit)?,
             None => ordered,
         };
-        Ok(PlannedRows { ordered, coverage })
+        Ok(PlannedRows {
+            ordered,
+            coverage,
+            sample_set: dataset.sample_set(),
+            annotated: self.formulation.writes_sample_annotation_table(),
+        })
     }
 }
 
-/// A run's planned rows, and how much of the dataset they cover.
+/// A run's planned rows, how much of the dataset they cover and its sample set, and whether a
+/// write of them writes a sample annotation table.
 struct PlannedRows {
     ordered: OrderedFrame,
     coverage: Coverage,
+    sample_set: Vec<String>,
+    annotated: bool,
 }
 
 /// How much of the dataset a run covers: the input tables it merges after narrowing, and the
@@ -458,6 +506,20 @@ struct PlannedRows {
 struct Coverage {
     input_tables: usize,
     samples: usize,
+}
+
+impl PlannedRows {
+    /// Writes the rows to `target`, then, when annotated, the sample annotation table of the
+    /// sample set beside them, and returns the data write's execution. A failed data write writes
+    /// no table, so the table's presence marks the data complete. See ADR 0018.
+    async fn write(self, ctx: &SessionContext, target: &WriteTarget) -> Result<ExecutedSink> {
+        let layout = self.ordered.layout;
+        let executed = target.write(self.ordered).await?;
+        if self.annotated {
+            sample_annotation_table::write(ctx, target, layout, &self.sample_set).await?;
+        }
+        Ok(executed)
+    }
 }
 
 /// Wall-clock nanoseconds since `since`, saturating at `u64::MAX`.
