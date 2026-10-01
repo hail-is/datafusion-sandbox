@@ -1,7 +1,7 @@
 //! Stored tables read under a declared locus ordering, validated against their files at
 //! construction.
 //!
-//! - [`dataset`] reads a dataset's per-sample tables under its sample set.
+//! - [`dataset`] reads a dataset's input tables, each with its sample set.
 //! - [`locus_sorted_table`] reads one file or one directory of files as a single locus-sorted
 //!   table.
 

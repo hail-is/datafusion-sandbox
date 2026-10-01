@@ -72,7 +72,7 @@ requires the combiner's ordering. See
 _Avoid_: consumer, writer, terminal, output
 
 **Combiner**:
-A merge of per-sample tables into a single locus-ordered table, named by the table it produces. A
+A merge of input tables into a single locus-ordered table, named by the table it produces. A
 combiner says what is produced, not how; the reference combiner and the allele combiner are the
 two we have.
 _Avoid_: merger, joiner
@@ -121,8 +121,8 @@ _Avoid_: query plan (ambiguous between logical and physical), execution graph
 
 **Merge tree**:
 The plan shape that yields a combiner's rows in locus order with no sort: one sort-preserving merge
-over each sample group's union of scans, beneath a final merge of the groups. With one group it is a
-flat merge, one merge over every sample's scan.
+over each input group's union of scans, beneath a final merge of the groups. With one group it is a
+flat merge, one merge over every input table's scan.
 _Avoid_: nested merge, merge hierarchy, sort tree
 
 ### Runtimes
@@ -144,9 +144,17 @@ One sequenced individual, identified by a string id such as `HG00308`.
 _Avoid_: individual, subject
 
 **Sample set**:
-Which samples a combiner run covers: a nonempty property of the dataset, which a caller may narrow
-but neither empty nor extend.
+Which samples a combiner run or an input table covers. A dataset's is nonempty and is the disjoint
+union of its input tables' sample sets; a caller may narrow it, whole input tables at a time, but
+neither empty nor extend it.
 _Avoid_: samples (unqualified), sample list, cohort
+
+**Input table**:
+One locus-sorted table a combiner run merges, together with its sample set. A single-sample input
+table's sample is given by where it is stored and its rows do not carry it; a multi-sample input
+table's rows each carry their sample, and its sample set is declared beside it. A combiner run's
+written output is a multi-sample input table to the runs above it.
+_Avoid_: per-sample table (now the single-sample case), source, part
 
 **Split point**:
 A locus at which one locus interval ends and the next begins. `j - 1` split points, strictly
@@ -163,15 +171,15 @@ _Avoid_: oracle split points, ideal split points, even split points
 **Locus interval**:
 A contiguous stretch of loci in the dataset's locus ordering, half-open: it includes its start and
 excludes its end. The locus intervals of a run partition the whole ordering, so every row falls in
-exactly one; a plan that merges by locus interval merges every sample within each interval and
-writes each interval's rows to its own file.
+exactly one; a plan that merges by locus interval merges every input table within each interval
+and writes each interval's rows to its own file.
 _Avoid_: range, region, vertical partition, genome partition
 
-**Sample group**:
-A subset of a combiner run's sample set whose per-sample tables one merge node combines. The
-sample groups of a run partition its sample set; a plan that merges by sample group merges the
-groups again afterwards.
-_Avoid_: batch, shard, horizontal partition
+**Input group**:
+A subset of a combiner run's input tables that one merge node combines. The input groups of a run
+partition its input tables; a plan that merges by input group merges the groups again afterwards.
+_Avoid_: sample group (retired: a group holds input tables, not samples), batch, shard, horizontal
+partition
 
 **Dataset**:
 One stored collection of per-sample tables under a declared locus ordering, identified by its path,

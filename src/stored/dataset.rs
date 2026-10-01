@@ -1,4 +1,4 @@
-//! Datasets: stored per-sample tables under a declared locus ordering and a sample set.
+//! Datasets: stored input tables under a declared locus ordering, each with its sample set.
 
 use super::{list_files_by_extension, normalize_table_path};
 use crate::{
@@ -21,36 +21,80 @@ use datafusion::{
 use futures_util::StreamExt;
 use std::{collections::BTreeSet, sync::Arc};
 
-/// A directory of per-sample tables, its format, declared locus ordering, and sample set.
+/// One locus-sorted table a dataset holds, named by its entry in the dataset root, with the
+/// samples it covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputTable {
+    name: String,
+    sample_set: Vec<String>,
+}
+
+impl InputTable {
+    /// The single-sample input table stored as the directory `s=<sample>/`.
+    #[must_use]
+    pub fn single_sample(sample: &str) -> Self {
+        Self {
+            name: format!("s={sample}"),
+            sample_set: vec![sample.to_string()],
+        }
+    }
+
+    /// The table's entry in the dataset root, such as `s=HG00308`.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The samples the table covers, in sorted order.
+    #[must_use]
+    pub fn sample_set(&self) -> &[String] {
+        &self.sample_set
+    }
+}
+
+/// A directory of input tables, its format, and declared locus ordering.
 #[derive(Clone, Debug)]
 pub struct Dataset {
     table_path: ListingTableUrl,
     input_format: InputFormat,
     locus_ordering: LocusOrdering,
     schema: SchemaRef,
-    sample_set: Vec<String>,
+    input_tables: Vec<InputTable>,
     locus_representation: LocusRepresentation,
 }
 
 impl Dataset {
-    /// Constructs a dataset from already resolved schema and sample-set data.
+    /// Constructs a dataset from an already resolved schema and input tables, which it holds in
+    /// name order.
     ///
     /// # Errors
     ///
-    /// Returns an error if the table path cannot be normalized, the sample set is empty, the
-    /// locus representation cannot be detected, or the schema lacks an ordering column.
+    /// Returns an error if the table path cannot be normalized, there are no input tables, two
+    /// input tables share a name, the locus representation cannot be detected, or the schema
+    /// lacks an ordering column.
     pub fn new(
         table_path: ListingTableUrl,
         input_format: InputFormat,
         locus_ordering: LocusOrdering,
         schema: SchemaRef,
-        sample_set: Vec<String>,
+        mut input_tables: Vec<InputTable>,
     ) -> Result<Self> {
         let table_path = normalize_table_path(table_path)?;
-        if sample_set.is_empty() {
+        input_tables.sort_by(|left, right| left.name.cmp(&right.name));
+        if input_tables.is_empty() {
             return Err(DataFusionError::Plan(format!(
                 "dataset '{}' contains no samples",
                 <ListingTableUrl as AsRef<str>>::as_ref(&table_path)
+            )));
+        }
+        if let Some([duplicate, _]) = input_tables
+            .array_windows()
+            .find(|[left, right]| left.name == right.name)
+        {
+            return Err(DataFusionError::Plan(format!(
+                "dataset '{}' holds more than one input table named '{}'",
+                <ListingTableUrl as AsRef<str>>::as_ref(&table_path),
+                duplicate.name
             )));
         }
         let (locus_representation, _) = locus_ordering.validate_against(&schema)?;
@@ -59,13 +103,13 @@ impl Dataset {
             input_format,
             locus_ordering,
             schema,
-            sample_set,
+            input_tables,
             locus_representation,
         })
     }
 
-    /// Discovers the sample directories immediately below `table_path` with one
-    /// object-store listing request, and resolves the dataset schema.
+    /// Discovers the single-sample input tables, the `s=<id>/` directories immediately below
+    /// `table_path`, with one object-store listing request, and resolves the dataset schema.
     ///
     /// # Errors
     ///
@@ -82,7 +126,7 @@ impl Dataset {
         let state = ctx.state();
         let store = ctx.runtime_env().object_store(&table_path)?;
         let partitions = list_partitions(store.as_ref(), &table_path, 0, None).await?;
-        let mut sample_set = partitions
+        let input_tables = partitions
             .iter()
             .filter_map(|partition| {
                 let (path, depth, _) = describe_partition(partition);
@@ -90,11 +134,10 @@ impl Dataset {
                     .then(|| path.trim_end_matches('/').rsplit('/').next())
                     .flatten()
                     .and_then(|directory| directory.strip_prefix("s="))
-                    .map(str::to_string)
+                    .map(InputTable::single_sample)
             })
             .collect::<Vec<_>>();
-        sample_set.sort();
-        if sample_set.is_empty() {
+        if input_tables.is_empty() {
             return Err(DataFusionError::Plan(format!(
                 "dataset '{}' contains no samples",
                 <ListingTableUrl as AsRef<str>>::as_ref(&table_path)
@@ -122,12 +165,32 @@ impl Dataset {
             };
             format.infer_schema(&state, &store, &[input_file]).await?
         };
-        Self::new(table_path, input_format, locus_ordering, schema, sample_set)
+        Self::new(
+            table_path,
+            input_format,
+            locus_ordering,
+            schema,
+            input_tables,
+        )
     }
 
+    /// The dataset's input tables, in name order.
     #[must_use]
-    pub fn sample_set(&self) -> &[String] {
-        &self.sample_set
+    pub fn input_tables(&self) -> &[InputTable] {
+        &self.input_tables
+    }
+
+    /// The samples the dataset covers, the union of its input tables' sample sets, in sorted
+    /// order.
+    #[must_use]
+    pub fn sample_set(&self) -> Vec<String> {
+        let mut sample_set = self
+            .input_tables
+            .iter()
+            .flat_map(|table| table.sample_set.iter().cloned())
+            .collect::<Vec<_>>();
+        sample_set.sort();
+        sample_set
     }
 
     #[must_use]
@@ -151,33 +214,47 @@ impl Dataset {
         Ok(required.expand(self.locus_representation))
     }
 
-    /// Reads the dataset's whole sample set into one flat frame: the union of its per-sample
-    /// scans, or the one scan of a single-sample dataset.
+    /// Reads the dataset's input tables into one flat frame: the union of their scans, or the
+    /// one scan of a dataset with one input table.
     ///
     /// # Errors
     ///
-    /// Returns an error if a sample cannot be read or the sample plans cannot be combined.
+    /// Returns an error if an input table cannot be read or the plans cannot be combined.
     pub async fn read(&self, ctx: &SessionContext) -> Result<DataFrame> {
-        let mut plans = Vec::with_capacity(self.sample_set.len());
-        for sample in &self.sample_set {
-            let frame = self.read_sample(ctx, sample).await?;
+        let mut plans = Vec::with_capacity(self.input_tables.len());
+        for input_table in &self.input_tables {
+            let frame = self.read_input_table(ctx, input_table).await?;
             plans.push(frame.into_unoptimized_plan());
         }
         union_or_single(ctx, plans)
     }
 
-    /// Reads one sample directory as a sorted table and attaches its sample id.
-    async fn read_sample(&self, ctx: &SessionContext, sample: &str) -> Result<DataFrame> {
-        let sample_path =
-            ListingTableUrl::parse(format!("{}s={sample}/", self.table_path.as_str()))?;
+    /// Reads one single-sample input table as a sorted table and attaches its sample id.
+    async fn read_input_table(
+        &self,
+        ctx: &SessionContext,
+        input_table: &InputTable,
+    ) -> Result<DataFrame> {
+        let [sample] = input_table.sample_set() else {
+            return Err(DataFusionError::Internal(format!(
+                "single-sample input table '{}' covers {} samples",
+                input_table.name(),
+                input_table.sample_set().len()
+            )));
+        };
+        let table_path = ListingTableUrl::parse(format!(
+            "{}{}/",
+            self.table_path.as_str(),
+            input_table.name()
+        ))?;
         let format = self.input_format.read_format();
-        let files = list_files_by_extension(ctx, &sample_path, &self.input_format)
+        let files = list_files_by_extension(ctx, &table_path, &self.input_format)
             .await?
             .into_iter()
             .map(PartitionedFile::new_from_meta)
             .collect();
         let table = SortedTable::new(
-            sample_path.object_store(),
+            table_path.object_store(),
             format,
             files,
             Arc::clone(&self.schema),
@@ -186,7 +263,7 @@ impl Dataset {
                 .sort_expressions(),
             Some(AttachedScalar {
                 field: Arc::new(Field::new("s", DataType::Utf8, false)),
-                value: ScalarValue::Utf8(Some(sample.to_string())),
+                value: ScalarValue::Utf8(Some(sample.clone())),
             }),
         );
         ctx.read_table(Arc::new(table))
@@ -204,43 +281,43 @@ impl Dataset {
         )))
     }
 
-    /// Restricts this dataset to a nonempty requested sample set, rejecting ids
-    /// that are not present rather than silently intersecting the two sets.
+    /// Restricts this dataset to a nonempty request of input table names, keeping name order and
+    /// rejecting names that are not present rather than silently intersecting the two.
     ///
     /// # Errors
     ///
-    /// Returns an error if `requested_sample_set` is empty or contains an unknown sample.
-    pub fn restrict_to(&self, requested_sample_set: &[String]) -> Result<Self> {
-        if requested_sample_set.is_empty() {
+    /// Returns an error if `requested_input_tables` is empty or names an unknown input table.
+    pub fn restrict_to(&self, requested_input_tables: &[String]) -> Result<Self> {
+        if requested_input_tables.is_empty() {
             return Err(DataFusionError::Plan(
-                "requested sample set contains no samples".to_string(),
+                "no input tables requested".to_string(),
             ));
         }
         let available = self
-            .sample_set
+            .input_tables
             .iter()
-            .map(String::as_str)
+            .map(InputTable::name)
             .collect::<BTreeSet<_>>();
-        let missing = requested_sample_set
+        let missing = requested_input_tables
             .iter()
             .map(String::as_str)
-            .filter(|sample| !available.contains(sample))
+            .filter(|name| !available.contains(name))
             .collect::<BTreeSet<_>>();
         if !missing.is_empty() {
             return Err(DataFusionError::Plan(format!(
-                "samples not found in dataset: {}",
+                "input tables not found in dataset: {}",
                 missing.into_iter().collect::<Vec<_>>().join(", ")
             )));
         }
 
-        let requested_sample_set = requested_sample_set
+        let requested_input_tables = requested_input_tables
             .iter()
             .map(String::as_str)
             .collect::<BTreeSet<_>>();
         let mut restricted = self.clone();
         restricted
-            .sample_set
-            .retain(|sample| requested_sample_set.contains(sample.as_str()));
+            .input_tables
+            .retain(|table| requested_input_tables.contains(table.name()));
         Ok(restricted)
     }
 }
@@ -253,7 +330,7 @@ impl Dataset {
 pub fn union_or_single(ctx: &SessionContext, mut plans: Vec<LogicalPlan>) -> Result<DataFrame> {
     let plan = if plans.len() == 1 {
         plans.pop().ok_or_else(|| {
-            DataFusionError::Internal("a non-empty sample group produced no plans".to_string())
+            DataFusionError::Internal("a non-empty input group produced no plans".to_string())
         })?
     } else {
         LogicalPlan::Union(Union::try_new(plans.into_iter().map(Arc::new).collect())?)

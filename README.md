@@ -64,6 +64,9 @@ uv run --directory python hailtools convert-parquets parquets_prod_50 vortices_p
 ### Combiner prototype
 So far there are simple pipelines for combining the 50 samples of our benchmark data. Each takes the path of a
 directory containing one subdirectory per sample, of the form `s=HG123456`, either local or in object storage.
+Each subdirectory is an input table, named by its entry: `s=HG123456`. A run merges every input table
+unless `--inputs` names some, as comma-separated names such as `--inputs s=HG00308,s=HG00592`; an
+unknown name is an error.
 ```
 cargo run -r -- combine-refs data/vortices_chr22        # -> data/combined.vortex
 cargo run -r -- combine-alleles data/vortices_alleles_chr22  # -> data/combined_alleles.vortex
@@ -73,10 +76,11 @@ cargo run -r -- combine-alleles data/vortices_alleles_packed_chr22
 The directory alone selects the representation. Packed input produces packed output; there is no
 representation flag.
 
-The reference combiner has three formulations. `--formulation union` merges every sample's scan in
-one merge. `--formulation grouped-merge` merges each sample group first and then merges the groups,
-so the merges run on several cores; `--groups N` sets the number of sample groups and defaults to
-the thread count. `--formulation interval-merge` merges every sample within each locus interval
+The reference combiner has three formulations. `--formulation union` merges every input table's scan
+in one merge. `--formulation grouped-merge` merges each input group, a contiguous run of input
+tables in name order, first and then merges the groups, so the merges run on several cores;
+`--groups N` sets the number of input groups and defaults to the thread count.
+`--formulation interval-merge` merges every input table within each locus interval
 and writes one file per interval, so the merges run on several cores and the write does too;
 `--split-points` names the loci that cut the ordering into intervals, as comma-separated
 `contig:position` with the contig ordinal, strictly increasing, and is required. Its `--write`

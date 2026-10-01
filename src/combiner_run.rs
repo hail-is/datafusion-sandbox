@@ -260,7 +260,7 @@ impl CheckedMeasuredWrite {
         let executed = write.write(rows.ordered).await?;
         let record = facts.record(
             run.run_id().to_string(),
-            rows.samples,
+            rows.coverage,
             Some((&write).into()),
             executed.rows_written,
             executed.execute_ns,
@@ -302,7 +302,7 @@ impl CheckedProbe {
         };
         let record = facts.record(
             run.run_id().to_string(),
-            rows.samples,
+            rows.coverage,
             write.as_ref().map(|target| target.target().into()),
             probed.rows_received,
             probed.execute_ns,
@@ -377,13 +377,13 @@ impl RunFacts {
         }
     }
 
-    /// The run record of `run_id`, a run over `samples` samples that ends now. Its action wrote
+    /// The run record of `run_id`, a run over `coverage` that ends now. Its action wrote
     /// `write`, if any, wrote `rows_written` rows, or received them for a probe, and executed for
     /// `execute_ns`. A probe's settings and decision are `probe`.
     fn record(
         self,
         run_id: String,
-        samples: usize,
+        coverage: Coverage,
         write: Option<WriteRecord>,
         rows_written: u64,
         execute_ns: u64,
@@ -397,7 +397,8 @@ impl RunFacts {
             input_format: self.input_format,
             write,
             threads: self.threads,
-            samples,
+            input_tables: coverage.input_tables,
+            samples: coverage.samples,
             rows_written,
             run_ns: elapsed_ns(self.started.instant),
             execute_ns,
@@ -408,12 +409,12 @@ impl RunFacts {
 }
 
 /// What a run plans its rows from: the formulation's rows over the dataset at `input_path`,
-/// restricted to `sample_set` and limited to `row_limit` rows when given.
+/// restricted to the named `input_tables` and limited to `row_limit` rows when given.
 pub struct PlanInputs {
     pub formulation: Formulation,
     pub input_path: String,
     pub input_format: InputFormat,
-    pub sample_set: Option<Vec<String>>,
+    pub input_tables: Option<Vec<String>>,
     pub row_limit: Option<usize>,
 }
 
@@ -428,23 +429,34 @@ impl PlanInputs {
             None,
         )
         .await?;
-        let dataset = match &self.sample_set {
-            Some(sample_set) => dataset.restrict_to(sample_set)?,
+        let dataset = match &self.input_tables {
+            Some(input_tables) => dataset.restrict_to(input_tables)?,
             None => dataset,
         };
-        let samples = dataset.sample_set().len();
+        let coverage = Coverage {
+            input_tables: dataset.input_tables().len(),
+            samples: dataset.sample_set().len(),
+        };
         let ordered = self.formulation.plan(ctx, &dataset).await?;
         let ordered = match self.row_limit {
             Some(limit) => ordered.limit(limit)?,
             None => ordered,
         };
-        Ok(PlannedRows { ordered, samples })
+        Ok(PlannedRows { ordered, coverage })
     }
 }
 
-/// A run's planned rows, and the size of the sample set they cover.
+/// A run's planned rows, and how much of the dataset they cover.
 struct PlannedRows {
     ordered: OrderedFrame,
+    coverage: Coverage,
+}
+
+/// How much of the dataset a run covers: the input tables it merges after narrowing, and the
+/// size of their sample set.
+#[derive(Clone, Copy)]
+struct Coverage {
+    input_tables: usize,
     samples: usize,
 }
 
