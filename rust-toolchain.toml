@@ -1,0 +1,5 @@
+# Pinned so a benchmark number always names the compiler that produced it. Moving the pin starts
+# a new batch of sweep results: numbers from different pins are not compared directly.
+[toolchain]
+channel = "nightly-2026-10-01"
+components = ["clippy", "rustfmt"]

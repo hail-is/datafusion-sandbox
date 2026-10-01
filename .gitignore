@@ -1,4 +1,6 @@
 /target
+# One target dir per GCE instance family; see "Building for a specific GCE instance family".
+/target-*
 data/
 
 # Python / uv

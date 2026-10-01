@@ -1,0 +1,4 @@
+{"rule":[
+  {"action":{"type":"AbortIncompleteMultipartUpload"},"condition":{"age":1}},
+  {"action":{"type":"Delete"},"condition":{"age":7,"matchesPrefix":["scratch/"]}}
+]}
