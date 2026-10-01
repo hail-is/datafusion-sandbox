@@ -6,6 +6,11 @@
 //! - Vortex with packed loci
 //! - Parquet with contig-position loci
 //! - Parquet with packed loci
+//! - Mixed datasets, in both formats and both representations: the input tables
+//!   [`MIXED_INPUT_TABLES`], which are a multi-sample file `g0.<ext>` of the first two
+//!   samples' rows in locus order, a multi-sample directory `g1/` of the third sample's
+//!   files with its rows carrying their sample, each beside its sample annotation table,
+//!   and the single-sample table `s=NA18534/`
 //!
 //! Per-test owned in-memory inventory:
 //! - A locus-sorted table, one or more files, with caller-chosen loci, format, and representation
@@ -30,13 +35,17 @@
 //! positions within a contig. File b spans contigs; d, c, and a have constant
 //! contigs. Packed loci use the contig ordinal in the high 32 bits.
 //!
+//! A shared fixture's `output_root` is a directory on its store beside the dataset,
+//! where a test that writes puts its output, since discovery rejects stray entries.
+//!
 //! Store handles:
 //! - `MemoryStore`, an empty in-memory object store a test registers on its own
 //!   session. Every shared dataset fixture holds one. The sorted-table planning
 //!   tests build metadata-only tables over one with nothing in it. One built by
 //!   `MemoryStore::failing_writes_under` fails every write under a prefix, for
 //!   tests of what a failed write leaves behind, which `MemoryStore::locations_under`
-//!   lists.
+//!   lists. `MemoryStore::with_failing_writes_under` does the same over a store's
+//!   existing objects, so a later write can fail where an earlier one succeeded.
 //!
 //! Row helpers, for tests that filter a fixture and check what comes back:
 //! - `sample_rows`, the rows above as one sample's expected result.
@@ -68,12 +77,15 @@ pub use memory_store::MemoryStore;
 use crate::format::{InputFormat, OutputFormat};
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::metrics_directory::MetricsDirectory;
+use crate::ordered_frame::OutputLayout;
 use crate::pipeline::{self, PipelineOptions};
 use crate::run_metrics;
+use crate::sample_annotation_table;
+use crate::stored::dataset::sample_field;
 use crate::write::WriteTarget;
 use datafusion::{
     arrow::{
-        array::{Array, ArrayRef, StringArray},
+        array::{Array, ArrayRef, StringArray, StringViewArray},
         compute::{cast, concat_batches},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
@@ -111,6 +123,12 @@ pub const SAMPLES: &[&str] = &["HG00308", "HG00592", "HG02230", "NA18534"];
 /// The names of the dataset fixtures' input tables, one single-sample table per entry of
 /// [`SAMPLES`], in the same order.
 pub const INPUT_TABLES: &[&str] = &["s=HG00308", "s=HG00592", "s=HG02230", "s=NA18534"];
+
+/// The names of the mixed dataset fixtures' input tables, in name order.
+pub const MIXED_INPUT_TABLES: &[&str] = &["g0", "g1", "s=NA18534"];
+
+/// The sample sets of [`MIXED_INPUT_TABLES`], in the same order.
+pub const MIXED_SAMPLE_SETS: &[&[&str]] = &[&["HG00308", "HG00592"], &["HG02230"], &["NA18534"]];
 
 /// One fixture row as a locus and alleles.
 pub type SampleRow = (Locus, &'static str);
@@ -199,17 +217,54 @@ static PARQUET_PACKED: LazyLock<Arc<DatasetFixture>> = LazyLock::new(|| {
     )
 });
 
+static MIXED_VORTEX_CONTIG_POSITION: LazyLock<Arc<DatasetFixture>> = LazyLock::new(|| {
+    build_in_memory_mixed_fixture(
+        "mixed-vortex-contig-position",
+        FixtureFormat::Vortex,
+        LocusRepresentation::ContigPosition,
+    )
+});
+static MIXED_VORTEX_PACKED: LazyLock<Arc<DatasetFixture>> = LazyLock::new(|| {
+    build_in_memory_mixed_fixture(
+        "mixed-vortex-packed",
+        FixtureFormat::Vortex,
+        LocusRepresentation::Packed,
+    )
+});
+static MIXED_PARQUET_CONTIG_POSITION: LazyLock<Arc<DatasetFixture>> = LazyLock::new(|| {
+    build_in_memory_mixed_fixture(
+        "mixed-parquet-contig-position",
+        FixtureFormat::Parquet,
+        LocusRepresentation::ContigPosition,
+    )
+});
+static MIXED_PARQUET_PACKED: LazyLock<Arc<DatasetFixture>> = LazyLock::new(|| {
+    build_in_memory_mixed_fixture(
+        "mixed-parquet-packed",
+        FixtureFormat::Parquet,
+        LocusRepresentation::Packed,
+    )
+});
+
 pub struct DatasetFixture {
     format: FixtureFormat,
     representation: LocusRepresentation,
     store: MemoryStore,
     table_path: ListingTableUrl,
+    output_root: String,
 }
 
 impl DatasetFixture {
     #[must_use]
     pub const fn table_path(&self) -> &ListingTableUrl {
         &self.table_path
+    }
+
+    /// A directory on the fixture's store beside the dataset, for tests that write. A write
+    /// inside the dataset would be an entry discovery rejects.
+    #[must_use]
+    pub fn output_root(&self) -> &str {
+        &self.output_root
     }
 
     #[must_use]
@@ -271,6 +326,24 @@ pub fn dataset_fixture(
         (FixtureFormat::Vortex, LocusRepresentation::Packed) => &VORTEX_PACKED,
         (FixtureFormat::Parquet, LocusRepresentation::ContigPosition) => &PARQUET_CONTIG_POSITION,
         (FixtureFormat::Parquet, LocusRepresentation::Packed) => &PARQUET_PACKED,
+    }
+}
+
+/// The mixed dataset fixture in `format` and `representation`.
+#[must_use]
+pub fn mixed_dataset_fixture(
+    format: FixtureFormat,
+    representation: LocusRepresentation,
+) -> &'static Arc<DatasetFixture> {
+    match (format, representation) {
+        (FixtureFormat::Vortex, LocusRepresentation::ContigPosition) => {
+            &MIXED_VORTEX_CONTIG_POSITION
+        }
+        (FixtureFormat::Vortex, LocusRepresentation::Packed) => &MIXED_VORTEX_PACKED,
+        (FixtureFormat::Parquet, LocusRepresentation::ContigPosition) => {
+            &MIXED_PARQUET_CONTIG_POSITION
+        }
+        (FixtureFormat::Parquet, LocusRepresentation::Packed) => &MIXED_PARQUET_PACKED,
     }
 }
 
@@ -480,6 +553,83 @@ fn build_in_memory_fixture(
     fixture
 }
 
+fn build_in_memory_mixed_fixture(
+    name: &'static str,
+    format: FixtureFormat,
+    representation: LocusRepresentation,
+) -> Arc<DatasetFixture> {
+    let (fixture, target) = new_in_memory_fixture(name, format, representation);
+    let output_format = format.datafusion_formats().0;
+    let extension = output_format.extension();
+    let [g0_samples, g1_samples @ [g1_sample], single_sample] = MIXED_SAMPLE_SETS else {
+        panic!("the mixed fixture has three input tables, the second of one sample");
+    };
+    let g0_rows = sample_rows()
+        .into_iter()
+        .flat_map(|row| g0_samples.iter().map(move |&sample| (row, sample)))
+        .collect::<Vec<_>>();
+    let mut writes = vec![(format!("g0.{extension}"), g0_rows)];
+    for (filename, rows) in SAMPLE_FILES.iter() {
+        let rows = rows
+            .iter()
+            .map(|&row| (row, *g1_sample))
+            .collect::<Vec<_>>();
+        writes.push((format!("g1/{filename}.{extension}"), rows));
+    }
+    let annotated = [
+        ("g0", OutputLayout::SingleFile, *g0_samples),
+        ("g1", OutputLayout::FilePerPartition, *g1_samples),
+    ];
+    pipeline::run(
+        move |ctx: SessionContext| async move {
+            let root = target.register(&ctx);
+            for (path, rows) in writes {
+                WriteTarget {
+                    output_path: format!("{root}/{path}"),
+                    output_format: output_format.clone(),
+                }
+                .write_unordered(ctx.read_batch(multi_sample_batch(&rows, representation))?)
+                .await?;
+            }
+            for (stem, layout, samples) in annotated {
+                let output_path = match layout {
+                    OutputLayout::SingleFile => format!("{root}/{stem}.{extension}"),
+                    OutputLayout::FilePerPartition => format!("{root}/{stem}"),
+                };
+                let samples = samples.iter().map(ToString::to_string).collect::<Vec<_>>();
+                sample_annotation_table::write(
+                    &ctx,
+                    &WriteTarget {
+                        output_path,
+                        output_format: output_format.clone(),
+                    },
+                    layout,
+                    &samples,
+                )
+                .await?;
+            }
+            Ok(())
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap_or_else(|error| panic!("writing the {name} dataset fixture: {error}"));
+    build_sample_tables(
+        FixtureTarget::Memory {
+            root: fixture
+                .table_path
+                .as_str()
+                .trim_end_matches('/')
+                .to_string(),
+            store: fixture.store.clone(),
+        },
+        single_sample,
+        format,
+        representation,
+        name,
+    );
+    fixture
+}
+
 fn build_in_memory_fixture_without_alleles(name: &'static str) -> Arc<DatasetFixture> {
     let (fixture, target) = new_in_memory_fixture(
         name,
@@ -530,11 +680,13 @@ fn new_in_memory_fixture(
         ListingTableUrl::parse(format!("{}fixtures/{name}/samples/", store.url().as_str()))
             .unwrap_or_else(|error| panic!("parsing the {name} dataset fixture path: {error}"));
     let root = table_path.as_str().trim_end_matches('/').to_string();
+    let output_root = format!("{}fixtures/{name}/outputs", store.url().as_str());
     let fixture = Arc::new(DatasetFixture {
         format,
         representation,
         store: store.clone(),
         table_path,
+        output_root,
     });
     (fixture, FixtureTarget::Memory { root, store })
 }
@@ -627,6 +779,23 @@ fn sample_batch(rows: &[SampleRow], representation: LocusRepresentation) -> Reco
     columns.push(Arc::new(alleles) as ArrayRef);
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
         .expect("fixture batch matches its schema")
+}
+
+/// The rows of a multi-sample table, each fixture row carrying its sample in a stored `s`.
+fn multi_sample_batch(
+    rows: &[(SampleRow, &str)],
+    representation: LocusRepresentation,
+) -> RecordBatch {
+    let sample_rows = rows.iter().map(|&(row, _)| row).collect::<Vec<_>>();
+    let batch = sample_batch(&sample_rows, representation);
+    let mut fields = batch.schema().fields().to_vec();
+    fields.push(sample_field());
+    let mut columns = batch.columns().to_vec();
+    columns.push(Arc::new(StringViewArray::from_iter_values(
+        rows.iter().map(|&(_, sample)| sample),
+    )) as ArrayRef);
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+        .expect("multi-sample fixture batch matches its schema")
 }
 
 /// One sample's rows in locus-then-alleles order, as loci and alleles.

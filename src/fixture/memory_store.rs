@@ -38,7 +38,27 @@ impl MemoryStore {
     /// Panics if `name` is not a valid URL authority.
     #[must_use]
     pub fn failing_writes_under(name: &str, prefix: &str) -> Self {
-        Self::with_store(name, Arc::new(FailingWrites::new(Path::from(prefix))))
+        Self::with_store(
+            name,
+            Arc::new(FailingWrites::new(
+                Arc::new(InMemory::new()),
+                Path::from(prefix),
+            )),
+        )
+    }
+
+    /// This store's objects at the same URL, through a view on which every write under `prefix`
+    /// fails. Writes through either store reach the same objects, so a test can write through
+    /// this store and then fail a later write at a path it already wrote.
+    #[must_use]
+    pub fn with_failing_writes_under(&self, prefix: &str) -> Self {
+        Self {
+            url: self.url.clone(),
+            store: Arc::new(FailingWrites::new(
+                Arc::clone(&self.store),
+                Path::from(prefix),
+            )),
+        }
     }
 
     fn with_store(name: &str, store: Arc<dyn ObjectStore>) -> Self {

@@ -120,6 +120,44 @@ fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
 }
 
 #[test]
+fn the_allele_combiner_rejects_a_dataset_with_a_multi_sample_input_table() {
+    for format in FORMATS {
+        let dataset = mixed_dataset(format, LocusRepresentation::ContigPosition);
+        let ctx = SessionContext::new();
+        dataset.fixture.register(&ctx);
+
+        let error = block_on(Formulation::CombineAllelesUnion.plan(&ctx, &dataset.dataset))
+            .expect_err("the allele combiner reads only single-sample input tables");
+
+        assert!(matches!(error, DataFusionError::Plan(_)));
+        let message = error.to_string();
+        assert!(
+            message.contains("multi-sample"),
+            "unexpected error: {message}"
+        );
+        assert!(message.contains("'g0'"), "unexpected error: {message}");
+    }
+}
+
+/// Over a dataset of every kind of input table, each reference formulation merges each input
+/// table as one ordered partition, and grouped-merge forms its groups from input tables.
+#[test]
+fn reference_formulations_merge_each_input_table_of_a_mixed_dataset_as_one_partition() {
+    for format in FORMATS {
+        for representation in REPRESENTATIONS {
+            let dataset = mixed_dataset(format, representation);
+            for formulation in &formulations()[..2] {
+                let plan = physical_plan(formulation, &dataset);
+                PlanShape::of(&plan).assert_merge_tree(&expected_groups(
+                    formulation,
+                    fixture::MIXED_INPUT_TABLES.len(),
+                ));
+            }
+        }
+    }
+}
+
+#[test]
 fn formulations_keep_their_plan_shape_under_a_hostile_session() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
@@ -247,6 +285,7 @@ fn restricting_the_input_tables_changes_input_count_for_every_formulation() {
 fn expected_groups(formulation: &Formulation, n_input_tables: usize) -> Vec<usize> {
     match (formulation, n_input_tables) {
         (Formulation::CombineRefsGroupedMerge { groups }, 4) if *groups == GROUPS => vec![2, 2],
+        (Formulation::CombineRefsGroupedMerge { groups }, 3) if *groups == GROUPS => vec![2, 1],
         (Formulation::CombineRefsGroupedMerge { groups }, 2) if *groups == GROUPS => vec![1, 1],
         (Formulation::CombineRefsGroupedMerge { groups }, n) => {
             panic!("no expected groups for {groups} groups over {n} input tables")
@@ -272,12 +311,32 @@ fn dataset(format: FixtureFormat, representation: LocusRepresentation) -> Fixtur
     )
 }
 
+/// The mixed dataset fixture: multi-sample input tables of both kinds and a single-sample one.
+fn mixed_dataset(format: FixtureFormat, representation: LocusRepresentation) -> FixtureDataset {
+    discovered(
+        fixture::mixed_dataset_fixture(format, representation),
+        format,
+        Formulation::CombineAllelesUnion.required_ordering(),
+    )
+}
+
 fn dataset_with_ordering(
     format: FixtureFormat,
     representation: LocusRepresentation,
     ordering: LocusOrdering,
 ) -> FixtureDataset {
-    let fixture = fixture::dataset_fixture(format, representation);
+    discovered(
+        fixture::dataset_fixture(format, representation),
+        format,
+        ordering,
+    )
+}
+
+fn discovered(
+    fixture: &'static Arc<fixture::DatasetFixture>,
+    format: FixtureFormat,
+    ordering: LocusOrdering,
+) -> FixtureDataset {
     let ctx = SessionContext::new();
     fixture.register(&ctx);
     let dataset = block_on(Dataset::discover(
@@ -326,7 +385,7 @@ const fn output_format(format: FixtureFormat) -> OutputFormat {
 /// The in-memory path a write of `formulation` over `dataset` goes to: a file named with the
 /// output format's extension, or a directory for a formulation writing one file per partition.
 fn output_path(ordered: &OrderedFrame, dataset: &FixtureDataset) -> String {
-    let root = dataset.fixture.table_path().as_str().trim_end_matches('/');
+    let root = dataset.fixture.output_root();
     match ordered.layout {
         OutputLayout::SingleFile => format!(
             "{root}/combined.{}",

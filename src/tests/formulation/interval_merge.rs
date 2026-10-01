@@ -5,7 +5,7 @@
 
 use super::{
     FORMATS, FixtureDataset, REPRESENTATIONS, collected_batches, dataset, drained_plan,
-    file_sink_plan, output_format, output_path, planned,
+    file_sink_plan, mixed_dataset, output_format, output_path, planned,
 };
 use crate::fixture::{self, FixtureFormat, Row, SAMPLES};
 use crate::formulation::Formulation;
@@ -111,6 +111,55 @@ fn writes_through_a_partitioned_sink_over_one_merge_per_interval() {
                     shape.nodes_of::<CoalescePartitionsExec>().is_empty(),
                     "{context}: expected no coalesce beneath the partitioned sink:\n{shape}"
                 );
+            }
+        }
+    }
+}
+
+/// Over a dataset of every kind of input table, each interval's merge is over one scan per input
+/// table, and each scan prunes its table's files by the interval. The multi-sample file `g0` is
+/// one file spanning every interval. The multi-sample directory `g1` holds the single-sample
+/// table's files with their sample stored, so the two are pruned alike, to fewer than all four
+/// files in every interval.
+#[test]
+fn prunes_each_input_table_of_a_mixed_dataset_to_the_files_of_each_interval() {
+    for format in FORMATS {
+        for representation in REPRESENTATIONS {
+            let context = format!("{format:?} {representation:?}");
+            let dataset = mixed_dataset(format, representation);
+            let plan = drained_plan(
+                &interval_merge(THREE_INTERVALS),
+                &dataset,
+                hostile_config(8),
+                None,
+            );
+            let shape = PlanShape::of(&plan);
+
+            shape.assert_one_merge_per_interval(
+                3,
+                fixture::MIXED_INPUT_TABLES.len(),
+                representation,
+            );
+            let scanned_files = shape.scanned_files();
+            let scans = scanned_files.chunks(fixture::MIXED_INPUT_TABLES.len());
+            assert_eq!(scans.len(), 3, "{context}:\n{shape}");
+            for scans in scans {
+                let [g0, g1, single_sample] = scans else {
+                    panic!("{context}: one scan per input table:\n{shape}");
+                };
+                assert_eq!(
+                    g0.iter().map(|path| path.filename()).collect::<Vec<_>>(),
+                    [Some(
+                        format!("g0.{}", dataset.fixture.input_format().name()).as_str()
+                    )],
+                    "{context}:\n{shape}"
+                );
+                assert_eq!(
+                    fixture::file_stems(g1),
+                    fixture::file_stems(single_sample),
+                    "{context}:\n{shape}"
+                );
+                assert!(g1.len() < 4, "{context}: no file pruned:\n{shape}");
             }
         }
     }

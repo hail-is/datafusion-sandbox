@@ -63,10 +63,20 @@ uv run --directory python hailtools convert-parquets parquets_prod_50 vortices_p
 
 ### Combiner prototype
 So far there are simple pipelines for combining the 50 samples of our benchmark data. Each takes the path of a
-directory containing one subdirectory per sample, of the form `s=HG123456`, either local or in object storage.
-Each subdirectory is an input table, named by its entry: `s=HG123456`. A run merges every input table
-unless `--inputs` names some, as comma-separated names such as `--inputs s=HG00308,s=HG00592`; an
-unknown name is an error.
+dataset directory, either local or in object storage, whose entries are input tables of two kinds:
+- a single-sample input table is a subdirectory `s=HG123456/` holding one sample's files;
+- a multi-sample input table is a file `g0.vortex` or a directory `g1/` of files whose rows carry
+  their sample in an `s` column, beside its sample annotation table `g0.samples.vortex` or
+  `g1.samples.vortex`, which a combiner write leaves beside its output.
+
+An input table is named by its entry without the format's extension: `s=HG123456`, `g0`, `g1`. Any
+other entry is an error, and so is a multi-sample input table without its sample annotation table,
+which is what a failed write leaves, or an annotation table without its data. No sample may be in
+two input tables. A run merges every input table unless `--inputs` names some, as comma-separated
+names such as `--inputs s=HG00308,g0`; an unknown name is an error. So to combine in two levels,
+write the first-level runs into one directory, perhaps with some samples held back there as
+`s=<id>/` tables, and run the second level over that directory. The allele combiner reads only
+single-sample input tables.
 ```
 cargo run -r -- combine-refs data/vortices_chr22        # -> data/combined.vortex
 cargo run -r -- combine-alleles data/vortices_alleles_chr22  # -> data/combined_alleles.vortex
@@ -98,8 +108,10 @@ cargo run -r -- combine-refs data/vortices_chr22 --formulation interval-merge --
 A reference combiner write, measured or not, ends by writing a sample annotation table beside its
 output, in the output format: `data/combined.samples.vortex` beside the file `data/combined.vortex`
 or the directory `data/combined`. It holds the run's sample ids, sorted, in one `s` column, which
-makes the output a complete multi-sample input table for a later run. A write that fails leaves
-none, and a probe, a collect, an explain or an allele combiner write writes none. See
+makes the output a complete multi-sample input table for a later run. So a reference combiner
+write of one file needs the output format's extension, and a path such as `g0.samples.vortex`,
+named as an annotation table, is rejected. A write that fails leaves none, and a probe, a
+collect, an explain or an allele combiner write writes none. See
 [ADR 0018](docs/adr/0018-declare-a-multi-sample-input-tables-samples-in-a-sample-annotation-table.md).
 A measured write, `--write PATH --metrics DIR`, writes the output as a plain write does and records
 the run under `DIR`: one row of resolved settings, wall-clock timings, and peak resident set size

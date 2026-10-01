@@ -152,8 +152,8 @@ _Avoid_: samples (unqualified), sample list, cohort
 **Input table**:
 One locus-sorted table a combiner run merges, together with its sample set. A single-sample input
 table's sample is given by where it is stored and its rows do not carry it; a multi-sample input
-table's rows each carry their sample, and its sample set is declared beside it. A combiner run's
-written output is a multi-sample input table to the runs above it.
+table's rows each carry their sample, and its sample set is declared in its sample annotation
+table. A combiner run's written output is a multi-sample input table to the runs above it.
 _Avoid_: per-sample table (now the single-sample case), source, part
 
 **Sample annotation table**:
@@ -189,15 +189,15 @@ _Avoid_: sample group (retired: a group holds input tables, not samples), batch,
 partition
 
 **Dataset**:
-One stored collection of per-sample tables under a declared locus ordering, identified by its path,
-the format of each file, and the sample set found there. A dataset without a declared locus
-ordering does not exist.
-_Avoid_: input, table (a dataset holds many per-sample tables), corpus, dataset layout (retired)
+One stored collection of input tables under a declared locus ordering, identified by its path, the
+format of each file, and the input tables found there, single-sample and multi-sample alike. No
+sample is in two of its input tables. A dataset without a declared locus ordering does not exist.
+_Avoid_: input, table (a dataset holds many input tables), corpus, dataset layout (retired)
 
 **Locus-sorted table**:
 One file or a directory of files read as a single sorted table under a locus ordering; it has no
 sample set. Unlike a sorted table it knows its locus ordering, and unlike a dataset it holds one
-table rather than one per sample.
+table rather than many. An input table is one together with a sample set.
 _Avoid_: standalone table, sorted frame, table (unqualified)
 
 **Generated table**:

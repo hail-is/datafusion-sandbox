@@ -10,7 +10,7 @@ use crate::{
     format::{InputFormat, OutputFormat},
     locus::{Locus, LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
-    stored::dataset::{Dataset, InputTable},
+    stored::dataset::{Dataset, InputTable, InputTableKind},
     write::WriteTarget,
 };
 use datafusion::{
@@ -560,4 +560,321 @@ fn contig_position_schema(include_alleles: bool) -> SchemaRef {
         fields.push(Field::new("alleles", DataType::Utf8, false));
     }
     Arc::new(Schema::new(fields))
+}
+
+#[test]
+fn discovers_input_tables_of_each_kind_named_by_their_root_entries_with_their_sample_sets() {
+    for format in [
+        fixture::FixtureFormat::Parquet,
+        fixture::FixtureFormat::Vortex,
+    ] {
+        let dataset = discover_mixed(format, LocusRepresentation::ContigPosition);
+
+        let input_tables = dataset
+            .input_tables()
+            .iter()
+            .map(|table| (table.name(), table.kind(), table.sample_set()))
+            .collect::<Vec<_>>();
+        let sample_sets = fixture::MIXED_SAMPLE_SETS
+            .iter()
+            .map(|samples| samples.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            input_tables,
+            [
+                ("g0", InputTableKind::MultiSampleFile, &sample_sets[0][..]),
+                (
+                    "g1",
+                    InputTableKind::MultiSampleDirectory,
+                    &sample_sets[1][..]
+                ),
+                (
+                    "s=NA18534",
+                    InputTableKind::SingleSample,
+                    &sample_sets[2][..]
+                ),
+            ]
+        );
+        assert_eq!(dataset.sample_set(), fixture::SAMPLES);
+        assert_eq!(
+            dataset.schema().field_with_name("s").ok(),
+            None,
+            "the dataset schema is the rows' schema without their sample"
+        );
+    }
+}
+
+#[test]
+fn reads_a_mixed_dataset_with_one_view_string_sample_column_and_each_tables_rows() {
+    for format in [
+        fixture::FixtureFormat::Parquet,
+        fixture::FixtureFormat::Vortex,
+    ] {
+        for representation in [
+            LocusRepresentation::ContigPosition,
+            LocusRepresentation::Packed,
+        ] {
+            let fixture = Arc::clone(fixture::mixed_dataset_fixture(format, representation));
+            let mut rows = pipeline::run(
+                move |ctx| {
+                    fixture.register(&ctx);
+                    async move {
+                        let dataset = Dataset::discover(
+                            &ctx,
+                            fixture.table_path().clone(),
+                            fixture.input_format(),
+                            LocusOrdering::locus_then_alleles(),
+                            None,
+                        )
+                        .await?;
+                        let df = dataset.read(&ctx).await?;
+                        let fields = df.schema().fields();
+                        let sample = fields.last().unwrap();
+                        assert_eq!(sample.name(), "s");
+                        assert_eq!(sample.data_type(), &DataType::Utf8View);
+                        assert!(!sample.is_nullable());
+                        let batches = df.collect().await?;
+                        Ok(batches
+                            .iter()
+                            .flat_map(|batch| fixture::decode_rows(batch, representation))
+                            .collect::<Vec<_>>())
+                    }
+                },
+                PipelineOptions::single_threaded(),
+            )
+            .unwrap();
+
+            let mut expected = fixture::SAMPLES
+                .iter()
+                .flat_map(|sample| {
+                    fixture::sample_rows()
+                        .into_iter()
+                        .map(|(locus, alleles)| (locus, alleles.to_string(), sample.to_string()))
+                })
+                .collect::<Vec<_>>();
+            rows.sort();
+            expected.sort();
+            assert_eq!(rows, expected);
+        }
+    }
+}
+
+#[test]
+fn reading_a_mixed_dataset_unions_one_single_partition_input_per_input_table() {
+    for format in [
+        fixture::FixtureFormat::Parquet,
+        fixture::FixtureFormat::Vortex,
+    ] {
+        for representation in [
+            LocusRepresentation::ContigPosition,
+            LocusRepresentation::Packed,
+        ] {
+            let fixture = fixture::mixed_dataset_fixture(format, representation);
+
+            block_on(async {
+                let ctx = SessionContext::new();
+                fixture.register(&ctx);
+                let dataset = Dataset::discover(
+                    &ctx,
+                    fixture.table_path().clone(),
+                    fixture.input_format(),
+                    LocusOrdering::locus_then_alleles(),
+                    None,
+                )
+                .await
+                .unwrap();
+                let plan = dataset
+                    .read(&ctx)
+                    .await
+                    .unwrap()
+                    .create_physical_plan()
+                    .await
+                    .unwrap();
+
+                PlanShape::of(&plan)
+                    .assert_one_ordered_partition_per_sample(fixture::MIXED_INPUT_TABLES.len());
+            });
+        }
+    }
+}
+
+#[test]
+fn narrowing_a_mixed_dataset_selects_whole_multi_sample_input_tables() {
+    let dataset = discover_mixed(
+        fixture::FixtureFormat::Vortex,
+        LocusRepresentation::ContigPosition,
+    )
+    .restrict_to(&["s=NA18534".to_string(), "g0".to_string()])
+    .unwrap();
+
+    let names = dataset
+        .input_tables()
+        .iter()
+        .map(InputTable::name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["g0", "s=NA18534"]);
+    assert_eq!(dataset.sample_set(), ["HG00308", "HG00592", "NA18534"]);
+}
+
+#[test]
+fn rejects_a_root_entry_that_is_no_input_table_naming_it() {
+    for (entries, rejected) in [
+        (&["notes.txt"][..], "notes.txt"),
+        (&["g0.parquet", "g0.samples.parquet"][..], "g0.parquet"),
+        (&["g0.samples.txt"][..], "g0.samples.txt"),
+    ] {
+        let error = block_on(discover_entries_in_memory(entries))
+            .expect_err("a stray root entry must fail discovery");
+
+        assert!(matches!(error, DataFusionError::Plan(_)));
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("memory:///samples/{rejected}")),
+            "{entries:?}: unexpected error: {message}"
+        );
+    }
+}
+
+#[test]
+fn rejects_multi_sample_data_without_its_sample_annotation_table_naming_it() {
+    for (entries, rejected) in [
+        (&["g0.vortex"][..], "g0.vortex"),
+        (&["g1/0.vortex", "g1/1.vortex"][..], "g1/"),
+    ] {
+        let error = block_on(discover_entries_in_memory(entries))
+            .expect_err("data without its annotation table must fail discovery");
+
+        assert!(matches!(error, DataFusionError::Plan(_)));
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("memory:///samples/{rejected}")),
+            "{entries:?}: unexpected error: {message}"
+        );
+        assert!(
+            message.contains("no sample annotation table"),
+            "{entries:?}: unexpected error: {message}"
+        );
+    }
+}
+
+#[test]
+fn rejects_a_sample_annotation_table_without_its_data_naming_it() {
+    let error = block_on(discover_entries_in_memory(&["g0.samples.vortex"]))
+        .expect_err("an annotation table without data must fail discovery");
+
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    let message = error.to_string();
+    assert!(
+        message.contains("memory:///samples/g0.samples.vortex"),
+        "unexpected error: {message}"
+    );
+    assert!(message.contains("no data"), "unexpected error: {message}");
+}
+
+#[test]
+fn rejects_a_sample_in_two_input_tables_naming_both() {
+    let error = Dataset::new(
+        ListingTableUrl::parse("memory:///samples").unwrap(),
+        InputFormat::VORTEX,
+        LocusOrdering::locus_then_alleles(),
+        contig_position_schema(true),
+        vec![
+            InputTable::single_sample("sample-b"),
+            InputTable::multi_sample_file(
+                "g0",
+                vec!["sample-b".to_string(), "sample-a".to_string()],
+            ),
+        ],
+    )
+    .expect_err("a sample in two input tables must fail");
+
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    assert_eq!(
+        error.to_string(),
+        "Error during planning: sample 'sample-b' is in both input tables 'g0' and 's=sample-b' \
+         of dataset 'memory:///samples/'"
+    );
+}
+
+#[test]
+fn rejects_a_sample_annotation_table_without_a_sample_column_naming_it() {
+    let store = fixture::MemoryStore::new("annotation-without-s");
+    let root = format!("{}samples", store.url().as_str());
+    let error = pipeline::run(
+        move |ctx| {
+            store.register(&ctx);
+            async move {
+                for (path, column) in [("g0.vortex", "s"), ("g0.samples.vortex", "sample")] {
+                    let batch = RecordBatch::try_new(
+                        Arc::new(Schema::new(vec![Field::new(column, DataType::Utf8, false)])),
+                        vec![Arc::new(StringArray::from(vec!["sample-a"]))],
+                    )?;
+                    WriteTarget {
+                        output_path: format!("{root}/{path}"),
+                        output_format: OutputFormat::VORTEX,
+                    }
+                    .write_unordered(ctx.read_batch(batch)?)
+                    .await?;
+                }
+                Dataset::discover(
+                    &ctx,
+                    ListingTableUrl::parse(&root)?,
+                    InputFormat::VORTEX,
+                    LocusOrdering::locus(),
+                    Some(contig_position_schema(false)),
+                )
+                .await
+                .map(|_| ())
+            }
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .expect_err("an annotation table without `s` must fail discovery");
+
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    let message = error.to_string();
+    assert!(
+        message.contains("samples/g0.samples.vortex"),
+        "unexpected error: {message}"
+    );
+    assert!(message.contains("'s'"), "unexpected error: {message}");
+}
+
+fn discover_mixed(format: fixture::FixtureFormat, representation: LocusRepresentation) -> Dataset {
+    let fixture = fixture::mixed_dataset_fixture(format, representation);
+    let ctx = SessionContext::new();
+    fixture.register(&ctx);
+    block_on(Dataset::discover(
+        &ctx,
+        fixture.table_path().clone(),
+        fixture.input_format(),
+        LocusOrdering::locus_then_alleles(),
+        None,
+    ))
+    .unwrap()
+}
+
+/// Discovers a Vortex dataset whose root holds a single-sample input table and empty objects at
+/// `entries`, under a pinned schema. Every rejection of a root entry precedes reading one.
+async fn discover_entries_in_memory(entries: &[&str]) -> Result<Dataset> {
+    let ctx = SessionContext::new();
+    let store = Arc::new(InMemory::new());
+    for entry in std::iter::once(&"s=sample-a/marker").chain(entries) {
+        store
+            .put(
+                &Path::from(format!("samples/{entry}")),
+                Vec::<u8>::new().into(),
+            )
+            .await?;
+    }
+    let store_url = ObjectStoreUrl::parse("memory://")?;
+    ctx.register_object_store(store_url.as_ref(), store);
+    Dataset::discover(
+        &ctx,
+        ListingTableUrl::parse("memory:///samples")?,
+        InputFormat::VORTEX,
+        LocusOrdering::locus(),
+        Some(contig_position_schema(false)),
+    )
+    .await
 }
