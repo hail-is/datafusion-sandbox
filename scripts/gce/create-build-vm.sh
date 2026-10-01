@@ -22,6 +22,29 @@ if [ -n "$existing" ]; then
   exit 1
 fi
 
+# A fresh VM has neither the builder user nor the checkout until its first provisioning finishes,
+# so this script returns only once it has. build.sh waits for the provisioning of a later boot.
+wait_until_provisioned() {
+  local zone=$1 log tries=0
+  echo "waiting for $NAME's provisioning to finish" >&2
+  while true; do
+    log=$(gcloud compute instances get-serial-port-output "$NAME" --zone "$zone" 2>/dev/null || true)
+    if grep -q "provision: done" <<<"$log"; then
+      return 0
+    fi
+    if grep -q -E "startup-script exit status [1-9]" <<<"$log"; then
+      echo "provisioning failed; see journalctl -u google-startup-scripts on $NAME" >&2
+      exit 1
+    fi
+    tries=$((tries + 1))
+    if [ $tries -gt 180 ]; then
+      echo "provisioning has not finished after 15 minutes" >&2
+      exit 1
+    fi
+    sleep 5
+  done
+}
+
 for candidate in "${CANDIDATES[@]}"; do
   read -r machine_type disk_type <<<"$candidate"
   for zone in $ZONES; do
@@ -36,7 +59,8 @@ for candidate in "${CANDIDATES[@]}"; do
       --scopes cloud-platform \
       --metadata-from-file startup-script="$here/provision.sh" 2>&1); then
       echo "$out"
-      echo "created $NAME as $machine_type in $zone"
+      wait_until_provisioned "$zone"
+      echo "created and provisioned $NAME as $machine_type in $zone"
       exit 0
     fi
     # Only a stockout moves on. Any other failure, such as quota or a bad flag, would fail the
