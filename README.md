@@ -281,6 +281,88 @@ Cascade Lake (much less so on Ice Lake and later), and for Arrow/DataFusion kern
 autovectorization win is at the `x86-64-v3` level (AVX2 + FMA + BMI2). Worth measuring variants
 against each other on the same instance rather than assuming.
 
+### Running on GCE
+
+Combiner runs on GCE read their dataset from, and write their output and metrics directory to,
+`gs://hail-pschultz`, which sits in `us-central1` like the VMs:
+
+```
+combiner-bench/datasets/<name>/                     datasets, uploaded with gcloud storage rsync
+combiner-bench/bin/<commit>/<family>/<profile>/     published binaries, each with a build-info.txt
+combiner-bench/runs/<campaign>/                     metrics directories
+scratch/<campaign>/<run-id>/                        outputs; deleted after 7 days
+```
+
+The bucket's lifecycle rules delete `scratch/` after 7 days and abort incomplete multipart uploads
+after 1 day, which a stopped writing probe leaves behind. They were set, replacing any rules the
+bucket had, with
+`gcloud storage buckets update gs://hail-pschultz --lifecycle-file=scripts/gce/bucket-lifecycle.json`.
+
+A long-lived **build VM** compiles published binaries for any instance family, using the flags
+from `gce.py` in the section above. Its disk is only a cache: `scripts/gce/create-build-vm.sh`
+creates it from nothing, and its startup script, `scripts/gce/provision.sh`, provisions it on
+every boot. So deleting the VM loses nothing. It is a `c4d-standard-16`, for the fastest single
+core in the serial fat-LTO step, in whichever `us-central1` zone has one, and an `n2-standard-16`
+when none does. `scripts/gce/build.sh` builds a pushed commit for each family named and publishes
+each binary. It refuses a commit that isn't a full hash, and a binary that already exists:
+
+```
+scripts/gce/create-build-vm.sh
+ZONE=$(gcloud compute instances list --filter=name=combiner-build --format='value(zone.basename())')
+gcloud compute ssh combiner-build --zone $ZONE -- \
+  sudo -iu builder datafusion-sandbox/scripts/gce/build.sh COMMIT c4
+gcloud compute instances stop combiner-build --zone $ZONE
+```
+
+After changing `provision.sh`, give the VM the new version with
+`gcloud compute instances add-metadata combiner-build --zone $ZONE --metadata-from-file startup-script=scripts/gce/provision.sh`.
+
+Stop the build VM at the end of a session rather than between builds: a stop takes about 20 s and
+a start 10–50 s, and an idle half hour costs well under a dollar. A stopped VM keeps no capacity,
+so a start can fail when its family is stocked out; then delete it and create it again, which
+falls back to n2. On `c4d-standard-16`, provisioning a fresh VM takes about a minute and a release
+build into an empty target dir about 13 minutes, nearly all of it the single-threaded fat-LTO step.
+
+A **runner** is a throwaway VM of the family a binary was built for, on the build VM's image,
+which carries `gcloud`. A run needs nothing else installed:
+
+```
+gcloud compute instances create combiner-runner --zone us-central1-a --machine-type c4-standard-16 \
+  --image-family debian-12 --image-project debian-cloud --boot-disk-type hyperdisk-balanced \
+  --scopes cloud-platform
+gcloud compute ssh combiner-runner --zone us-central1-a
+# on the runner:
+gcloud storage cp gs://hail-pschultz/combiner-bench/bin/COMMIT/c4/release/datafusion-sandbox .
+chmod +x datafusion-sandbox
+SPLIT_POINTS=$(./datafusion-sandbox balance-split-points \
+  gs://hail-pschultz/combiner-bench/datasets/vortices_chr22_nomindp/s=HG00187 --intervals 16)
+./datafusion-sandbox combine-refs gs://hail-pschultz/combiner-bench/datasets/vortices_chr22_nomindp \
+  --formulation interval-merge --split-points "$SPLIT_POINTS" \
+  --probe --write gs://hail-pschultz/scratch/CAMPAIGN/RUN_ID \
+  --metrics gs://hail-pschultz/combiner-bench/runs/CAMPAIGN --run-id RUN_ID
+# back on your machine:
+gcloud compute instances delete combiner-runner --zone us-central1-a
+gcloud storage rsync -r gs://hail-pschultz/combiner-bench/runs/CAMPAIGN data/CAMPAIGN
+```
+
+On the first runner of each new family, also check that the family's computed CPU features are
+really there. `gce.py verify` asks rustc for them, so it needs a minimal stable toolchain and the
+script from the commit the binary was built from:
+
+```
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+. ~/.cargo/env
+curl -sSfO https://raw.githubusercontent.com/hail-is/datafusion-sandbox/COMMIT/python/src/hailtools/gce.py
+python3 gce.py verify c4
+```
+
+Families can be out of stock in every `us-central1` zone at once: c4d was, both 16 and 8 vCPUs,
+when this was first run. Try each zone, then fall back to another family.
+
+The binary leaves out DataFusion's `compression` feature: under fat LTO with any AVX-512
+target-cpu, its bzip2 crashes LLVM. See
+[#222](https://github.com/hail-is/datafusion-sandbox/issues/222).
+
 ### Alternate allocator (snmalloc)
 
 DataFusion

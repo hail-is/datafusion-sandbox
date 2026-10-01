@@ -310,3 +310,26 @@ _Avoid_: compression codec (too narrow for Vortex), encoding (ambiguous without 
 The number of worker threads given to both of a pipeline's runtimes, defaulting to available
 parallelism. Independent of the session's target-partition setting.
 _Avoid_: parallelism, cores, degree of parallelism
+
+### Benchmark infrastructure
+
+**Instance family**:
+The GCE machine family a published binary targets, such as `c4d`. It fixes the binary's
+`target-cpu`, so a binary built for one family is not run on another.
+_Avoid_: machine type (names a size within a family), platform
+
+**Build VM**:
+The long-lived GCE instance that compiles published binaries. It holds nothing that cannot be
+rebuilt, and never a result.
+_Avoid_: dev box, builder
+
+**Runner**:
+A throwaway GCE instance that runs combiner runs from a published binary and holds nothing once
+it is deleted.
+_Avoid_: worker, bench VM
+
+**Published binary**:
+A combiner binary built once for one commit, instance family and profile, and stored where every
+runner can fetch it. It is never overwritten, so its commit, family and profile name exactly one
+build.
+_Avoid_: artifact, build
