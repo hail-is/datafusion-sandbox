@@ -32,7 +32,7 @@ use crate::{
     pipeline::{self, PipelineOptions},
     run_metrics::FormulationRecord,
     sink,
-    stored::dataset::Dataset,
+    stored::dataset::{Dataset, InputTable},
     tests::{
         plan_shape::PlanShape,
         support::{grouped_merge, hostile_config, interval_merge},
@@ -139,33 +139,24 @@ fn the_allele_combiner_rejects_a_dataset_with_a_multi_sample_input_table() {
     }
 }
 
-/// Over a dataset of every kind of input table, each reference formulation merges each input
-/// table as one ordered partition, and grouped-merge forms its groups from input tables.
-#[test]
-fn reference_formulations_merge_each_input_table_of_a_mixed_dataset_as_one_partition() {
-    for format in FORMATS {
-        for representation in REPRESENTATIONS {
-            let dataset = mixed_dataset(format, representation);
-            for formulation in &formulations()[..2] {
-                let plan = physical_plan(formulation, &dataset);
-                PlanShape::of(&plan).assert_merge_tree(&expected_groups(
-                    formulation,
-                    fixture::MIXED_INPUT_TABLES.len(),
-                ));
-            }
-        }
-    }
-}
-
+/// Over every shared dataset, each formulation merges each input table as one ordered partition,
+/// grouped-merge forms its groups from input tables, and the draining sink requires the
+/// formulation's ordering.
 #[test]
 fn formulations_keep_their_plan_shape_under_a_hostile_session() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let dataset = dataset(format, representation);
-            for formulation in &formulations() {
-                let plan = physical_plan(formulation, &dataset);
-                PlanShape::of(&plan)
-                    .assert_merge_tree(&expected_groups(formulation, SAMPLES.len()));
+            for dataset in shared_datasets(format, representation) {
+                for formulation in &formulations_over(&dataset) {
+                    let (plan, ordering) =
+                        drained_plan_and_ordering(formulation, &dataset, hostile_config(8), None);
+                    let shape = PlanShape::of(&plan);
+                    shape.assert_merge_tree(&expected_groups(
+                        formulation,
+                        dataset.input_tables.len(),
+                    ));
+                    shape.assert_ends_in_sink_requiring(&ordering);
+                }
             }
         }
     }
@@ -177,14 +168,18 @@ fn formulations_keep_their_plan_shape_under_a_hostile_session() {
 fn formulations_keep_their_plan_shape_through_the_file_sink() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let dataset = dataset(format, representation);
-            for formulation in &formulations() {
-                let (plan, ordering) =
-                    file_sink_plan(formulation, &dataset, hostile_config(8), None);
-                let shape = PlanShape::of(&plan);
-                assert!(plan.is::<DataSinkExec>(), "{shape}");
-                shape.assert_merge_tree(&expected_groups(formulation, SAMPLES.len()));
-                shape.assert_ends_in_sink_requiring(&ordering);
+            for dataset in shared_datasets(format, representation) {
+                for formulation in &formulations_over(&dataset) {
+                    let (plan, ordering) =
+                        file_sink_plan(formulation, &dataset, hostile_config(8), None);
+                    let shape = PlanShape::of(&plan);
+                    assert!(plan.is::<DataSinkExec>(), "{shape}");
+                    shape.assert_merge_tree(&expected_groups(
+                        formulation,
+                        dataset.input_tables.len(),
+                    ));
+                    shape.assert_ends_in_sink_requiring(&ordering);
+                }
             }
         }
     }
@@ -194,12 +189,13 @@ fn formulations_keep_their_plan_shape_through_the_file_sink() {
 fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let dataset = dataset(format, representation);
-            for formulation in &formulations() {
-                let single_target = physical_plan_with_target(formulation, &dataset, 1);
-                let eight_targets = physical_plan_with_target(formulation, &dataset, 8);
-                PlanShape::of(&single_target).assert_no_sorts();
-                PlanShape::of(&eight_targets).assert_no_sorts();
+            for dataset in shared_datasets(format, representation) {
+                for formulation in &formulations_over(&dataset) {
+                    let single_target = physical_plan_with_target(formulation, &dataset, 1);
+                    let eight_targets = physical_plan_with_target(formulation, &dataset, 8);
+                    PlanShape::of(&single_target).assert_no_sorts();
+                    PlanShape::of(&eight_targets).assert_no_sorts();
+                }
             }
         }
     }
@@ -259,20 +255,19 @@ fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorti
     }
 }
 
+/// Restricting a shared dataset to its last two input tables merges two inputs. Over the mixed
+/// dataset those are one of each kind, the multi-sample one still one input.
 #[test]
 fn restricting_the_input_tables_changes_input_count_for_every_formulation() {
-    let requested = INPUT_TABLES[..2]
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let mut dataset = dataset(format, representation);
-            dataset.dataset = dataset.dataset.restrict_to(&requested).unwrap();
-            for formulation in &formulations() {
-                let plan = physical_plan(formulation, &dataset);
-                PlanShape::of(&plan)
-                    .assert_merge_tree(&expected_groups(formulation, requested.len()));
+            for dataset in shared_datasets(format, representation) {
+                let formulations = formulations_over(&dataset);
+                let dataset = dataset.restricted_to_last(2);
+                for formulation in &formulations {
+                    let plan = physical_plan(formulation, &dataset);
+                    PlanShape::of(&plan).assert_merge_tree(&expected_groups(formulation, 2));
+                }
             }
         }
     }
@@ -297,10 +292,63 @@ fn expected_groups(formulation: &Formulation, n_input_tables: usize) -> Vec<usiz
     }
 }
 
+/// The reference combiner's formulations among the shared list.
+fn reference_formulations() -> [Formulation; 2] {
+    let [union, grouped_merge, _] = formulations();
+    [union, grouped_merge]
+}
+
+/// The shared formulations that plan over `dataset`: every one, or only the reference combiner's
+/// if the dataset holds a multi-sample input table, which the allele combiner rejects.
+fn formulations_over(dataset: &FixtureDataset) -> Vec<Formulation> {
+    if dataset
+        .dataset
+        .input_tables()
+        .iter()
+        .any(InputTable::is_multi_sample)
+    {
+        reference_formulations().to_vec()
+    } else {
+        formulations().to_vec()
+    }
+}
+
 struct FixtureDataset {
     fixture: &'static Arc<fixture::DatasetFixture>,
     dataset: Dataset,
     format: FixtureFormat,
+    /// The names of the dataset's input tables, in name order, as the fixture inventory lists
+    /// them rather than as discovery finds them.
+    input_tables: &'static [&'static str],
+}
+
+impl FixtureDataset {
+    /// This dataset restricted to its last `n` input tables. The last two of the mixed dataset are
+    /// a multi-sample table and a single-sample one.
+    fn restricted_to_last(self, n: usize) -> Self {
+        let input_tables = &self.input_tables[self.input_tables.len().checked_sub(n).unwrap()..];
+        let requested = input_tables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        Self {
+            dataset: self.dataset.restrict_to(&requested).unwrap(),
+            input_tables,
+            ..self
+        }
+    }
+}
+
+/// The shared dataset fixtures the loops run over: one of single-sample input tables only, and
+/// the mixed one.
+fn shared_datasets(
+    format: FixtureFormat,
+    representation: LocusRepresentation,
+) -> [FixtureDataset; 2] {
+    [
+        dataset(format, representation),
+        mixed_dataset(format, representation),
+    ]
 }
 
 fn dataset(format: FixtureFormat, representation: LocusRepresentation) -> FixtureDataset {
@@ -315,6 +363,7 @@ fn dataset(format: FixtureFormat, representation: LocusRepresentation) -> Fixtur
 fn mixed_dataset(format: FixtureFormat, representation: LocusRepresentation) -> FixtureDataset {
     discovered(
         fixture::mixed_dataset_fixture(format, representation),
+        fixture::MIXED_INPUT_TABLES,
         format,
         Formulation::CombineAllelesUnion.required_ordering(),
     )
@@ -327,6 +376,7 @@ fn dataset_with_ordering(
 ) -> FixtureDataset {
     discovered(
         fixture::dataset_fixture(format, representation),
+        INPUT_TABLES,
         format,
         ordering,
     )
@@ -334,6 +384,7 @@ fn dataset_with_ordering(
 
 fn discovered(
     fixture: &'static Arc<fixture::DatasetFixture>,
+    input_tables: &'static [&'static str],
     format: FixtureFormat,
     ordering: LocusOrdering,
 ) -> FixtureDataset {
@@ -351,6 +402,7 @@ fn discovered(
         fixture,
         dataset,
         format,
+        input_tables,
     }
 }
 
@@ -432,13 +484,25 @@ fn drained_plan(
     config: SessionConfig,
     limit: Option<usize>,
 ) -> Arc<dyn ExecutionPlan> {
+    drained_plan_and_ordering(formulation, dataset, config, limit).0
+}
+
+/// [`drained_plan`] with the ordering carried by the frame, so the sink requirement can be checked
+/// against it.
+fn drained_plan_and_ordering(
+    formulation: &Formulation,
+    dataset: &FixtureDataset,
+    config: SessionConfig,
+    limit: Option<usize>,
+) -> (Arc<dyn ExecutionPlan>, StoredOrdering) {
     block_on(async {
         let (_, ordered) = planned(formulation, dataset, config).await.unwrap();
         let ordered = match limit {
             Some(limit) => ordered.limit(limit).unwrap(),
             None => ordered,
         };
-        sink_plan(ordered).await.unwrap()
+        let ordering = ordered.ordering.clone();
+        (sink_plan(ordered).await.unwrap(), ordering)
     })
 }
 

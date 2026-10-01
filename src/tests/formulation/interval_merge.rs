@@ -5,7 +5,8 @@
 
 use super::{
     FORMATS, FixtureDataset, REPRESENTATIONS, collected_batches, dataset, drained_plan,
-    file_sink_plan, mixed_dataset, output_format, output_path, planned,
+    drained_plan_and_ordering, file_sink_plan, mixed_dataset, output_format, output_path, planned,
+    shared_datasets,
 };
 use crate::fixture::{self, FixtureFormat, Row, SAMPLES};
 use crate::formulation::Formulation;
@@ -66,65 +67,82 @@ fn requires_the_reference_combiners_ordering_and_writes_a_file_per_partition() {
 }
 
 /// Through the partitioned file sink, the plan is the sink over a union of one merge per
-/// interval, each merge over every sample's scan, with the sink keeping one partition per
-/// interval: no coalesce, sort, repartition, or filter operator anywhere, in either format and
-/// representation, under the shared session and the hostile one. The sink requires the
-/// formulation's ordering in the dataset's representation.
+/// interval, each merge over every input table's scan, with the sink keeping one partition per
+/// interval: no coalesce, sort, repartition, or filter operator anywhere, over every shared
+/// dataset in either format and representation, under the shared session and the hostile one.
+/// The sink requires the formulation's ordering in the dataset's representation.
 #[test]
 fn writes_through_a_partitioned_sink_over_one_merge_per_interval() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let dataset = dataset(format, representation);
-            for hostile in [false, true] {
-                let context = format!("{format:?} {representation:?} hostile={hostile}");
-                let config = if hostile {
-                    hostile_config(8)
-                } else {
-                    pipeline::session_config()
-                };
-                let (plan, ordering) =
-                    file_sink_plan(&interval_merge(THREE_INTERVALS), &dataset, config, None);
-                let shape = PlanShape::of(&plan);
+            for dataset in shared_datasets(format, representation) {
+                for hostile in [false, true] {
+                    let context = format!(
+                        "{format:?} {representation:?} {:?} hostile={hostile}",
+                        dataset.input_tables
+                    );
+                    let config = if hostile {
+                        hostile_config(8)
+                    } else {
+                        pipeline::session_config()
+                    };
+                    let (plan, ordering) =
+                        file_sink_plan(&interval_merge(THREE_INTERVALS), &dataset, config, None);
+                    let shape = PlanShape::of(&plan);
 
-                shape.assert_ends_in_sink_requiring(&ordering);
-                let sink_nodes = shape.nodes_of::<PartitionedSinkExec>();
-                assert_eq!(sink_nodes.len(), 1, "{context}:\n{shape}");
-                let sink_exec = sink_nodes[0]
-                    .downcast_ref::<PartitionedSinkExec>()
-                    .expect("nodes_of returned a node of another type");
-                assert_eq!(
-                    plan.output_partitioning().partition_count(),
-                    3,
-                    "{context}:\n{shape}"
-                );
-                assert_eq!(sink_exec.partition_sinks().len(), 3, "{context}:\n{shape}");
-                shape.assert_one_merge_per_interval(3, SAMPLES.len(), representation);
-                let unions = shape.nodes_of::<UnionExec>();
-                let outer_union = unions
-                    .first()
-                    .expect("the interval plan contains a union of intervals");
-                assert!(
-                    Arc::ptr_eq(plan.children()[0], outer_union),
-                    "{context}: expected the union of intervals directly beneath the sink:\n{shape}"
-                );
-                assert!(
-                    shape.nodes_of::<CoalescePartitionsExec>().is_empty(),
-                    "{context}: expected no coalesce beneath the partitioned sink:\n{shape}"
-                );
+                    shape.assert_ends_in_sink_requiring(&ordering);
+                    let sink_nodes = shape.nodes_of::<PartitionedSinkExec>();
+                    assert_eq!(sink_nodes.len(), 1, "{context}:\n{shape}");
+                    let sink_exec = sink_nodes[0]
+                        .downcast_ref::<PartitionedSinkExec>()
+                        .expect("nodes_of returned a node of another type");
+                    assert_eq!(
+                        plan.output_partitioning().partition_count(),
+                        3,
+                        "{context}:\n{shape}"
+                    );
+                    assert_eq!(sink_exec.partition_sinks().len(), 3, "{context}:\n{shape}");
+                    shape.assert_one_merge_per_interval(
+                        3,
+                        dataset.input_tables.len(),
+                        representation,
+                    );
+                    let unions = shape.nodes_of::<UnionExec>();
+                    let outer_union = unions
+                        .first()
+                        .expect("the interval plan contains a union of intervals");
+                    assert!(
+                        Arc::ptr_eq(plan.children()[0], outer_union),
+                        "{context}: expected the union of intervals directly beneath the sink:\n{shape}"
+                    );
+                    assert!(
+                        shape.nodes_of::<CoalescePartitionsExec>().is_empty(),
+                        "{context}: expected no coalesce beneath the partitioned sink:\n{shape}"
+                    );
+                }
             }
         }
     }
 }
 
 /// Over a dataset of every kind of input table, each interval's merge is over one scan per input
-/// table, and each scan prunes its table's files by the interval. The multi-sample file `g0` is
-/// one file spanning every interval. The multi-sample directory `g1` holds the single-sample
-/// table's files with their sample stored, so the two are pruned alike, to fewer than all four
-/// files in every interval.
+/// table, and each scan keeps only its table's files whose ordering statistics overlap the
+/// interval. The multi-sample file `g0` is one file spanning every interval, so every interval
+/// keeps it. The multi-sample directory `g1` and the single-sample table hold files d, c, b and a,
+/// pruned alike to the files written out per representation.
 #[test]
 fn prunes_each_input_table_of_a_mixed_dataset_to_the_files_of_each_interval() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
+            // The files of `g1` and of a single-sample table whose statistics overlap each of
+            // `THREE_INTERVALS`. File c holds chr01:2 and chr01:3, b holds chr01:4 and chr02:1,
+            // and a starts at chr02:2. Packed statistics bound b by its first and last locus.
+            // Contig and position statistics bound it column by column, contig chr01 to chr02
+            // and position 1 to 4, which admits a locus in every interval.
+            let expected_stems: [&[&str]; 3] = match representation {
+                LocusRepresentation::Packed => [&["d", "c"], &["c", "b"], &["a"]],
+                LocusRepresentation::ContigPosition => [&["d", "c", "b"], &["c", "b"], &["b", "a"]],
+            };
             let context = format!("{format:?} {representation:?}");
             let dataset = mixed_dataset(format, representation);
             let plan = drained_plan(
@@ -143,7 +161,7 @@ fn prunes_each_input_table_of_a_mixed_dataset_to_the_files_of_each_interval() {
             let scanned_files = shape.scanned_files();
             let scans = scanned_files.chunks(fixture::MIXED_INPUT_TABLES.len());
             assert_eq!(scans.len(), 3, "{context}:\n{shape}");
-            for scans in scans {
+            for (scans, expected_stems) in scans.zip(expected_stems) {
                 let [g0, g1, single_sample] = scans else {
                     panic!("{context}: one scan per input table:\n{shape}");
                 };
@@ -156,33 +174,66 @@ fn prunes_each_input_table_of_a_mixed_dataset_to_the_files_of_each_interval() {
                 );
                 assert_eq!(
                     fixture::file_stems(g1),
-                    fixture::file_stems(single_sample),
+                    expected_stems,
                     "{context}:\n{shape}"
                 );
-                assert!(g1.len() < 4, "{context}: no file pruned:\n{shape}");
+                assert_eq!(
+                    fixture::file_stems(single_sample),
+                    expected_stems,
+                    "{context}:\n{shape}"
+                );
             }
         }
     }
 }
 
 /// Through a single-partition sink, the interval merges feed one more merge above their union,
-/// so collect and explain see global locus order without a sort.
+/// so collect and explain see global locus order without a sort, over every shared dataset. The
+/// draining sink requires the formulation's ordering.
 #[test]
 fn a_single_partition_sink_merges_the_interval_merges() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let dataset = dataset(format, representation);
-            for hostile in [false, true] {
-                let config = if hostile {
-                    hostile_config(8)
-                } else {
-                    pipeline::session_config()
-                };
-                let plan = drained_plan(&interval_merge(THREE_INTERVALS), &dataset, config, None);
-                let shape = PlanShape::of(&plan);
+            for dataset in shared_datasets(format, representation) {
+                for hostile in [false, true] {
+                    let config = if hostile {
+                        hostile_config(8)
+                    } else {
+                        pipeline::session_config()
+                    };
+                    let (plan, ordering) = drained_plan_and_ordering(
+                        &interval_merge(THREE_INTERVALS),
+                        &dataset,
+                        config,
+                        None,
+                    );
+                    let shape = PlanShape::of(&plan);
 
-                shape.assert_merge_tree(&[SAMPLES.len(); 3]);
-                shape.assert_one_merge_per_interval(3, SAMPLES.len(), representation);
+                    let n_input_tables = dataset.input_tables.len();
+                    shape.assert_merge_tree(&[n_input_tables; 3]);
+                    shape.assert_one_merge_per_interval(3, n_input_tables, representation);
+                    shape.assert_ends_in_sink_requiring(&ordering);
+                }
+            }
+        }
+    }
+}
+
+/// Restricting a shared dataset to its last two input tables leaves each interval's merge over
+/// two scans.
+#[test]
+fn restricting_the_input_tables_changes_each_intervals_input_count() {
+    for format in FORMATS {
+        for representation in REPRESENTATIONS {
+            for dataset in shared_datasets(format, representation) {
+                let dataset = dataset.restricted_to_last(2);
+                let plan = drained_plan(
+                    &interval_merge(THREE_INTERVALS),
+                    &dataset,
+                    hostile_config(8),
+                    None,
+                );
+                PlanShape::of(&plan).assert_one_merge_per_interval(3, 2, representation);
             }
         }
     }
