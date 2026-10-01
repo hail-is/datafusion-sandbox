@@ -8,7 +8,7 @@ use crate::{
 };
 
 use datafusion::{
-    arrow::datatypes::{DataType, Field, SchemaRef},
+    arrow::datatypes::{DataType, Field, FieldRef, SchemaRef},
     common::{DataFusionError, ScalarValue},
     datasource::listing::{
         ListingTableUrl, PartitionedFile,
@@ -20,6 +20,13 @@ use datafusion::{
 };
 use futures_util::StreamExt;
 use std::{collections::BTreeSet, sync::Arc};
+
+/// The column every row read from a dataset carries its sample id in: a non-null `s` of the view
+/// string type, which is how both formats read a stored string column back.
+#[must_use]
+pub fn sample_field() -> FieldRef {
+    Arc::new(Field::new("s", DataType::Utf8View, false))
+}
 
 /// One locus-sorted table a dataset holds, named by its entry in the dataset root, with the
 /// samples it covers.
@@ -262,8 +269,8 @@ impl Dataset {
                 .expand(self.locus_representation)
                 .sort_expressions(),
             Some(AttachedScalar {
-                field: Arc::new(Field::new("s", DataType::Utf8, false)),
-                value: ScalarValue::Utf8(Some(sample.clone())),
+                field: sample_field(),
+                value: ScalarValue::Utf8View(Some(sample.clone())),
             }),
         );
         ctx.read_table(Arc::new(table))

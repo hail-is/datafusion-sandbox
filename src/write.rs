@@ -111,36 +111,8 @@ impl WriteTarget {
     /// Returns a configuration error naming the output path if something exists there, or an
     /// error if the path is on a store the session does not serve or the store cannot answer.
     pub async fn vacant(self, ctx: &SessionContext) -> Result<VacantTarget> {
-        let url = ListingTableUrl::parse(&self.output_path)?;
-        let store = ctx.runtime_env().object_store(&url)?;
-        let location = url.prefix().clone();
-        // Collecting the components drops the trailing slash the URL gives a directory, through
-        // which the file system would follow a link.
-        let local = match url.get_url().to_file_path() {
-            Ok(path) if url.get_url().scheme() == "file" => Some(path.components().collect()),
-            Ok(_) | Err(()) => None,
-        };
-        // The store follows links, so a local link is caught before it looks: a write would
-        // replace a dangling link, which the removal would then delete, and would write through a
-        // link to a directory.
-        let is_symlink = |path: &PathBuf| {
-            std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
-        };
-        let existing = if local.as_ref().is_some_and(is_symlink) {
-            Some("a symlink")
-        } else {
-            match store.head(&location).await {
-                Ok(_) => Some("a file"),
-                Err(object_store::Error::NotFound { .. }) => {
-                    objects_under(store.as_ref(), &location)
-                        .await?
-                        .first()
-                        .map(|_| "a non-empty directory")
-                }
-                Err(error) => return Err(error.into()),
-            }
-        };
-        if let Some(existing) = existing {
+        let output = OutputLocation::resolve(ctx, &self.output_path)?;
+        if let Some(existing) = output.existing().await? {
             return Err(DataFusionError::Configuration(format!(
                 "the probe's output path '{}' already exists as {existing}; a probe removes everything under its output path, so it writes only where nothing is",
                 self.output_path
@@ -150,14 +122,89 @@ impl WriteTarget {
         // its output path too, unless it was there, empty, before the probe. The layout is the
         // planned frame's and unknown here, so a single file's path is kept too: once its file is
         // deleted, nothing is there, which the removal counts as removed.
-        let directory = local.filter(|path| !path.is_dir());
+        let directory = output.local.filter(|path| !path.is_dir());
         Ok(VacantTarget {
             target: self,
-            store_url: url.object_store(),
-            store,
-            location,
+            store_url: output.url.object_store(),
+            store: output.store,
+            location: output.location,
             directory,
         })
+    }
+
+    /// Checks that nothing exists at the output path, as [`WriteTarget::vacant`] does, before a
+    /// write lays out one file per partition there. Such a write replaces only the files it
+    /// writes, so where something exists it could leave an earlier write's files among its own,
+    /// which its sample annotation table would then mark complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error naming the output path if something exists there, or an
+    /// error if the path is on a store the session does not serve or the store cannot answer.
+    pub async fn check_vacant_directory(&self, ctx: &SessionContext) -> Result<()> {
+        if let Some(existing) = OutputLocation::resolve(ctx, &self.output_path)?
+            .existing()
+            .await?
+        {
+            return Err(DataFusionError::Configuration(format!(
+                "the output path '{}' already exists as {existing}; a write of one file per partition replaces only the files it writes, so it writes only where nothing is",
+                self.output_path
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// An output path resolved against a session: its URL, store and location there, and the local
+/// path it names, if any.
+struct OutputLocation {
+    url: ListingTableUrl,
+    store: Arc<dyn ObjectStore>,
+    location: ObjectPath,
+    local: Option<PathBuf>,
+}
+
+impl OutputLocation {
+    fn resolve(ctx: &SessionContext, output_path: &str) -> Result<Self> {
+        let url = ListingTableUrl::parse(output_path)?;
+        let store = ctx.runtime_env().object_store(&url)?;
+        let location = url.prefix().clone();
+        // Collecting the components drops the trailing slash the URL gives a directory, through
+        // which the file system would follow a link.
+        let local = match url.get_url().to_file_path() {
+            Ok(path) if url.get_url().scheme() == "file" => Some(path.components().collect()),
+            Ok(_) | Err(()) => None,
+        };
+        Ok(Self {
+            url,
+            store,
+            location,
+            local,
+        })
+    }
+
+    /// What exists at the location, if anything: a file, a non-empty directory, or on a local
+    /// path a symlink.
+    async fn existing(&self) -> Result<Option<&'static str>> {
+        // The store follows links, so a local link is caught before it looks: a write would
+        // replace a dangling link, which a probe's removal would then delete, and would write
+        // through a link to a directory.
+        let is_symlink = |path: &PathBuf| {
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        };
+        if self.local.as_ref().is_some_and(is_symlink) {
+            return Ok(Some("a symlink"));
+        }
+        match self.store.head(&self.location).await {
+            Ok(_) => Ok(Some("a file")),
+            Err(object_store::Error::NotFound { .. }) => {
+                Ok(objects_under(self.store.as_ref(), &self.location)
+                    .await?
+                    .first()
+                    .map(|_| "a non-empty directory"))
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 }
 

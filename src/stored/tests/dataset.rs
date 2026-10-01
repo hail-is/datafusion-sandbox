@@ -31,7 +31,7 @@ use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 use std::sync::Arc;
 
 #[test]
-fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
+fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached_as_a_view_string() {
     for format in [
         fixture::FixtureFormat::Parquet,
         fixture::FixtureFormat::Vortex,
@@ -58,6 +58,9 @@ fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
                         .await?
                         .restrict_to(std::slice::from_ref(&input_table))?;
                         let df = dataset.read(&ctx).await?;
+                        let sample = df.schema().field_with_unqualified_name("s")?;
+                        assert_eq!(sample.data_type(), &DataType::Utf8View);
+                        assert!(!sample.is_nullable());
                         let mut columns = LocusOrdering::locus_then_alleles()
                             .expand(representation)
                             .column_names();

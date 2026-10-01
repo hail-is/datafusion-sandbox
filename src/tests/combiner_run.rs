@@ -6,6 +6,7 @@ use crate::{
     formulation::Formulation,
     locus::{Locus, LocusOrdering, LocusRepresentation},
     metrics_directory::MetricsDirectory,
+    ordered_frame::OutputLayout,
     pipeline::{self, PipelineOptions},
     tests::{
         plan_shape::exec_names,
@@ -19,6 +20,7 @@ use crate::{
 use datafusion::{
     arrow::{
         array::{ArrayRef, Int32Array},
+        datatypes::DataType,
         record_batch::RecordBatch,
         util::display::array_value_to_string,
     },
@@ -1050,6 +1052,349 @@ fn a_failed_data_write_records_nothing() {
     assert!(metrics.is_none(), "{metrics:?}");
 }
 
+/// A write of every reference formulation, in either format and so in both output layouts, leaves
+/// a sample annotation table beside its output after the data, and lays the data out as before.
+/// The table holds the run's sample set, the samples of the requested input tables in sorted
+/// order, in a non-null view string `s`. The data's stored `s` reads back as the same view type,
+/// as the dataset's attached `s` is, so a later run can union the two.
+#[test]
+fn every_reference_write_leaves_a_sample_annotation_table_beside_its_output() {
+    let input = memory_dataset();
+    for formulation in [
+        Formulation::CombineRefsUnion,
+        grouped_merge(2),
+        interval_merge("1:3,2:2"),
+    ] {
+        for (output_format, input_format) in [
+            (OutputFormat::PARQUET, InputFormat::PARQUET),
+            (OutputFormat::VORTEX, InputFormat::VORTEX),
+        ] {
+            let extension = output_format.extension();
+            let store = MemoryStore::new("annotated");
+            let url = store.url().as_str().to_string();
+            // The output path, the path that reads its data back, and the data's locations.
+            let (output_path, data_path, mut expected) = match formulation.output_layout() {
+                OutputLayout::SingleFile => (
+                    format!("{url}out/g.{extension}"),
+                    format!("{url}out/g.{extension}"),
+                    vec![format!("out/g.{extension}")],
+                ),
+                OutputLayout::FilePerPartition => (
+                    format!("{url}out/g"),
+                    format!("{url}out/g/"),
+                    (0..3)
+                        .map(|index| output_format.partition_file_path("out/g", index, 3))
+                        .collect(),
+                ),
+            };
+            expected.push(format!("out/g.samples.{extension}"));
+            expected.sort();
+            let table_path = format!("{url}out/g.samples.{extension}");
+            let description = format!("{formulation} {extension}");
+            let mut run = whole_dataset_run(
+                &input,
+                formulation.clone(),
+                Action::Write(WriteTarget {
+                    output_path,
+                    output_format,
+                }),
+            );
+            run.inputs.input_tables = Some(vec![
+                INPUT_TABLES[3].to_string(),
+                INPUT_TABLES[1].to_string(),
+            ]);
+            let listed = store.clone();
+
+            let (outcome, locations, table, data) =
+                on_memory_stores(&input, &store, move |ctx| async move {
+                    let outcome = run.execute_in(&ctx).await?;
+                    let locations = listed.locations_under("out").await;
+                    let table = fixture::read_file(&ctx, &table_path, &input_format, None).await?;
+                    let data = fixture::read_file(&ctx, &data_path, &input_format, None).await?;
+                    Ok((outcome, locations, table, data))
+                });
+
+            assert!(
+                matches!(outcome, Outcome::RowsWritten(16)),
+                "{description}: {outcome:?}"
+            );
+            assert_eq!(
+                locations,
+                expected
+                    .into_iter()
+                    .map(ObjectPath::from)
+                    .collect::<Vec<_>>(),
+                "{description}"
+            );
+            let schema = table[0].schema();
+            assert_eq!(schema.fields().len(), 1, "{description}: {schema:?}");
+            let field = schema.field_with_name("s").unwrap();
+            assert_eq!(field.data_type(), &DataType::Utf8View, "{description}");
+            assert!(!field.is_nullable(), "{description}");
+            assert_eq!(
+                samples_of(&table),
+                [SAMPLES[1], SAMPLES[3]],
+                "{description}"
+            );
+            assert_eq!(
+                data[0].schema().field_with_name("s").unwrap().data_type(),
+                &DataType::Utf8View,
+                "{description}"
+            );
+        }
+    }
+}
+
+/// A measured write leaves a sample annotation table beside its output too, holding the whole
+/// sample set when the run does not narrow it.
+#[test]
+fn a_measured_write_leaves_a_sample_annotation_table_beside_its_output() {
+    let input = memory_dataset();
+    let store = MemoryStore::new("measured");
+    let url = store.url().as_str().to_string();
+    let metrics_directory = MetricsDirectory::new(&format!("{url}metrics"));
+    let run = measured_run(
+        &input,
+        format!("{url}out/combined.parquet"),
+        metrics_directory,
+        "run-a",
+    );
+    let listed = store.clone();
+
+    let (locations, table) = on_memory_stores(&input, &store, move |ctx| async move {
+        run.execute_in(&ctx).await?;
+        let table = fixture::read_file(
+            &ctx,
+            &format!("{url}out/combined.samples.parquet"),
+            &InputFormat::PARQUET,
+            None,
+        )
+        .await?;
+        Ok((listed.locations_under("out").await, table))
+    });
+
+    assert_eq!(
+        locations,
+        [
+            ObjectPath::from("out/combined.parquet"),
+            ObjectPath::from("out/combined.samples.parquet"),
+        ]
+    );
+    assert_eq!(samples_of(&table), SAMPLES);
+}
+
+/// A write or a measured write whose data write fails leaves no sample annotation table, though
+/// the store here fails only the data file's write and would take the table's. Nor does it leave
+/// the table an earlier write left there, which would mark the partial data complete.
+#[test]
+fn a_failed_data_write_leaves_no_sample_annotation_table() {
+    let input = memory_dataset();
+    let store = MemoryStore::failing_writes_under("failed-data", "out/combined.parquet");
+    let url = store.url().as_str().to_string();
+    let output_path = format!("{url}out/combined.parquet");
+    let measured = measured_run(
+        &input,
+        output_path.clone(),
+        MetricsDirectory::new(&format!("{url}metrics")),
+        "run-a",
+    );
+    let plain = whole_dataset_run(
+        &input,
+        grouped_merge(2),
+        Action::Write(WriteTarget {
+            output_path,
+            output_format: OutputFormat::PARQUET,
+        }),
+    );
+
+    for run in [plain, measured] {
+        let description = format!("{:?}", run.action);
+        let listed = store.clone();
+        let (failed, locations) = on_memory_stores(&input, &store, move |ctx| async move {
+            listed
+                .store()
+                .put(
+                    &ObjectPath::from("out/combined.samples.parquet"),
+                    "earlier".into(),
+                )
+                .await?;
+            let failed = run.execute_in(&ctx).await;
+            Ok((failed, listed.locations_under("out").await))
+        });
+
+        let message = failed.unwrap_err().to_string();
+        assert!(
+            message.contains("out/combined.parquet"),
+            "{description}: {message}"
+        );
+        assert!(locations.is_empty(), "{description}: {locations:?}");
+    }
+}
+
+/// A write of one file per partition that executes, plain, measured or analyzed, refuses an output
+/// path where a file or a non-empty directory exists, before writing or recording anything:
+/// writing there could leave an earlier write's files among its own, which its sample annotation
+/// table would mark complete. An unanalyzed explain writes nothing and goes ahead, and a write of
+/// one file still replaces the file at its path.
+#[test]
+fn a_write_of_one_file_per_partition_refuses_an_occupied_output_path() {
+    let write: WriteRunOn = |input, target, _| {
+        whole_dataset_run(input, interval_merge("1:3,2:2"), Action::Write(target))
+    };
+    let measured: WriteRunOn = |input, target, url| {
+        let action = Action::MeasuredWrite {
+            write: target,
+            metrics_directory: MetricsDirectory::new(&format!("{url}metrics")),
+            run_id: "run-a".to_string(),
+        };
+        whole_dataset_run(input, interval_merge("1:3,2:2"), action)
+    };
+    let analyzed: WriteRunOn = |input, target, _| {
+        let write = Some(target);
+        whole_dataset_run(
+            input,
+            interval_merge("1:3,2:2"),
+            Action::ExplainAnalyze { write },
+        )
+    };
+    let explained: WriteRunOn = |input, target, _| {
+        let write = Some(target);
+        whole_dataset_run(input, interval_merge("1:3,2:2"), Action::Explain { write })
+    };
+    let single_file: WriteRunOn =
+        |input, target, _| whole_dataset_run(input, grouped_merge(2), Action::Write(target));
+
+    let input = memory_dataset();
+    for (name, run_on, output, existing, refused) in [
+        (
+            "write",
+            write,
+            "out/g",
+            "out/g/1.parquet",
+            Some("a non-empty directory"),
+        ),
+        ("file", write, "out/g", "out/g", Some("a file")),
+        (
+            "measured",
+            measured,
+            "out/g",
+            "out/g/1.parquet",
+            Some("a non-empty directory"),
+        ),
+        (
+            "analyzed",
+            analyzed,
+            "out/g",
+            "out/g/1.parquet",
+            Some("a non-empty directory"),
+        ),
+        ("explained", explained, "out/g", "out/g/1.parquet", None),
+        (
+            "single-file",
+            single_file,
+            "out/g.parquet",
+            "out/g.parquet",
+            None,
+        ),
+    ] {
+        let store = MemoryStore::new(name);
+        let url = store.url().as_str().to_string();
+        let output_path = format!("{url}{output}");
+        let target = WriteTarget {
+            output_path: output_path.clone(),
+            output_format: OutputFormat::PARQUET,
+        };
+        let run = run_on(&input, target, &url);
+        let listed = store.clone();
+
+        let (result, locations) = on_memory_stores(&input, &store, move |ctx| async move {
+            listed
+                .store()
+                .put(&ObjectPath::from(existing), "earlier".into())
+                .await?;
+            let result = run.execute_in(&ctx).await;
+            Ok((result, listed.locations_under("").await))
+        });
+
+        match refused {
+            Some(existing_as) => {
+                let message = result.unwrap_err().to_string();
+                assert!(
+                    message.contains(&format!(
+                        "the output path '{output_path}' already exists as {existing_as}"
+                    )),
+                    "{name}: {message}"
+                );
+                assert_eq!(locations, [ObjectPath::from(existing)], "{name}");
+            }
+            None => {
+                result.unwrap();
+            }
+        }
+    }
+}
+
+/// Builds a run of `input` that writes to the given target, on a store at the given URL.
+type WriteRunOn = fn(&fixture::DatasetFixture, WriteTarget, &str) -> CombinerRun;
+
+/// Only a write or a measured write of the reference combiner leaves a sample annotation table. A
+/// written probe removes its output and leaves no table beside it, an explain analyze performs the
+/// write without one, and the allele combiner's write writes only its data. Each still removes the
+/// table an earlier write left beside its output path, which would otherwise mark data it did not
+/// write as complete. A collect names no output path, so it has nowhere to leave one.
+#[test]
+fn a_probe_an_explain_analyze_or_an_allele_write_leaves_no_sample_annotation_table() {
+    let probe: WriteRunOn = |input, target, url| {
+        written_probe_run(
+            input,
+            target,
+            MetricsDirectory::new(&format!("{url}metrics")),
+            "run-a",
+            ProbeSettings::default(),
+        )
+    };
+    let explain_analyze: WriteRunOn = |input, target, _| {
+        let write = Some(target);
+        whole_dataset_run(input, grouped_merge(2), Action::ExplainAnalyze { write })
+    };
+    let allele_write: WriteRunOn = |input, target, _| {
+        whole_dataset_run(
+            input,
+            Formulation::CombineAllelesUnion,
+            Action::Write(target),
+        )
+    };
+
+    let input = memory_dataset();
+    for (name, run_on, expected) in [
+        ("probed", probe, None),
+        ("explained", explain_analyze, Some("out/explained.parquet")),
+        ("alleles", allele_write, Some("out/alleles.parquet")),
+    ] {
+        let store = MemoryStore::new(name);
+        let url = store.url().as_str().to_string();
+        let target = WriteTarget {
+            output_path: format!("{url}out/{name}.parquet"),
+            output_format: OutputFormat::PARQUET,
+        };
+        let run = run_on(&input, target, &url);
+        let listed = store.clone();
+
+        let locations = on_memory_stores(&input, &store, move |ctx| async move {
+            let earlier = ObjectPath::from(format!("out/{name}.samples.parquet"));
+            listed.store().put(&earlier, "earlier".into()).await?;
+            run.execute_in(&ctx).await?;
+            Ok(listed.locations_under("out").await)
+        });
+
+        let expected = expected
+            .map(ObjectPath::from)
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(locations, expected, "{name}");
+    }
+}
+
 /// A drained probe of every formulation runs the plan to its end, which the fixture reaches in
 /// well under the maximum duration, so it completes at the first partition end, having received
 /// every row. It records all three tables: a run record whose probe columns say so and whose
@@ -1776,6 +2121,33 @@ fn measured_run(
         },
         threads: NonZeroUsize::MIN,
     }
+}
+
+/// A run of `formulation` over the whole of `input` that performs `action`.
+fn whole_dataset_run(
+    input: &fixture::DatasetFixture,
+    formulation: Formulation,
+    action: Action,
+) -> CombinerRun {
+    CombinerRun {
+        inputs: PlanInputs {
+            formulation,
+            input_path: input.table_path().to_string(),
+            input_format: input.input_format(),
+            input_tables: None,
+            row_limit: None,
+        },
+        action,
+        threads: NonZeroUsize::MIN,
+    }
+}
+
+/// The sample ids in the `s` column of `batches`, in row order.
+fn samples_of(batches: &[RecordBatch]) -> Vec<String> {
+    batches
+        .iter()
+        .flat_map(|batch| fixture::string_column(batch, "s"))
+        .collect()
 }
 
 /// Runs `pipeline` on a session serving the dataset fixture `input` and `store`.

@@ -79,20 +79,28 @@ representation flag.
 The reference combiner has three formulations. `--formulation union` merges every input table's scan
 in one merge. `--formulation grouped-merge` merges each input group, a contiguous run of input
 tables in name order, first and then merges the groups, so the merges run on several cores;
-`--groups N` sets the number of input groups and defaults to the thread count.
-`--formulation interval-merge` merges every input table within each locus interval
-and writes one file per interval, so the merges run on several cores and the write does too;
-`--split-points` names the loci that cut the ordering into intervals, as comma-separated
-`contig:position` with the contig ordinal, strictly increasing, and is required. Its `--write`
-path names a directory, which gets one file per interval named by index, `0.vortex`, `1.vortex`,
-and so on; a path with an extension is rejected. A `--limit` makes no promise about the plan's
-shape, and a limited write of this formulation puts one file in the directory. `--explain` and
+`--groups N` sets the number of input groups and defaults to the thread count. `--formulation
+interval-merge` merges every input table within each locus interval and writes one file per
+interval, so the merges run on several cores and the write does too; `--split-points` names the loci
+that cut the ordering into intervals, as comma-separated `contig:position` with the contig ordinal,
+strictly increasing, and is required. Its `--write` path names a directory, which gets one file per
+interval named by index, `0.vortex`, `1.vortex`, and so on; a path with an extension is rejected.
+Such a write replaces only the files it writes, so a write, measured or analyzed, refuses a path
+where a file or a non-empty directory already exists, rather than leave an earlier write's files
+among its own; remove an earlier output first. A `--limit` makes no promise about the plan's shape,
+and a limited write of this formulation puts one file in the directory. `--explain` and
 `--explain-analyze` may be combined with `--write` to render or analyze the plan of the write
 itself.
 ```
 cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --groups 7 --explain --write data/combined.vortex
 cargo run -r -- combine-refs data/vortices_chr22 --formulation interval-merge --split-points 22:20000000,22:30000000,22:40000000 --write data/combined
 ```
+A reference combiner write, measured or not, ends by writing a sample annotation table beside its
+output, in the output format: `data/combined.samples.vortex` beside the file `data/combined.vortex`
+or the directory `data/combined`. It holds the run's sample ids, sorted, in one `s` column, which
+makes the output a complete multi-sample input table for a later run. A write that fails leaves
+none, and a probe, a collect, an explain or an allele combiner write writes none. See
+[ADR 0018](docs/adr/0018-declare-a-multi-sample-input-tables-samples-in-a-sample-annotation-table.md).
 A measured write, `--write PATH --metrics DIR`, writes the output as a plain write does and records
 the run under `DIR`: one row of resolved settings, wall-clock timings, and peak resident set size
 in `DIR/runs/<id>.parquet`, and one row per plan operator per partition of DataFusion's metrics in
