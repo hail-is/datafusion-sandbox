@@ -8,10 +8,10 @@ pub fn required_ordering() -> LocusOrdering {
     LocusOrdering::locus()
 }
 
-/// Builds the union-of-per-sample-scans formulation.
+/// Builds the union-of-input-table-scans formulation.
 ///
 /// Many `DataSourceExec`s feed a `UnionExec`, which feeds a
-/// `SortPreservingMergeExec` with one partition per input sample.
+/// `SortPreservingMergeExec` with one partition per input table.
 pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<(DataFrame, StoredOrdering)> {
     let ordering = dataset.query_ordering(&required_ordering())?;
     let frame = dataset.read(ctx).await?.sort(ordering.sort_expressions())?;

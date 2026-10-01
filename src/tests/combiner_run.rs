@@ -24,7 +24,7 @@ use datafusion::{
         record_batch::RecordBatch,
         util::display::array_value_to_string,
     },
-    error::Result,
+    error::{DataFusionError, Result},
     parquet::file::reader::{FileReader, SerializedFileReader},
     prelude::SessionContext,
 };
@@ -1143,6 +1143,178 @@ fn every_reference_write_leaves_a_sample_annotation_table_beside_its_output() {
             );
         }
     }
+}
+
+/// A hierarchy of combiner runs returns what one run over every sample returns. Two first-level
+/// runs over disjoint input tables write into one directory, one a single file and the other a
+/// directory of one file per interval, and a held-back sample joins them there as a single-sample
+/// input table. A second-level run over that directory, with each reference formulation, collects
+/// the same loci in the same order as the one-level union, and the same rows.
+#[test]
+fn a_second_level_run_over_first_level_outputs_returns_the_one_level_unions_rows() {
+    for (fixture_format, output_format) in [
+        (FixtureFormat::Parquet, OutputFormat::PARQUET),
+        (FixtureFormat::Vortex, OutputFormat::VORTEX),
+    ] {
+        let input = Arc::clone(fixture::dataset_fixture(
+            fixture_format,
+            LocusRepresentation::ContigPosition,
+        ));
+        let store = MemoryStore::new("hierarchy");
+        let url = store.url().as_str().to_string();
+        let extension = output_format.extension().to_string();
+        let first_level = [
+            (
+                grouped_merge(2),
+                format!("{url}dataset/g0.{extension}"),
+                &INPUT_TABLES[..2],
+            ),
+            (
+                interval_merge("1:3,2:2"),
+                format!("{url}dataset/g1"),
+                &INPUT_TABLES[2..3],
+            ),
+        ]
+        .map(|(formulation, output_path, input_tables)| {
+            let mut run = whole_dataset_run(
+                &input,
+                formulation,
+                Action::Write(WriteTarget {
+                    output_path,
+                    output_format: output_format.clone(),
+                }),
+            );
+            run.inputs.input_tables = Some(input_tables.iter().map(ToString::to_string).collect());
+            run
+        });
+        let mut one_level =
+            whole_dataset_run(&input, Formulation::CombineRefsUnion, Action::Collect);
+        one_level.inputs.input_tables = None;
+        let second_level = [
+            Formulation::CombineRefsUnion,
+            grouped_merge(2),
+            interval_merge("1:3,2:2"),
+        ]
+        .map(|formulation| {
+            let mut run = whole_dataset_run(&input, formulation, Action::Collect);
+            run.inputs.input_path = format!("{url}dataset/");
+            run
+        });
+        let held_back = SAMPLES[3];
+        let copied = store.clone();
+        let source = Arc::clone(&input);
+
+        let (one_level, second_level) = on_memory_stores(&input, &store, move |ctx| async move {
+            for run in first_level {
+                run.execute_in(&ctx).await?;
+            }
+            for file in source.sample_files(held_back).await {
+                let bytes = source.store().get(&file.location).await?.bytes().await?;
+                let filename = file.location.filename().unwrap();
+                copied
+                    .store()
+                    .put(
+                        &ObjectPath::from(format!("dataset/s={held_back}/{filename}")),
+                        bytes.into(),
+                    )
+                    .await?;
+            }
+            let one_level = expect_batches(one_level.execute_in(&ctx).await?);
+            let mut collected = Vec::new();
+            for run in second_level {
+                let formulation = run.inputs.formulation.to_string();
+                collected.push((formulation, expect_batches(run.execute_in(&ctx).await?)));
+            }
+            Ok((one_level, collected))
+        });
+
+        let mut expected = rows_of(&one_level);
+        assert_eq!(expected.len(), 32, "{extension}");
+        for (formulation, batches) in second_level {
+            let context = format!("{extension} {formulation}");
+            let mut rows = rows_of(&batches);
+            assert_eq!(loci_of(&rows), loci_of(&expected), "{context}");
+            rows.sort();
+            expected.sort();
+            assert_eq!(rows, expected, "{context}");
+        }
+    }
+}
+
+/// A first-level write that replaces an earlier write's output, and whose data write fails, leaves
+/// that earlier data without its sample annotation table. A second-level run over the directory
+/// it was written into rejects that entry with a plan error naming it, rather than read it as an
+/// input table.
+#[test]
+fn a_second_level_run_rejects_a_first_level_output_whose_data_write_failed() {
+    let input = memory_dataset();
+    let store = MemoryStore::new("failed-first-level");
+    let failing = store.with_failing_writes_under("dataset/g0.vortex");
+    let url = store.url().as_str().to_string();
+    let first_level = || {
+        [
+            (
+                grouped_merge(2),
+                format!("{url}dataset/g0.vortex"),
+                &INPUT_TABLES[..2],
+            ),
+            (
+                interval_merge("1:3,2:2"),
+                format!("{url}dataset/g1"),
+                &INPUT_TABLES[2..],
+            ),
+        ]
+        .map(|(formulation, output_path, input_tables)| {
+            let mut run = whole_dataset_run(
+                &input,
+                formulation,
+                Action::Write(WriteTarget {
+                    output_path,
+                    output_format: OutputFormat::VORTEX,
+                }),
+            );
+            run.inputs.input_tables = Some(input_tables.iter().map(ToString::to_string).collect());
+            run
+        })
+    };
+    let [g0, g1] = first_level();
+    let [rewritten_g0, _] = first_level();
+    let mut second_level =
+        whole_dataset_run(&input, Formulation::CombineRefsUnion, Action::Collect);
+    second_level.inputs.input_path = format!("{url}dataset/");
+
+    on_memory_stores(&input, &store, move |ctx| async move {
+        g0.execute_in(&ctx).await?;
+        g1.execute_in(&ctx).await
+    });
+    let listed = store;
+    let (failed, locations, rejected) = on_memory_stores(&input, &failing, move |ctx| async move {
+        let failed = rewritten_g0.execute_in(&ctx).await.map(|_| ());
+        let locations = listed.locations_under("dataset").await;
+        Ok((failed, locations, second_level.execute_in(&ctx).await))
+    });
+
+    let message = failed.unwrap_err().to_string();
+    assert!(message.contains("dataset/g0.vortex"), "{message}");
+    assert_eq!(
+        locations,
+        [
+            "dataset/g0.vortex",
+            "dataset/g1.samples.vortex",
+            "dataset/g1/0.vortex",
+            "dataset/g1/1.vortex",
+            "dataset/g1/2.vortex",
+        ]
+        .map(ObjectPath::from),
+    );
+    let error = rejected.unwrap_err();
+    assert!(matches!(error, DataFusionError::Plan(_)), "{error:?}");
+    let message = error.to_string();
+    assert!(
+        message.contains(&format!("{url}dataset/g0.vortex")),
+        "{message}"
+    );
+    assert!(message.contains("no sample annotation table"), "{message}");
 }
 
 /// A measured write leaves a sample annotation table beside its output too, holding the whole

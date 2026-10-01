@@ -2,27 +2,24 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, Result, memory::InMemory, path::Path,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, Result, path::Path,
 };
-use std::fmt;
+use std::{fmt, sync::Arc};
 
-/// An in-memory store that fails every write under one prefix and serves everything else.
+/// A store that fails every write under one prefix and serves everything else.
 ///
 /// It delegates every operation to its inner store, except a put, a multipart upload, or a copy
 /// whose destination is under the prefix, which fails before anything is stored. Prefixes match whole path
 /// segments, as listing does.
 #[derive(Debug)]
 pub(super) struct FailingWrites {
-    inner: InMemory,
+    inner: Arc<dyn ObjectStore>,
     prefix: Path,
 }
 
 impl FailingWrites {
-    pub(super) fn new(prefix: Path) -> Self {
-        Self {
-            inner: InMemory::new(),
-            prefix,
-        }
+    pub(super) fn new(inner: Arc<dyn ObjectStore>, prefix: Path) -> Self {
+        Self { inner, prefix }
     }
 
     fn check(&self, location: &Path) -> Result<()> {
