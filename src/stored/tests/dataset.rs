@@ -15,7 +15,7 @@ use crate::{
 };
 use datafusion::{
     arrow::{
-        array::{Int32Array, StringArray},
+        array::{ArrayRef, Int32Array, Int64Array, StringArray},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
         util::display::array_value_to_string,
@@ -797,20 +797,239 @@ fn rejects_a_sample_in_two_input_tables_naming_both() {
 }
 
 #[test]
-fn rejects_a_sample_annotation_table_without_a_sample_column_naming_it() {
-    let store = fixture::MemoryStore::new("annotation-without-s");
+fn rejects_a_sample_in_two_discovered_input_tables_naming_both() {
+    for (first, second, names) in [
+        ("s=sample-a/a.vortex", "g0.vortex", "'g0' and 's=sample-a'"),
+        (
+            "s=sample-a/a.vortex",
+            "g0/a.vortex",
+            "'g0' and 's=sample-a'",
+        ),
+        ("g1.vortex", "g0/a.vortex", "'g0' and 'g1'"),
+    ] {
+        let mut entries = vec![
+            (first, vec![contig(), position(), sample("sample-a")]),
+            (second, vec![contig(), position(), sample("sample-a")]),
+            ("g0.samples.vortex", vec![sample("sample-a")]),
+        ];
+        if first.starts_with("g1") {
+            entries.push(("g1.samples.vortex", vec![sample("sample-a")]));
+        }
+        let error = discover_written(entries)
+            .expect_err("a sample in two input tables must fail discovery");
+
+        assert!(
+            matches!(error, DataFusionError::Plan(_)),
+            "{second}: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!(
+                "sample 'sample-a' is in both input tables {names}"
+            )),
+            "{first}, {second}: unexpected error: {message}"
+        );
+    }
+}
+
+#[test]
+fn rejects_an_input_table_whose_columns_differ_from_the_datasets_naming_it() {
+    let differences: [(Vec<(Field, ArrayRef)>, &str); 3] = [
+        (vec![], "it lacks the dataset's [MIN_DP: Int32]"),
+        (
+            vec![(
+                Field::new("MIN_DP", DataType::Int64, false),
+                Arc::new(Int64Array::from(vec![1])),
+            )],
+            "it lacks the dataset's [MIN_DP: Int32] and the dataset lacks its [MIN_DP: Int64]",
+        ),
+        (
+            vec![(
+                Field::new("MIN_DP", DataType::Int32, true),
+                Arc::new(Int32Array::from(vec![1])),
+            )],
+            "it lacks the dataset's [MIN_DP: Int32] and the dataset lacks its [MIN_DP: Int32?]",
+        ),
+    ];
+    for (data, annotation, table) in [
+        ("s=sample-b/a.vortex", None, "s=sample-b"),
+        ("g0.vortex", Some("g0.samples.vortex"), "g0"),
+        ("g0/a.vortex", Some("g0.samples.vortex"), "g0"),
+    ] {
+        for (columns, difference) in differences.clone() {
+            let mut entries = vec![
+                ("s=sample-a/a.vortex", vec![contig(), position(), min_dp()]),
+                (
+                    data,
+                    [contig(), position(), sample("sample-b")]
+                        .into_iter()
+                        .chain(columns)
+                        .collect(),
+                ),
+            ];
+            entries.extend(annotation.map(|path| (path, vec![sample("sample-b")])));
+            let error = discover_written(entries)
+                .expect_err("an input table without the dataset's columns must fail discovery");
+
+            assert!(matches!(error, DataFusionError::Plan(_)), "{data}: {error}");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("input table '{table}'")) && message.contains(difference),
+                "{data}: unexpected error: {message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_a_multi_sample_input_table_without_a_non_null_string_sample_column_naming_it() {
+    for data in ["g0.vortex", "g0/a.vortex"] {
+        for (case, invalid_sample) in invalid_sample_columns() {
+            let error = discover_written(vec![
+                ("s=sample-a/a.vortex", vec![contig(), position()]),
+                (
+                    data,
+                    [contig(), position()]
+                        .into_iter()
+                        .chain(invalid_sample)
+                        .collect(),
+                ),
+                ("g0.samples.vortex", vec![sample("sample-b")]),
+            ])
+            .expect_err("a multi-sample input table without a valid `s` must fail discovery");
+
+            assert!(
+                matches!(error, DataFusionError::Plan(_)),
+                "{data}, {case}: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("input table 'g0'") && message.contains("'s'"),
+                "{data}, {case}: unexpected error: {message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_a_sample_annotation_table_without_a_non_null_string_sample_column_naming_it() {
+    for data in ["g0.vortex", "g0/a.vortex"] {
+        for (case, invalid_sample) in invalid_sample_columns() {
+            let note = (
+                Field::new("note", DataType::Utf8, false),
+                Arc::new(StringArray::from(vec!["an ignored column"])) as ArrayRef,
+            );
+            let error = discover_written(vec![
+                ("s=sample-a/a.vortex", vec![contig(), position()]),
+                (data, vec![contig(), position(), sample("sample-b")]),
+                (
+                    "g0.samples.vortex",
+                    invalid_sample.into_iter().chain([note]).collect(),
+                ),
+            ])
+            .expect_err("an annotation table without a valid `s` must fail discovery");
+
+            assert!(
+                matches!(error, DataFusionError::Plan(_)),
+                "{data}, {case}: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("samples/g0.samples.vortex") && message.contains("'s'"),
+                "{data}, {case}: unexpected error: {message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn discovers_input_tables_with_the_datasets_columns_and_a_non_null_string_sample_column() {
+    for data in ["g0.vortex", "g0/a.vortex"] {
+        let dataset = discover_written(vec![
+            ("s=sample-a/a.vortex", vec![contig(), position(), min_dp()]),
+            (
+                data,
+                vec![contig(), position(), sample("sample-b"), min_dp()],
+            ),
+            ("g0.samples.vortex", vec![sample("sample-b")]),
+        ])
+        .unwrap();
+
+        assert_eq!(dataset.sample_set(), ["sample-a", "sample-b"], "{data}");
+    }
+}
+
+fn contig() -> (Field, ArrayRef) {
+    (
+        Field::new("contig", DataType::Utf8, false),
+        Arc::new(StringArray::from(vec!["chr1"])),
+    )
+}
+
+fn position() -> (Field, ArrayRef) {
+    (
+        Field::new("position", DataType::Int32, false),
+        Arc::new(Int32Array::from(vec![1])),
+    )
+}
+
+fn min_dp() -> (Field, ArrayRef) {
+    (
+        Field::new("MIN_DP", DataType::Int32, false),
+        Arc::new(Int32Array::from(vec![1])),
+    )
+}
+
+fn sample(id: &str) -> (Field, ArrayRef) {
+    (
+        Field::new("s", DataType::Utf8, false),
+        Arc::new(StringArray::from(vec![id])),
+    )
+}
+
+/// Each way `s` can fail to be a non-null string, named, as the columns that stand in for it.
+fn invalid_sample_columns() -> [(&'static str, Vec<(Field, ArrayRef)>); 3] {
+    [
+        ("missing", vec![]),
+        (
+            "nullable",
+            vec![(
+                Field::new("s", DataType::Utf8, true),
+                Arc::new(StringArray::from(vec!["sample-b"])),
+            )],
+        ),
+        (
+            "not a string",
+            vec![(
+                Field::new("s", DataType::Int32, false),
+                Arc::new(Int32Array::from(vec![1])),
+            )],
+        ),
+    ]
+}
+
+/// Discovers, with an inferred schema, the Vortex dataset under `samples/` of an in-memory store
+/// holding a one-row file at each of `entries`, a path under `samples/` and the file's columns.
+fn discover_written(entries: Vec<(&str, Vec<(Field, ArrayRef)>)>) -> Result<Dataset> {
+    let store = fixture::MemoryStore::new("written-entries");
     let root = format!("{}samples", store.url().as_str());
-    let error = pipeline::run(
+    let entries = entries
+        .into_iter()
+        .map(|(path, columns)| {
+            let (fields, arrays) = columns.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
+            Ok((
+                format!("{root}/{path}"),
+                RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    pipeline::run(
         move |ctx| {
             store.register(&ctx);
             async move {
-                for (path, column) in [("g0.vortex", "s"), ("g0.samples.vortex", "sample")] {
-                    let batch = RecordBatch::try_new(
-                        Arc::new(Schema::new(vec![Field::new(column, DataType::Utf8, false)])),
-                        vec![Arc::new(StringArray::from(vec!["sample-a"]))],
-                    )?;
+                for (output_path, batch) in entries {
                     WriteTarget {
-                        output_path: format!("{root}/{path}"),
+                        output_path,
                         output_format: OutputFormat::VORTEX,
                     }
                     .write_unordered(ctx.read_batch(batch)?)
@@ -821,23 +1040,13 @@ fn rejects_a_sample_annotation_table_without_a_sample_column_naming_it() {
                     ListingTableUrl::parse(&root)?,
                     InputFormat::VORTEX,
                     LocusOrdering::locus(),
-                    Some(contig_position_schema(false)),
+                    None,
                 )
                 .await
-                .map(|_| ())
             }
         },
         PipelineOptions::single_threaded(),
     )
-    .expect_err("an annotation table without `s` must fail discovery");
-
-    assert!(matches!(error, DataFusionError::Plan(_)));
-    let message = error.to_string();
-    assert!(
-        message.contains("samples/g0.samples.vortex"),
-        "unexpected error: {message}"
-    );
-    assert!(message.contains("'s'"), "unexpected error: {message}");
 }
 
 fn discover_mixed(format: fixture::FixtureFormat, representation: LocusRepresentation) -> Dataset {
