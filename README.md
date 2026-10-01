@@ -72,11 +72,13 @@ dataset directory, either local or in object storage, whose entries are input ta
 An input table is named by its entry without the format's extension: `s=HG123456`, `g0`, `g1`. Any
 other entry is an error, and so is a multi-sample input table without its sample annotation table,
 which is what a failed write leaves, or an annotation table without its data. No sample may be in
-two input tables. A run merges every input table unless `--inputs` names some, as comma-separated
-names such as `--inputs s=HG00308,g0`; an unknown name is an error. So to combine in two levels,
-write the first-level runs into one directory, perhaps with some samples held back there as
-`s=<id>/` tables, and run the second level over that directory. The allele combiner reads only
-single-sample input tables.
+two input tables. Every input table must have the same columns, ignoring `s`, and a multi-sample
+input table's `s`, in its data and in its annotation table, must be a non-null string. A run
+merges every input table unless `--inputs` names some, as comma-separated names such as
+`--inputs s=HG00308,g0`; an unknown name is an error. So to combine in two levels, write the
+first-level runs into one directory, perhaps with some samples held back there as `s=<id>/`
+tables, and run the second level over that directory. The allele combiner reads only single-sample
+input tables.
 ```
 cargo run -r -- combine-refs data/vortices_chr22        # -> data/combined.vortex
 cargo run -r -- combine-alleles data/vortices_alleles_chr22  # -> data/combined_alleles.vortex

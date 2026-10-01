@@ -22,7 +22,8 @@ use datafusion::{
     logical_expr::{LogicalPlan, logical_plan::Union},
     prelude::*,
 };
-use object_store::{ListResult, ObjectMeta};
+use futures::{StreamExt, TryStreamExt, stream};
+use object_store::ListResult;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -196,7 +197,9 @@ impl Dataset {
     /// Returns an error if the object store cannot be read, a root entry is none of the above,
     /// multi-sample data has no sample annotation table or one has no data, an annotation table
     /// cannot be read or has no non-null string `s` column, the dataset has no samples or input
-    /// files, schema inference fails, or the resolved dataset is invalid.
+    /// files, schema inference fails, an input table's columns differ from the inferred schema's
+    /// ignoring `s`, a multi-sample input table has no non-null string `s` column, or the
+    /// resolved dataset is invalid. A pinned `schema` is trusted, and no data file is read.
     pub async fn discover(
         ctx: &SessionContext,
         table_path: ListingTableUrl,
@@ -228,28 +231,9 @@ impl Dataset {
                 <ListingTableUrl as AsRef<str>>::as_ref(&table_path)
             )));
         }
-        let schema = if let Some(schema) = schema {
-            schema
-        } else {
-            let format = input_format.read_format();
-            let input_file = first_input_file(ctx, &table_path, &input_format, &input_tables)
-                .await?
-                .ok_or_else(|| {
-                    DataFusionError::Plan(format!(
-                        "no input files found in dataset '{}'",
-                        table_path.as_str()
-                    ))
-                })?;
-            let schema = format
-                .infer_schema(&ctx.state(), &store, &[input_file])
-                .await?;
-            let fields = schema
-                .fields()
-                .iter()
-                .filter(|field| field.name() != sample_field().name())
-                .cloned()
-                .collect::<Vec<_>>();
-            Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+        let schema = match schema {
+            Some(schema) => schema,
+            None => infer_schema(ctx, &table_path, &input_format, &input_tables).await?,
         };
         Self::new(
             table_path,
@@ -552,21 +536,153 @@ fn input_table_path(
     ListingTableUrl::parse(format!("{}{entry}", table_path.as_str()))
 }
 
-/// The first nonempty file of the first input table, in name order, that has one.
-async fn first_input_file(
+/// The dataset schema, without `s`, inferred from the first nonempty file of the first input table
+/// that has one. Each input table's first nonempty file must have the same columns, ignoring `s`,
+/// and a multi-sample input table's must also have a non-null string `s`.
+async fn infer_schema(
     ctx: &SessionContext,
     table_path: &ListingTableUrl,
     input_format: &InputFormat,
     input_tables: &[InputTable],
-) -> Result<Option<ObjectMeta>> {
-    for input_table in input_tables {
-        let path = input_table_path(table_path, input_format, input_table)?;
-        let files = list_files_by_extension(ctx, &path, input_format).await?;
-        if let Some(file) = first_nonempty_file(&files) {
-            return Ok(Some(file.clone()));
+) -> Result<SchemaRef> {
+    let state = ctx.state();
+    let concurrency = state
+        .config_options()
+        .execution
+        .meta_fetch_concurrency
+        .get();
+    // Collected before buffering: mapping a stream of borrowed tables to futures defeats the
+    // compiler's proof that the callers' futures are `Send`.
+    let lookups = input_tables
+        .iter()
+        .map(|input_table| first_file_schema(ctx, table_path, input_format, input_table))
+        .collect::<Vec<_>>();
+    let file_schemas = stream::iter(lookups)
+        .buffered(concurrency)
+        .try_collect::<Vec<_>>()
+        .await?;
+    let file_schema = file_schemas.iter().flatten().next().ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "no input files found in dataset '{}'",
+            table_path.as_str()
+        ))
+    })?;
+    let fields = columns_without_sample(file_schema)
+        .cloned()
+        .collect::<Vec<_>>();
+    let schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        file_schema.metadata().clone(),
+    ));
+    for (input_table, file_schema) in input_tables.iter().zip(&file_schemas) {
+        let Some(file_schema) = file_schema else {
+            continue;
+        };
+        let invalid = |problem: String| {
+            DataFusionError::Plan(format!(
+                "input table '{}' of dataset '{}' {problem}",
+                input_table.name,
+                table_path.as_str()
+            ))
+        };
+        let lacking = unmatched_columns(&schema, file_schema);
+        let extra = unmatched_columns(file_schema, &schema);
+        if !lacking.is_empty() || !extra.is_empty() {
+            let differences = [
+                (lacking, "it lacks the dataset's"),
+                (extra, "the dataset lacks its"),
+            ]
+            .into_iter()
+            .filter(|(columns, _)| !columns.is_empty())
+            .map(|(columns, phrase)| format!("{phrase} [{}]", columns.join(", ")))
+            .collect::<Vec<_>>();
+            return Err(invalid(format!(
+                "has columns that differ from the dataset's, ignoring '{}': {}",
+                sample_field().name(),
+                differences.join(" and ")
+            )));
+        }
+        if input_table.kind != InputTableKind::SingleSample {
+            check_sample_column(file_schema).map_err(invalid)?;
         }
     }
-    Ok(None)
+    Ok(schema)
+}
+
+/// The schema of the first nonempty file of `input_table`, if it has one.
+async fn first_file_schema(
+    ctx: &SessionContext,
+    table_path: &ListingTableUrl,
+    input_format: &InputFormat,
+    input_table: &InputTable,
+) -> Result<Option<SchemaRef>> {
+    let path = input_table_path(table_path, input_format, input_table)?;
+    let files = list_files_by_extension(ctx, &path, input_format).await?;
+    let Some(file) = first_nonempty_file(&files) else {
+        return Ok(None);
+    };
+    let store = ctx.runtime_env().object_store(&path)?;
+    let schema = input_format
+        .read_format()
+        .infer_schema(&ctx.state(), &store, std::slice::from_ref(file))
+        .await?;
+    Ok(Some(schema))
+}
+
+/// The columns of `schema` other than `s`.
+fn columns_without_sample(schema: &Schema) -> impl Iterator<Item = &FieldRef> {
+    schema
+        .fields()
+        .iter()
+        .filter(|field| field.name() != sample_field().name())
+}
+
+/// The columns of `schema` other than `s` that `other` lacks, by name, type and nullability, each
+/// described as `name: type`, with `?` after a nullable type.
+fn unmatched_columns(schema: &Schema, other: &Schema) -> Vec<String> {
+    columns_without_sample(schema)
+        .filter(|field| {
+            other
+                .field_with_name(field.name())
+                .ok()
+                .is_none_or(|other| {
+                    other.data_type() != field.data_type()
+                        || other.is_nullable() != field.is_nullable()
+                })
+        })
+        .map(|field| {
+            let nullable = if field.is_nullable() { "?" } else { "" };
+            format!("{}: {}{nullable}", field.name(), field.data_type())
+        })
+        .collect()
+}
+
+/// Checks that `schema` has a non-null string `s`, describing the problem if not.
+fn check_sample_column(schema: &Schema) -> std::result::Result<(), String> {
+    let sample = sample_field();
+    let problem = match schema.field_with_name(sample.name()) {
+        Ok(field)
+            if matches!(
+                field.data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            ) && !field.is_nullable() =>
+        {
+            return Ok(());
+        }
+        Ok(field) if field.is_nullable() => {
+            format!("has a nullable column '{}'", sample.name())
+        }
+        Ok(field) => format!(
+            "has a column '{}' of type {}",
+            sample.name(),
+            field.data_type()
+        ),
+        Err(_) => format!("has no column '{}'", sample.name()),
+    };
+    Err(format!(
+        "{problem}; it needs a non-null string column '{}'",
+        sample.name()
+    ))
 }
 
 /// The sample set declared by the sample annotation table at `path`: its non-null string `s`
@@ -591,23 +707,9 @@ async fn read_sample_set(
         .file_schema
         .as_ref()
         .ok_or_else(|| invalid("has no schema"))?;
-    match schema.field_with_name(sample.name()) {
-        Ok(field)
-            if matches!(
-                field.data_type(),
-                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-            ) => {}
-        Ok(field) => {
-            return Err(invalid(&format!(
-                "has a column '{}' of type {}",
-                sample.name(),
-                field.data_type()
-            )));
-        }
-        Err(_) => {
-            return Err(invalid(&format!("has no column '{}'", sample.name())));
-        }
-    }
+    check_sample_column(schema).map_err(|problem| {
+        DataFusionError::Plan(format!("sample annotation table '{path}' {problem}"))
+    })?;
     let batches = ctx
         .read_table(Arc::new(ListingTable::try_new(config)?))?
         .select_columns(&[sample.name()])?
