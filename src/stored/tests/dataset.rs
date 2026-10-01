@@ -10,7 +10,7 @@ use crate::{
     format::{InputFormat, OutputFormat},
     locus::{Locus, LocusOrdering, LocusRepresentation},
     pipeline::{self, PipelineOptions},
-    stored::dataset::Dataset,
+    stored::dataset::{Dataset, InputTable},
     write::WriteTarget,
 };
 use datafusion::{
@@ -42,6 +42,7 @@ fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
         ] {
             let fixture = Arc::clone(fixture::dataset_fixture(format, representation));
             let sample_id = fixture::SAMPLES[0].to_string();
+            let input_table = fixture::INPUT_TABLES[0].to_string();
 
             pipeline::run(
                 move |ctx| {
@@ -55,7 +56,7 @@ fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached() {
                             None,
                         )
                         .await?
-                        .restrict_to(std::slice::from_ref(&sample_id))?;
+                        .restrict_to(std::slice::from_ref(&input_table))?;
                         let df = dataset.read(&ctx).await?;
                         let mut columns = LocusOrdering::locus_then_alleles()
                             .expand(representation)
@@ -169,8 +170,8 @@ fn filtering_the_attached_sample_column_composes_with_the_dataset_sample_set() {
                         )
                         .await?
                         .restrict_to(&[
-                            fixture::SAMPLES[0].to_string(),
-                            fixture::SAMPLES[1].to_string(),
+                            fixture::INPUT_TABLES[0].to_string(),
+                            fixture::INPUT_TABLES[1].to_string(),
                         ])?;
                         let mut plans = Vec::new();
                         for (sample, expected_rows, expected_scans) in [
@@ -247,7 +248,7 @@ fn rejects_a_resolved_schema_missing_a_required_ordering_column() {
         InputFormat::VORTEX,
         LocusOrdering::locus_then_alleles(),
         contig_position_schema(false),
-        vec!["sample-a".to_string()],
+        vec![InputTable::single_sample("sample-a")],
     )
     .expect_err("the resolved schema must contain every required ordering column");
 
@@ -255,6 +256,27 @@ fn rejects_a_resolved_schema_missing_a_required_ordering_column() {
     assert!(
         error.to_string().contains("alleles"),
         "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_two_input_tables_with_one_name() {
+    let error = Dataset::new(
+        ListingTableUrl::parse("memory:///samples").unwrap(),
+        InputFormat::VORTEX,
+        LocusOrdering::locus_then_alleles(),
+        contig_position_schema(true),
+        ["sample-b", "sample-a", "sample-b"]
+            .map(InputTable::single_sample)
+            .to_vec(),
+    )
+    .expect_err("a name identifies one entry in the dataset root");
+
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    assert_eq!(
+        error.to_string(),
+        "Error during planning: dataset 'memory:///samples/' holds more than one input table \
+         named 's=sample-b'"
     );
 }
 
@@ -387,6 +409,24 @@ fn discovers_the_dataset_sample_set_in_memory() {
 }
 
 #[test]
+fn discovers_one_single_sample_input_table_per_sample_directory_in_name_order() {
+    let dataset = block_on(discover_in_memory(&["sample-b", "sample-a"])).unwrap();
+
+    let input_tables = dataset
+        .input_tables()
+        .iter()
+        .map(|table| (table.name(), table.sample_set()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        input_tables,
+        [
+            ("s=sample-a", &["sample-a".to_string()][..]),
+            ("s=sample-b", &["sample-b".to_string()][..]),
+        ]
+    );
+}
+
+#[test]
 fn discovery_surfaces_a_locus_representation_error() {
     let schema = Arc::new(Schema::new(vec![Field::new(
         "locus",
@@ -416,37 +456,57 @@ fn rejects_a_dataset_with_no_samples_in_memory() {
 }
 
 #[test]
-fn narrows_the_dataset_sample_set() {
-    let dataset = dataset_from_data(&["sample-a", "sample-b"])
-        .restrict_to(&["sample-b".to_string()])
+fn narrows_the_dataset_to_the_named_input_tables() {
+    let dataset = dataset_from_data(&["sample-a", "sample-b", "sample-c"])
+        .restrict_to(&["s=sample-c".to_string(), "s=sample-a".to_string()])
         .unwrap();
 
-    assert_eq!(dataset.sample_set(), ["sample-b"]);
+    let names = dataset
+        .input_tables()
+        .iter()
+        .map(InputTable::name)
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["s=sample-a", "s=sample-c"]);
+    assert_eq!(dataset.sample_set(), ["sample-a", "sample-c"]);
 }
 
 #[test]
-fn rejects_an_empty_requested_sample_set() {
+fn rejects_an_empty_input_table_request() {
     let error = dataset_from_data(&["sample-a"])
         .restrict_to(&[])
-        .expect_err("a dataset must retain at least one sample");
+        .expect_err("a dataset must retain at least one input table");
 
     assert!(matches!(error, DataFusionError::Plan(_)));
     assert_eq!(
         error.to_string(),
-        "Error during planning: requested sample set contains no samples"
+        "Error during planning: no input tables requested"
     );
 }
 
 #[test]
-fn rejects_requested_samples_that_are_not_in_the_dataset() {
+fn rejects_requested_input_tables_that_are_not_in_the_dataset() {
     let error = dataset_from_data(&["sample-a"])
-        .restrict_to(&["missing-b".to_string(), "missing-a".to_string()])
-        .expect_err("unknown sample ids must fail");
+        .restrict_to(&["s=missing-b".to_string(), "s=missing-a".to_string()])
+        .expect_err("unknown input table names must fail");
 
     assert!(matches!(error, DataFusionError::Plan(_)));
-    let message = error.to_string();
-    assert!(message.contains("missing-a"), "unexpected error: {message}");
-    assert!(message.contains("missing-b"), "unexpected error: {message}");
+    assert_eq!(
+        error.to_string(),
+        "Error during planning: input tables not found in dataset: s=missing-a, s=missing-b"
+    );
+}
+
+#[test]
+fn rejects_a_sample_id_in_place_of_its_input_table_name() {
+    let error = dataset_from_data(&["sample-a"])
+        .restrict_to(&["sample-a".to_string()])
+        .expect_err("a sample id does not name an input table");
+
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    assert!(
+        error.to_string().contains("sample-a"),
+        "unexpected error: {error}"
+    );
 }
 
 fn dataset_from_data(sample_set: &[&str]) -> Dataset {
@@ -455,7 +515,11 @@ fn dataset_from_data(sample_set: &[&str]) -> Dataset {
         InputFormat::VORTEX,
         LocusOrdering::locus_then_alleles(),
         contig_position_schema(true),
-        sample_set.iter().map(ToString::to_string).collect(),
+        sample_set
+            .iter()
+            .copied()
+            .map(InputTable::single_sample)
+            .collect(),
     )
     .unwrap()
 }

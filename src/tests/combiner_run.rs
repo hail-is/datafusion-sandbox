@@ -36,7 +36,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use fixture::{FixtureFormat, MemoryStore, RecordedRun, SAMPLES};
+use fixture::{FixtureFormat, INPUT_TABLES, MemoryStore, RecordedRun, SAMPLES};
 
 #[test]
 fn renders_outcomes() {
@@ -774,6 +774,7 @@ fn a_measured_write_writes_the_output_and_its_run_record() {
         ("output_format", "parquet"),
         ("compression", "snappy"),
         ("threads", "1"),
+        ("input_tables", "3"),
         ("samples", "3"),
         ("output_path", measured.output_path.to_str().unwrap()),
         ("rows_written", "24"),
@@ -829,7 +830,7 @@ fn a_measured_write_records_the_operators_of_the_explained_plan() {
             Action::Explain {
                 write: Some(measured.write()),
             },
-            Some(three_samples()),
+            Some(three_input_tables()),
             None,
         )
         .unwrap(),
@@ -939,9 +940,9 @@ impl MeasuredGroupedMerge {
     }
 }
 
-/// The first three fixture samples, as a run's sample set.
-fn three_samples() -> Vec<String> {
-    SAMPLES[..3].iter().map(ToString::to_string).collect()
+/// The first three fixture input tables, as the names a run is narrowed to.
+fn three_input_tables() -> Vec<String> {
+    INPUT_TABLES[..3].iter().map(ToString::to_string).collect()
 }
 
 /// Runs a measured grouped-merge write of three samples of the contig-position Vortex fixture
@@ -962,7 +963,7 @@ fn measured_grouped_merge(dir: &Path, run_id: &str) -> MeasuredGroupedMerge {
             metrics_directory: measured.metrics_directory.clone(),
             run_id: run_id.to_string(),
         },
-        Some(three_samples()),
+        Some(three_input_tables()),
         None,
     )
     .unwrap();
@@ -1727,7 +1728,7 @@ fn probe_run(
             formulation: grouped_merge(2),
             input_path: input.table_path().to_string(),
             input_format: input.input_format(),
-            sample_set: None,
+            input_tables: None,
             row_limit: None,
         },
         action: Action::Probe {
@@ -1762,7 +1763,7 @@ fn measured_run(
             formulation: grouped_merge(2),
             input_path: input.table_path().to_string(),
             input_format: input.input_format(),
-            sample_set: None,
+            input_tables: None,
             row_limit: None,
         },
         action: Action::MeasuredWrite {
@@ -1849,7 +1850,7 @@ fn expect_plan(outcome: Outcome) -> String {
 }
 
 #[test]
-fn restricts_the_dataset_to_the_requested_sample_set() {
+fn restricts_the_dataset_to_the_requested_input_tables() {
     let dir = tempfile::tempdir().unwrap();
     let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
     let output_path = dir.path().join("restricted.vortex");
@@ -1862,7 +1863,7 @@ fn restricts_the_dataset_to_the_requested_sample_set() {
             output_path: output_path.to_str().unwrap().to_string(),
             output_format: OutputFormat::VORTEX,
         }),
-        Some(SAMPLES[..2].iter().map(ToString::to_string).collect()),
+        Some(INPUT_TABLES[..2].iter().map(ToString::to_string).collect()),
         None,
     )
     .unwrap();
@@ -1898,7 +1899,7 @@ fn reports_a_dataset_with_no_samples() {
 }
 
 #[test]
-fn reports_sample_ids_absent_from_the_dataset() {
+fn reports_input_tables_absent_from_the_dataset() {
     let input = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
 
     let err = run(
@@ -1906,14 +1907,14 @@ fn reports_sample_ids_absent_from_the_dataset() {
         input.table_path(),
         input.input_format(),
         Action::Collect,
-        Some(vec!["NOT_A_SAMPLE".to_string()]),
+        Some(vec!["s=NOT_A_SAMPLE".to_string()]),
         None,
     )
     .unwrap_err();
 
     assert_eq!(
         err.to_string(),
-        "Error during planning: samples not found in dataset: NOT_A_SAMPLE"
+        "Error during planning: input tables not found in dataset: s=NOT_A_SAMPLE"
     );
 }
 
@@ -1961,7 +1962,7 @@ fn run(
     input_path: &str,
     input_format: InputFormat,
     action: Action,
-    sample_set: Option<Vec<String>>,
+    input_tables: Option<Vec<String>>,
     row_limit: Option<usize>,
 ) -> Result<Outcome> {
     CombinerRun {
@@ -1969,7 +1970,7 @@ fn run(
             formulation,
             input_path: input_path.to_string(),
             input_format,
-            sample_set,
+            input_tables,
             row_limit,
         },
         action,

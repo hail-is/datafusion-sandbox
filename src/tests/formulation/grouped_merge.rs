@@ -1,5 +1,5 @@
 //! What is particular to the reference combiner's grouped-merge formulation: how the group count
-//! shapes the merge tree, and that merging by sample group returns the union formulation's rows.
+//! shapes the merge tree, and that merging by input group returns the union formulation's rows.
 //!
 //! The shared loops in the parent module already hold grouped-merge to the merge tree over two
 //! groups under a hostile session, with and without a filter.
@@ -95,7 +95,7 @@ fn a_row_limit_becomes_a_fetch_on_every_merge() {
     }
 }
 
-/// Merging by sample group changes the plan and nothing else: the same rows come back, in locus
+/// Merging by input group changes the plan and nothing else: the same rows come back, in locus
 /// order, in both formats and representations, whatever the group count.
 #[test]
 fn returns_the_union_formulations_rows_in_locus_order() {

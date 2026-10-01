@@ -2,19 +2,19 @@
 //!
 //! What matters about these plans is not what they return but how they get
 //! there: a sort-preserving merge over one partition per sample, or one per
-//! sample group with a merge per group beneath it, and no re-sort. A regression
+//! input group with a merge per group beneath it, and no re-sort. A regression
 //! from merging to re-sorting is invisible in the results and costs an order of
 //! magnitude in time, so it is asserted structurally here.
 //!
 //! Every plan here is observed through a sink, as every action runs it: the
-//! sink's ordering requirement is what holds a merge per sample group beneath
+//! sink's ordering requirement is what holds a merge per input group beneath
 //! the final merge, so a bare frame's physical plan is not the plan a run
 //! executes. See ADR 0014.
 //!
 //! The tests here build unfiltered plans of the single-file formulations.
 //! `filtered_plans` holds the same formulations under a caller's contig or
 //! locus-interval filter, `grouped_merge` holds what is particular to merging
-//! by sample group, and `interval_merge` holds the interval-merge formulation,
+//! by input group, and `interval_merge` holds the interval-merge formulation,
 //! whose plan has one scan per sample per locus interval and whose write ends
 //! in the partitioned sink rather than the file sink.
 
@@ -50,7 +50,7 @@ use datafusion::{
 
 use std::{num::NonZeroUsize, sync::Arc};
 
-use fixture::{FixtureFormat, SAMPLES, block_on};
+use fixture::{FixtureFormat, INPUT_TABLES, SAMPLES, block_on};
 
 /// The group count the shared loops run grouped-merge with: two groups over the fixture's four
 /// samples, so every group holds more than one sample and there is more than one group.
@@ -222,8 +222,8 @@ fn combine_alleles_union_vortex_merges_one_partition_per_sample_without_re_sorti
 }
 
 #[test]
-fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
-    let requested = SAMPLES[..2]
+fn restricting_the_input_tables_changes_input_count_for_every_formulation() {
+    let requested = INPUT_TABLES[..2]
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
@@ -240,18 +240,19 @@ fn restricting_the_sample_set_changes_input_count_for_every_formulation() {
     }
 }
 
-/// The sample groups a formulation's plan should merge over `n_samples`, as their sizes in
-/// sample order. Written out rather than computed, so the test cannot agree with a wrong split.
-/// Interval-merge merges every sample once per locus interval; `interval_merge` spells that out.
-fn expected_groups(formulation: &Formulation, n_samples: usize) -> Vec<usize> {
-    match (formulation, n_samples) {
+/// The input groups a formulation's plan should merge over `n_input_tables`, as their sizes,
+/// counted in input tables, in name order. Written out rather than computed, so the test cannot agree with a
+/// wrong split. Interval-merge merges every input table once per locus interval;
+/// `interval_merge` spells that out.
+fn expected_groups(formulation: &Formulation, n_input_tables: usize) -> Vec<usize> {
+    match (formulation, n_input_tables) {
         (Formulation::CombineRefsGroupedMerge { groups }, 4) if *groups == GROUPS => vec![2, 2],
         (Formulation::CombineRefsGroupedMerge { groups }, 2) if *groups == GROUPS => vec![1, 1],
         (Formulation::CombineRefsGroupedMerge { groups }, n) => {
-            panic!("no expected groups for {groups} groups over {n} samples")
+            panic!("no expected groups for {groups} groups over {n} input tables")
         }
         (Formulation::CombineRefsIntervalMerge { split_points }, n) => {
-            panic!("no expected groups for split points {split_points} over {n} samples")
+            panic!("no expected groups for split points {split_points} over {n} input tables")
         }
         (Formulation::CombineRefsUnion | Formulation::CombineAllelesUnion, n) => vec![n],
     }

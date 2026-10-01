@@ -1,7 +1,7 @@
 //! Sinks: the operator every action runs its frame into, and the ordering it requires.
 //!
 //! Every action ends in a sink whose required input ordering is the formulation's ordering. The
-//! requirement is what keeps a merge per sample group, or per locus interval, beneath the sink; a
+//! requirement is what keeps a merge per input group, or per locus interval, beneath the sink; a
 //! logical sort in the same place destroys it. The file sink is the write module's; the two
 //! `DataSink`s here stand in for it when the action collects rows or only analyzes the plan. See
 //! [ADR 0014](../docs/adr/0014-hold-the-merge-tree-with-the-sinks-ordering-requirement.md).

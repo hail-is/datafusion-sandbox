@@ -57,7 +57,9 @@ pub struct RunRecord {
     /// The write the run made; `None` for a drained probe.
     pub write: Option<WriteRecord>,
     pub threads: usize,
-    /// The size of the sample set the run covered.
+    /// The number of input tables the run merged, after narrowing.
+    pub input_tables: usize,
+    /// The size of the sample set the run covered, over its input tables.
     pub samples: usize,
     /// The rows written; for a probe, the rows the sink received before the stop.
     pub rows_written: u64,
@@ -90,7 +92,7 @@ pub struct ProbeRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FormulationRecord {
     pub name: String,
-    /// The sample group count of a grouped merge; `None` for every other formulation.
+    /// The input group count of a grouped merge; `None` for every other formulation.
     pub groups: Option<usize>,
     /// The split points of an interval merge as the caller spelled them; `None` for every other
     /// formulation.
@@ -186,6 +188,10 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
     RecordColumn {
         name: "threads",
         cell: RecordCell::UInt64(|record| to_u64(record.threads)),
+    },
+    RecordColumn {
+        name: "input_tables",
+        cell: RecordCell::UInt64(|record| to_u64(record.input_tables)),
     },
     RecordColumn {
         name: "samples",

@@ -23,7 +23,7 @@ use std::{fmt, num::NonZeroUsize};
 pub enum Formulation {
     CombineAllelesUnion,
     CombineRefsUnion,
-    /// The reference combiner merging each of `groups` sample groups, then merging the groups.
+    /// The reference combiner merging each of `groups` input groups, then merging the groups.
     CombineRefsGroupedMerge {
         groups: NonZeroUsize,
     },

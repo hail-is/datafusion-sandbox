@@ -108,6 +108,10 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// Four samples from the `1kg_chr22` benchmark dataset, the most any test needs.
 pub const SAMPLES: &[&str] = &["HG00308", "HG00592", "HG02230", "NA18534"];
 
+/// The names of the dataset fixtures' input tables, one single-sample table per entry of
+/// [`SAMPLES`], in the same order.
+pub const INPUT_TABLES: &[&str] = &["s=HG00308", "s=HG00592", "s=HG02230", "s=NA18534"];
+
 /// One fixture row as a locus and alleles.
 pub type SampleRow = (Locus, &'static str);
 
@@ -572,7 +576,7 @@ fn build_disk_sample_tables(
     )
 }
 
-/// Writes every per-sample table in `format`, deriving every filename from it.
+/// Writes every single-sample input table in `format`, deriving every filename from it.
 fn build_sample_tables(
     target: FixtureTarget,
     sample_set: &[&str],

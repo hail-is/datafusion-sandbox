@@ -113,7 +113,7 @@ pub(super) fn hostile_config(target_partitions: usize) -> SessionConfig {
     config
 }
 
-/// The grouped-merge formulation with `groups` sample groups.
+/// The grouped-merge formulation with `groups` input groups.
 ///
 /// # Panics
 ///
@@ -165,6 +165,7 @@ pub(super) fn run_record(run_id: &str) -> RunRecord {
             compression: Some("snappy".to_string()),
         }),
         threads: 1,
+        input_tables: 4,
         samples: 4,
         rows_written: 32,
         run_ns: 2_000,

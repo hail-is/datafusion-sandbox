@@ -105,15 +105,16 @@ impl PlanShape {
         scans.pop().expect("the scan count was checked")
     }
 
-    /// Asserts the merge tree over sample groups of the given sizes, in sample order.
+    /// Asserts the merge tree over input groups of the given sizes, in input table order.
     ///
-    /// One group is a flat union of one single-partition input per sample beneath one
+    /// One group is a flat union of one single-partition input per input table beneath one
     /// sort-preserving merge. Several groups add an outer union with one single-partition input
-    /// per group. A group of one sample is its scan; a larger group is a flat merge. A formulation
-    /// may merge once more after parallel operators above the outer union. No sort may appear.
+    /// per group. A group of one input table is its scan; a larger group is a flat merge. A
+    /// formulation may merge once more after parallel operators above the outer union. No sort
+    /// may appear.
     pub fn assert_merge_tree(&self, groups: &[usize]) {
-        if let [n_samples] = groups {
-            self.assert_flat_merge(&self.plan, *n_samples);
+        if let [n_input_tables] = groups {
+            self.assert_flat_merge(&self.plan, *n_input_tables);
             return;
         }
 
@@ -121,49 +122,52 @@ impl PlanShape {
         let unions = self.nodes_of::<UnionExec>();
         let outer = unions
             .first()
-            .unwrap_or_else(|| panic!("expected a union of {n_groups} sample groups:\n{self}"));
+            .unwrap_or_else(|| panic!("expected a union of {n_groups} input groups:\n{self}"));
         let inputs = outer.children();
         assert_eq!(
             inputs.len(),
             n_groups,
-            "expected one union input per sample group:\n{}",
+            "expected one union input per input group:\n{}",
             self.context(outer)
         );
-        for (input, &n_samples) in inputs.iter().zip(groups) {
+        for (input, &n_input_tables) in inputs.iter().zip(groups) {
             assert_eq!(
                 input.output_partitioning().partition_count(),
                 1,
-                "expected one partition per sample group input:\n{}",
+                "expected one partition per input group input:\n{}",
                 self.context(input)
             );
-            if n_samples == 1 {
+            if n_input_tables == 1 {
                 assert!(
                     input.is::<DataSourceExec>(),
-                    "expected a group of one sample to be its scan:\n{}",
+                    "expected a group of one input table to be its scan:\n{}",
                     self.context(input)
                 );
             } else {
-                self.assert_flat_merge(input, n_samples);
+                self.assert_flat_merge(input, n_input_tables);
             }
         }
 
-        let merged_groups = groups.iter().filter(|&&n_samples| n_samples > 1).count();
+        let merged_groups = groups
+            .iter()
+            .filter(|&&n_input_tables| n_input_tables > 1)
+            .count();
         let expected_merged_nodes = merged_groups.checked_add(1).unwrap();
         assert_eq!(
             unions.len(),
             expected_merged_nodes,
-            "expected one UnionExec per merged sample group plus the union of groups:\n{self}"
+            "expected one UnionExec per merged input group plus the union of groups:\n{self}"
         );
         let merges = self.nodes_of::<SortPreservingMergeExec>();
         assert_eq!(
             merges.len(),
             expected_merged_nodes,
-            "expected one SortPreservingMergeExec per merged sample group plus the final merge:\n{self}"
+            "expected one SortPreservingMergeExec per merged input group plus the final merge:\n{self}"
         );
         let final_merge = merges.first().expect("the final merge was counted");
         assert!(
             contains_node(final_merge, outer),
-            "expected the union of sample groups beneath the final merge:\n{}",
+            "expected the union of input groups beneath the final merge:\n{}",
             self.context(final_merge)
         );
         self.assert_no_sorts();

@@ -112,7 +112,7 @@ struct CombineRefsArgs {
     /// How to build the reference combiner's plan.
     #[arg(long, value_enum, default_value = "union")]
     formulation: CombineRefsFormulationArg,
-    /// Number of sample groups the grouped-merge formulation merges before merging the groups.
+    /// Number of input groups the grouped-merge formulation merges before merging the groups.
     ///
     /// Defaults to the thread count. One fewer gives the final merge a thread of its own.
     /// Accepted only with `--formulation grouped-merge`.
@@ -207,9 +207,15 @@ struct CombinerArgs {
     /// Return at most ROWS combined rows. Defaults to 20 with --show and unlimited otherwise.
     #[arg(long, value_name = "ROWS")]
     limit: Option<usize>,
-    /// Restrict the dataset's sample set to comma-separated sample ids.
-    #[arg(long = "samples", value_delimiter = ',', value_name = "SAMPLE,...")]
-    sample_set: Vec<String>,
+    /// Restrict the run to the named input tables, comma-separated entries of PATH such as
+    /// s=HG00308.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "NAME,...",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    inputs: Option<Vec<String>>,
 }
 
 #[derive(Args)]
@@ -477,7 +483,7 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
         run_id,
         probe_settings,
         limit,
-        sample_set,
+        inputs,
     } = args;
     let cli_action = CliAction::try_from(action)?;
     let input_format = formats.input_format.format();
@@ -527,13 +533,12 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
             write: write.map(write_target).transpose()?,
         },
     };
-    let sample_set = (!sample_set.is_empty()).then_some(sample_set);
     Ok(CombinerRun {
         inputs: PlanInputs {
             formulation,
             input_path: path,
             input_format,
-            sample_set,
+            input_tables: inputs,
             row_limit: limit,
         },
         action,
@@ -1300,12 +1305,47 @@ mod tests {
     }
 
     #[test]
-    fn comma_separated_sample_ids_resolve_to_a_sample_set() {
-        let run = resolve(parse_combiner(["--samples", "HG00308,HG00309", "--show"])).unwrap();
+    fn comma_separated_input_table_names_resolve_to_input_tables() {
+        let run = resolve(parse_combiner([
+            "--inputs",
+            "s=HG00308,s=HG00309",
+            "--show",
+        ]))
+        .unwrap();
 
         assert_eq!(
-            run.inputs.sample_set,
-            Some(vec!["HG00308".to_string(), "HG00309".to_string()])
+            run.inputs.input_tables,
+            Some(vec!["s=HG00308".to_string(), "s=HG00309".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_run_without_inputs_covers_every_input_table() {
+        let run = resolve(parse_combiner(["--show"])).unwrap();
+
+        assert_eq!(run.inputs.input_tables, None);
+    }
+
+    #[test]
+    fn rejects_an_empty_inputs_list() {
+        for args in [
+            &["--inputs"][..],
+            &["--inputs", ""],
+            &["--inputs", "s=HG00308,"],
+        ] {
+            let diagnostic = combiner_diagnostic(args);
+
+            assert!(diagnostic.contains("--inputs"), "diagnostic:\n{diagnostic}");
+        }
+    }
+
+    #[test]
+    fn the_samples_flag_no_longer_parses() {
+        let diagnostic = combiner_diagnostic(&["--samples", "HG00308"]);
+
+        assert!(
+            diagnostic.contains("unexpected argument '--samples'"),
+            "diagnostic:\n{diagnostic}"
         );
     }
 
