@@ -277,11 +277,14 @@ pub fn tightness_checks(
 /// when its time is before `first_partition_end_ns`: the run record holds the partition end as a
 /// time, not as a sample.
 ///
-/// The probe viewer keeps a copy of this function as Vega-Lite transforms (#220), so that its
-/// sliders move the stop without a replay; the ADR that lands with it records why. Change both
-/// together. The shared fixture `python/tests/fixtures/stop_over_tightness_checks.json` holds
-/// stops this function finds, which the copy is tested against, and a module test fails with the
-/// regenerated fixture when it is stale.
+/// The probe viewer keeps a copy of this function and of [`probe_stop_reason`] as Vega-Lite
+/// transforms, `with_stop` in `python/src/hailtools/probe_viewer.py`, so that its sliders move the
+/// stop without a replay;
+/// [ADR 0019](../docs/adr/0019-copy-the-stopping-rules-final-step-into-the-probe-viewer.md)
+/// records why. Change both together. The shared fixture
+/// `python/tests/fixtures/stop_over_tightness_checks.json` holds stops this function finds, which
+/// the copy is tested against, and a module test fails with the regenerated fixture when it is
+/// stale.
 #[must_use]
 pub fn stop<'a>(
     settings: &ProbeSettings,
@@ -320,6 +323,8 @@ pub fn capped_at_ns(settings: &ProbeSettings, samples: &[ProgressSample]) -> Opt
 /// partition, each if there is one. The probe ends steady if a check stops it no later than the
 /// cap. Otherwise it is capped if the cap comes before the first partition end. Otherwise it
 /// completes, as it does when the cap and the first partition end are the same sample.
+///
+/// The probe viewer keeps a copy of this function beside its copy of [`stop`]; change both.
 #[must_use]
 pub fn probe_stop_reason(
     stop_ns: Option<u64>,

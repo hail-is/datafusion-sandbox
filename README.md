@@ -279,6 +279,21 @@ Calibrate the stopping rule with shadow probes before relying on it in a sweep:
    ```
    cargo run -r -- replay data/runs
    ```
+   The probe viewer reads these tables when `DIR` has them; without them it draws each run under
+   its recorded settings only, with a note naming the `replay` command. A control bar that stays
+   at the top of the page holds sliders for the precision, the consecutive checks and the minimum
+   duration, over the range the tables hold, and shows the selected batch duration and window
+   groups. The page opens on the settings every shadow probe was recorded with if they share them
+   and the grid holds them, and on the probe's default settings otherwise. Under each detail
+   chart, a tightness check panel draws every tightness check's relative half-width against the
+   precision: passing tightness checks in green, those that found no end of warmup hollow, the
+   minimum duration, and a thin strip of the end of warmup each found. The page finds each run's
+   stop over its tightness checks with a copy of the stopping rule's last step
+   ([ADR 0019](docs/adr/0019-copy-the-stopping-rules-final-step-into-the-probe-viewer.md)), so the
+   stop marker, the would-be estimate and its estimate interval follow the sliders, and the panel
+   says whether a probe would have stopped steady, been capped or completed. The detail chart's
+   batch rates are drawn at the selected batch duration. The headline still shows the would-be
+   decisions each run recorded.
 
 An earlier variant of the reference combiner is still available as `cargo run -r --example combiner1`.
 
