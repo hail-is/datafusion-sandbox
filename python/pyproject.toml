@@ -9,10 +9,12 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "hail==0.2.139",
-    "pyarrow>=25.0.0",
-    "typer>=0.24.0",
-    "vortex-data>=0.83.0",
-    "numpy>=2,<3",
+    "pyarrow>=25.0.1",
+    # Held at 0.24 although 0.27 is out: typer 0.25 and later require rich>=13.8, and hail
+    # 0.2.139 requires rich<13.
+    "typer>=0.24.2,<0.25",
+    "vortex-data==0.86.1",
+    "numpy>=2.5.3,<3",
     "altair>=6.3.0",
 ]
 
