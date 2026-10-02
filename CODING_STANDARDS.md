@@ -43,13 +43,17 @@ its tradeoffs.
 
 ## Only the combiner run and cli tests read a filesystem
 
-`src/tests/combiner_run.rs` and `tests/cli.rs` may read and write disk. Every
-other test holds its dataset fixtures in an in-memory object store and creates
-no temporary directories. See
+Among the Rust tests, `src/tests/combiner_run.rs` and `tests/cli.rs` may read
+and write disk. Every other Rust test holds its dataset fixtures in an in-memory
+object store and creates no temporary directories. See
 [ADR 0010](docs/adr/0010-keep-tests-on-in-memory-object-stores.md) for why.
 
-The test: a test outside those two files that reads or writes the filesystem is
-a violation. `tempdir`, `TempDir`, or a filesystem path that is opened, listed,
+The rule covers the Rust tests only. The Python tests under `python/tests` check
+tools that read files the Rust binary wrote, such as a metrics directory, and
+may write their fixtures under pytest's `tmp_path`.
+
+The test: a Rust test outside those two files that reads or writes the
+filesystem is a violation. `tempdir`, `TempDir`, or a filesystem path that is opened, listed,
 or written is the sign to look for. A path string that nothing dereferences,
 such as one handed to a constructor to check how it is classified, is not a
 violation. The fix is to move the test or switch it to an in-memory store, not

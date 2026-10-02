@@ -7,10 +7,11 @@ the estimate it belongs to.
 """
 
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import html
 import json
 from pathlib import Path
+from statistics import median
 from string import Template
 from typing import Any
 
@@ -151,13 +152,17 @@ DEFAULT_SETTINGS = Settings(1_000_000_000, 10, 0.02, 3, 20_000_000_000)
 class Replay:
     """The shadow runs' replay tables under a metrics directory, and the settings the page selects.
 
-    The grid's axes are the values the tables hold, in ascending order.
+    The grid's axes are the values the tables hold, in ascending order. `run_ids` are every shadow
+    run's, replayed or not, and `recorded` the combinations of the grid shadow runs were recorded
+    with.
     """
 
     checks: pa.Table
     baselines: pa.Table
     replays: pa.Table
     selection: Settings
+    run_ids: list[str]
+    recorded: frozenset[Settings]
 
     @property
     def pairs(self) -> list[tuple[int, int]]:
@@ -201,7 +206,7 @@ def replay(metrics_dir: Path, calibration: Calibration) -> Replay | None:
     combinations = {Settings(*combination) for combination in _row_tuples(tables["replays"], *settings)}
     recorded = {Settings(*(record.get(name) for name in settings)) for record in calibration.runs.to_pylist()}
     if len(recorded) == 1 and recorded <= combinations:
-        selection = recorded.pop()
+        [selection] = recorded
     else:
         selection = min(
             combinations,
@@ -209,7 +214,109 @@ def replay(metrics_dir: Path, calibration: Calibration) -> Replay | None:
                 abs(getattr(combination, name) / getattr(DEFAULT_SETTINGS, name) - 1) for name in settings
             ),
         )
-    return Replay(selection=selection, **tables)
+    return Replay(
+        selection=selection,
+        run_ids=calibration.runs["run_id"].to_pylist(),
+        recorded=frozenset(recorded & combinations),
+        **tables,
+    )
+
+
+@dataclass(frozen=True)
+class Combination:
+    """One settings combination of the replay grid, judged over the shadow runs replayed under it.
+
+    `runs` are the runs replayed under it and `not_replayed` the other shadow runs, whose poll
+    period is longer than its batch duration or which were not replayed at all. `steady` counts
+    the runs a probe with it would have stopped steady. Over those runs, `median_stop_ns` is the
+    median would-stop time and `worst_error` the largest relative difference of the would-be
+    steady-state throughput from the end-of-run one under its pair; both are None if there are
+    none. `covered` counts their would-be estimate intervals that cover that end-of-run estimate,
+    out of `intervals`. `pareto` is whether no other combination is at least as fast and as
+    accurate and better at one, and `recorded` whether shadow runs were recorded with it.
+    """
+
+    settings: Settings
+    runs: list[str]
+    not_replayed: list[str]
+    steady: int
+    median_stop_ns: float | None
+    worst_error: float | None
+    covered: int
+    intervals: int
+    pareto: bool
+    recorded: bool
+
+    @property
+    def not_steady(self) -> int:
+        """The runs a probe with the combination would have been capped or completed on."""
+        return len(self.runs) - self.steady
+
+
+def overview(replay: Replay) -> list[Combination]:
+    """Every settings combination of `replay`'s grid, from the stops `replay` recorded.
+
+    These are the stopping rule's stops, not the page's copy of its last step (ADR 0019).
+    """
+    ends = {
+        (baseline["run_id"], baseline["batch_duration_ns"], baseline["window_groups"]): baseline[
+            "steady_state_throughput"
+        ]
+        for baseline in replay.baselines.to_pylist()
+    }
+    settings = list(Settings.__dataclass_fields__)
+    stops: dict[Settings, list[dict[str, Any]]] = {}
+    for stop in replay.replays.to_pylist():
+        stops.setdefault(Settings(*(stop[name] for name in settings)), []).append(stop)
+    combinations = []
+    for combination, rows in sorted(stops.items(), key=lambda item: tuple(asdict(item[0]).values())):
+        steady = [row for row in rows if row["probe_stop_reason"] == "steady"]
+        errors = []
+        covered = intervals = 0
+        for row in steady:
+            # A run that stopped steady has an end-of-run estimate under the pair: its measurement
+            # window only grew after the stop.
+            end = ends[(row["run_id"], combination.batch_duration_ns, combination.window_groups)]
+            would_be = row["would_be_steady_state_throughput"]
+            errors.append(abs(would_be / end - 1))
+            width = row["would_be_relative_half_width"]
+            if width is not None:
+                intervals += 1
+                covered += would_be * (1 - width) <= end <= would_be * (1 + width)
+        runs = sorted(row["run_id"] for row in rows)
+        combinations.append(
+            Combination(
+                settings=combination,
+                runs=runs,
+                not_replayed=[run_id for run_id in replay.run_ids if run_id not in runs],
+                steady=len(steady),
+                median_stop_ns=median(row["would_stop_ns"] for row in steady) if steady else None,
+                worst_error=max(errors, default=None),
+                covered=covered,
+                intervals=intervals,
+                pareto=False,
+                recorded=combination in replay.recorded,
+            )
+        )
+    placed = [
+        (combination.median_stop_ns, combination.worst_error)
+        for combination in combinations
+        if combination.median_stop_ns is not None and combination.worst_error is not None
+    ]
+    return [
+        replace(
+            combination,
+            pareto=combination.median_stop_ns is not None
+            and combination.worst_error is not None
+            and not any(_dominates(other, (combination.median_stop_ns, combination.worst_error)) for other in placed),
+        )
+        for combination in combinations
+    ]
+
+
+def _dominates(first: tuple[float, float], second: tuple[float, float]) -> bool:
+    """Whether `first` is at least as low as `second` on both axes, and lower on one."""
+    return all(a <= b for a, b in zip(first, second)) and first != second
 
 
 def _row_tuples(table: pa.Table, *names: str) -> list[tuple[Any, ...]]:
@@ -297,23 +404,22 @@ class EstimateInterval:
 
 @dataclass(frozen=True)
 class ReplayedRun:
-    """A shadow run's replay under the selected pair of batch duration and window groups.
+    """A shadow run's replay under every pair of batch duration and window groups, so that the page
+    can switch between pairs.
 
-    `checks` are its tightness checks under the pair, as `with_stop` takes them. Each also carries
-    the cumulative `rows` at its sample, and the time and rows of the sample its warmup end falls
-    at, `warmup_sample_ns` and `warmup_rows`, for the running estimate from a stop. `baseline` is
-    the end-of-run decision under the pair, in the columns of the replay baselines table. Both are
-    empty if the run was not replayed under the pair, as its batch duration is shorter than the
-    run's poll period.
+    `checks` are its tightness checks under every pair, as `with_stop` takes them once
+    `on_selected_pair` keeps one pair's. Each also carries the cumulative `rows` at its sample, and
+    the time and rows of the sample its warmup end falls at, `warmup_sample_ns` and `warmup_rows`,
+    for the running estimate from a stop. `baselines` are the end-of-run decision under each pair,
+    in the columns of the replay baselines table, and `batches` the batch rates at each pair's
+    batch duration, each row with its `batch_duration_ns`. `missing` are the grid's pairs the run
+    was not replayed under, as their batch duration is shorter than its poll period.
     """
 
     checks: list[dict[str, Any]]
-    baseline: dict[str, Any]
-
-    @property
-    def end_of_run(self) -> float | None:
-        """The end-of-run steady-state throughput under the pair."""
-        return self.baseline.get("steady_state_throughput")
+    baselines: list[dict[str, Any]]
+    batches: list[dict[str, Any]]
+    missing: list[tuple[int, int]]
 
 
 @dataclass(frozen=True)
@@ -327,10 +433,11 @@ class RunDetail:
     running estimate from the would-stop point to the end of the run. A run that never `settled`
     has no would-be marks and no running estimate.
 
-    A run that was `replayed` is drawn under the selected settings instead: its batches at the
-    selected batch duration, and its end-of-run marks and the sample that caps a probe, `times`
-    "maximum duration", under the selected pair. The page finds its would-be marks, precision band
-    and running estimate from its tightness checks as the sliders move, so they are left empty.
+    A run that was `replayed` is drawn under the selected settings instead, which the page moves:
+    its batches at the selected batch duration, its end-of-run marks and the sample that caps a
+    probe under the selected pair, and its would-be marks, precision band and running estimate at
+    the page's stop over its tightness checks. They are all in `replayed`, so only the first
+    partition end is left here.
     """
 
     run_id: str
@@ -352,12 +459,12 @@ MAXIMUM_DURATION = "maximum duration"
 
 def run_details(metrics_dir: Path, calibration: Calibration, replay: Replay | None = None) -> list[RunDetail]:
     """The detail of each shadow run in `calibration`, from its progress samples under `metrics_dir`,
-    under the settings `replay` selects if there is one."""
+    and its replay under every pair of `replay` if there is one."""
     details = []
     for record in calibration.runs.to_pylist():
         samples = _progress(metrics_dir, record["run_id"])
         replayed = None if replay is None else _replayed(record, samples, replay)
-        details.append(_run_detail(record, samples, replayed, replay and replay.selection))
+        details.append(_run_detail(record, samples, replayed))
     return details
 
 
@@ -370,36 +477,45 @@ def _progress(metrics_dir: Path, run_id: str) -> list[ProgressSample]:
 
 
 def _replayed(record: dict[str, Any], samples: list[ProgressSample], replay: Replay) -> ReplayedRun | None:
-    def under_pair(table: pa.Table) -> list[dict[str, Any]]:
-        return table.filter(
-            (pc.field("run_id") == record["run_id"])
-            & (pc.field("batch_duration_ns") == replay.selection.batch_duration_ns)
-            & (pc.field("window_groups") == replay.selection.window_groups)
-        ).to_pylist()
+    def of_run(table: pa.Table) -> list[dict[str, Any]]:
+        return table.filter(pc.field("run_id") == record["run_id"]).to_pylist()
 
-    if record["run_id"] not in set(replay.baselines["run_id"].to_pylist()):
+    baselines = of_run(replay.baselines)
+    if not baselines:
         return None
-    baselines = under_pair(replay.baselines)
-    baseline = baselines[0] if baselines else {}
+    capped_at_ns_by_pair = {
+        (baseline["batch_duration_ns"], baseline["window_groups"]): baseline["capped_at_ns"] for baseline in baselines
+    }
     checks = []
-    for check in sorted(under_pair(replay.checks), key=lambda check: check["check_index"]):
+    for check in sorted(
+        of_run(replay.checks),
+        key=lambda check: (check["batch_duration_ns"], check["window_groups"], check["check_index"]),
+    ):
         warmup = None if check["warmup_end_ns"] is None else _sample_at(samples, check["warmup_end_ns"])
         checks.append(
             {
                 "run_id": check["run_id"],
+                "batch_duration_ns": check["batch_duration_ns"],
+                "window_groups": check["window_groups"],
                 "check_index": check["check_index"],
                 "elapsed_ns": check["elapsed_ns"],
                 "warmup_end_ns": check["warmup_end_ns"],
                 "steady_state_throughput": check["steady_state_throughput"],
                 "relative_half_width": check["relative_half_width"],
                 "first_partition_end_ns": record.get("first_partition_end_ns"),
-                "capped_at_ns": baseline.get("capped_at_ns"),
+                "capped_at_ns": capped_at_ns_by_pair[(check["batch_duration_ns"], check["window_groups"])],
                 "rows": samples[check["sample_index"]].rows if check["sample_index"] < len(samples) else None,
                 "warmup_sample_ns": None if warmup is None else warmup.elapsed_ns,
                 "warmup_rows": None if warmup is None else warmup.rows,
             }
         )
-    return ReplayedRun(checks, baseline)
+    batches = [
+        {"batch_duration_ns": batch_duration_ns, **asdict(batch)}
+        for batch_duration_ns in sorted({batch_duration_ns for batch_duration_ns, _ in capped_at_ns_by_pair})
+        for batch in batch_rates(samples, batch_duration_ns)
+    ]
+    missing = [pair for pair in replay.pairs if pair not in capped_at_ns_by_pair]
+    return ReplayedRun(checks, sorted(baselines, key=lambda baseline: baseline["batch_duration_ns"]), batches, missing)
 
 
 def _sample_at(samples: Sequence[ProgressSample], warmup_end_ns: int) -> ProgressSample | None:
@@ -408,12 +524,7 @@ def _sample_at(samples: Sequence[ProgressSample], warmup_end_ns: int) -> Progres
     return before[-1] if before else None
 
 
-def _run_detail(
-    record: dict[str, Any],
-    samples: list[ProgressSample],
-    replayed: ReplayedRun | None,
-    selection: Settings | None,
-) -> RunDetail:
+def _run_detail(record: dict[str, Any], samples: list[ProgressSample], replayed: ReplayedRun | None) -> RunDetail:
     # Records written before a column existed lack it; every such mark is left off.
     def seconds(row: dict[str, Any], column: str) -> float | None:
         ns = row.get(column)
@@ -422,9 +533,8 @@ def _run_detail(
     def markers(pairs: list[tuple[str, float | None]]) -> list[Marker]:
         return [Marker(label, value) for label, value in pairs if value is not None]
 
-    # Under a replay, the end-of-run decision is the selected pair's and the would-be decision is
-    # left to the page.
-    end_of_run_row = record if replayed is None else replayed.baseline
+    # Under a replay, the page draws both decisions under the selected settings.
+    end_of_run_row = record if replayed is None else {}
     would_be_row = record if replayed is None else {}
     end_of_run = end_of_run_row.get("steady_state_throughput")
     end_of_run_width = end_of_run_row.get("relative_half_width")
@@ -433,7 +543,7 @@ def _run_detail(
     would_be_warmup_end_ns = would_be_row.get("would_be_warmup_end_ns")
     would_be_width = would_be_row.get("would_be_relative_half_width")
     precision = would_be_row.get("precision")
-    batch_duration_ns = record.get("batch_duration_ns") if selection is None else selection.batch_duration_ns
+    batch_duration_ns = record.get("batch_duration_ns") if replayed is None else None
 
     # Each estimate interval is drawn where its measurement window ends.
     window_end = seconds(end_of_run_row, "window_end_ns")
@@ -466,7 +576,6 @@ def _run_detail(
                 ("end-of-run warmup end", seconds(end_of_run_row, "warmup_end_ns")),
                 ("would-stop", seconds(would_be_row, "would_stop_ns")),
                 ("first partition end", seconds(record, "first_partition_end_ns")),
-                (MAXIMUM_DURATION, None if replayed is None else seconds(replayed.baseline, "capped_at_ns")),
             ]
         ),
         levels=markers([(WOULD_BE_ESTIMATE, would_be), (END_OF_RUN_ESTIMATE, end_of_run)]),
@@ -524,6 +633,24 @@ def stop_params(precision: float, consecutive_checks: int, min_duration_ns: int)
         alt.param(name="consecutive_checks", value=consecutive_checks),
         alt.param(name="min_duration_ns", value=min_duration_ns),
     ]
+
+
+def selection_params(selection: Settings) -> list[alt.Parameter]:
+    """Every setting the page selects, as Vega-Lite parameters: those `on_selected_pair` reads, which
+    a click on the overview sets, and those of `stop_params`."""
+    return [
+        alt.param(name="batch_duration_ns", value=selection.batch_duration_ns),
+        alt.param(name="window_groups", value=selection.window_groups),
+        *stop_params(selection.precision, selection.consecutive_checks, selection.min_duration_ns),
+    ]
+
+
+def on_selected_pair(chart: alt.Chart) -> alt.Chart:
+    """`chart` over rows of every pair of batch duration and window groups, keeping the selected
+    pair's, at the settings of `selection_params`."""
+    return chart.transform_filter(
+        "datum.batch_duration_ns == batch_duration_ns && datum.window_groups == window_groups"
+    )
 
 
 def with_stop(chart: alt.Chart) -> alt.Chart:
@@ -590,18 +717,23 @@ def write_page(metrics_dir: Path, output: Path | None = None) -> Path:
 
 def render_page(calibration: Calibration, details: list[RunDetail], replay: Replay | None = None) -> str:
     """The page about `calibration`: fixed framing, the settings table, the headline chart and a
-    detail chart per run in `details`, with a control bar over the settings `replay` selects if
-    there is one."""
+    detail chart per run in `details`. If there is a `replay`, a control bar holds the settings it
+    selects, an overview of its grid selects them too, and the headline and detail charts follow."""
     bar = None if replay is None else controls(replay, details)
+    overview_section = ""
+    if replay is not None:
+        overview_section = _OVERVIEW_GUIDE + _embedded_spec("overview", overview_chart(overview(replay), replay.selection))
     return _PAGE.substitute(
         vega=alt.VEGA_VERSION,
         vega_lite=alt.VEGALITE_VERSION,
         vega_embed=alt.VEGAEMBED_VERSION,
         controls=_REPLAY_MISSING if replay is None else _controls(replay),
+        overview=overview_section,
         headline_note="" if replay is None else _HEADLINE_NOTE,
-        caption=_caption(calibration),
+        # Under a replay, the headline counts its runs itself, as the selection moves.
+        caption=f'<p class="caption">{_caption(calibration)}</p>' if replay is None else "",
         settings=_settings_table(calibration.runs),
-        headline=_embedded_spec("headline", headline_chart(calibration)),
+        headline=_embedded_spec("headline", headline_chart(calibration, replay)),
         details="\n".join(
             f'<section class="detail" data-run="{html.escape(detail.run_id)}">\n'
             f"<h3>{html.escape(detail.run_id)}</h3>\n"
@@ -615,18 +747,45 @@ def render_page(calibration: Calibration, details: list[RunDetail], replay: Repl
 _REPLAY_MISSING = """<p class="note">
 This metrics directory has no replay tables, so the page shows each shadow probe only under the
 settings it was recorded with. Run <code>cargo run -r -- replay DIR</code> on it, then draw the page
-again, for a tightness check panel under each detail chart and sliders that move the stop.
+again, for an overview of the stopping rule under a grid of settings, a tightness check panel under
+each detail chart, and sliders that move the stop.
 </p>"""
 
 _HEADLINE_NOTE = """<p>
-The headline shows the would-be decisions each shadow probe recorded under its own settings. It
-does not follow the control bar, which moves only the detail charts.
+The headline shows each shadow probe under the settings in the control bar: its would-be decision
+is the page's stop over the selected pair's tightness checks, and its end-of-run estimate the one
+under the selected pair. Under the settings a probe was recorded with, it shows what the probe
+recorded.
 </p>"""
+
+_OVERVIEW_GUIDE = """<details>
+<summary><h2>Reading the overview</h2></summary>
+<p>
+The overview shows every combination of settings in the replay grid, as <code>replay</code> judged
+it with the stopping rule itself. A point is placed by the median would-stop time over the runs a
+probe with its settings would have stopped steady, and by the worst relative error of their
+would-be estimates against the end-of-run estimates under its batch duration and window groups.
+Its colour counts the runs a probe would not have stopped steady: capped at the maximum duration,
+or completed at the first partition end. The dashed line joins the Pareto frontier, the
+combinations no other is both faster and more accurate than. The diamond is the combination the
+shadow probes were recorded with. A combination under which no run would stop steady has no place
+on those axes, and is listed by its settings under them.
+</p>
+<p>
+Hover over a combination for its settings, how many of the runs it replayed a probe would have
+stopped steady, how many of their would-be estimate intervals cover the end-of-run estimate, its
+median stop and worst error, and the runs it could not replay, whose poll period is longer than its
+batch duration. Click it to select it for the whole page: the sliders move to it, and the headline
+and every detail chart follow. The selected combination is outlined; when the sliders sit between
+the grid's values, the selected pair's combinations are outlined instead.
+</p>
+</details>
+"""
 
 
 def _controls(replay: Replay) -> str:
     """The control bar: a slider per setting the page's stop reads, over the grid's range, and the
-    selected pair of batch duration and window groups."""
+    selected pair of batch duration and window groups, which a click on the overview moves."""
     selection = replay.selection
 
     def slider(title: str, param: str, values: list[float], step: float, value: float, scale: float = 1) -> str:
@@ -645,15 +804,18 @@ def _controls(replay: Replay) -> str:
                 "Consecutive checks", "consecutive_checks", replay.consecutive_checks, 1, selection.consecutive_checks
             ),
             slider("Minimum duration", "min_duration_ns", replay.min_durations_ns, 1, selection.min_duration_ns, 1e9),
-            f"<span>Batch duration {selection.batch_duration_ns / 1e9:g} s,"
+            f'<span id="pair">Batch duration {selection.batch_duration_ns / 1e9:g} s,'
             f" {selection.window_groups} window groups</span>",
             "</div>",
         ]
     )
 
 
-def headline_chart(calibration: Calibration) -> alt.TopLevelMixin:
-    """One row per settled shadow run, then a strip of the runs that never settled."""
+def headline_chart(calibration: Calibration, replay: Replay | None = None) -> alt.TopLevelMixin:
+    """One row per settled shadow run, then a strip of the runs that never settled: as each run
+    recorded them, or under the settings `replay` selects, which the page moves."""
+    if replay is not None:
+        return _replayed_headline_chart(calibration, replay)
     colour = alt.Color("formulation:N", title="Formulation")
     charts = []
     if calibration.settled:
@@ -672,19 +834,11 @@ def headline_chart(calibration: Calibration) -> alt.TopLevelMixin:
         charts.append(
             _runs_chart(
                 "Would-be estimate against the end-of-run estimate",
-                rows,
+                alt.InlineData(values=rows),
+                alt.Chart(),
                 alt.Chart().mark_rule(strokeWidth=2).encode(x="low:Q", x2="high:Q", color=colour),
                 alt.Chart().mark_point(filled=True, size=80).encode(
-                    x="error:Q",
-                    color=colour,
-                    shape=alt.Shape("threads:N", title="Threads"),
-                    tooltip=[
-                        alt.Tooltip("run_id:N", title="Run"),
-                        alt.Tooltip("error:Q", title="Would-be estimate", format="+.2%"),
-                        alt.Tooltip("low:Q", title="Would-be interval from", format="+.2%"),
-                        alt.Tooltip("high:Q", title="Would-be interval to", format="+.2%"),
-                        alt.Tooltip("band_high:Q", title="End-of-run half-width", format=".2%"),
-                    ],
+                    x="error:Q", color=colour, shape=_THREADS, tooltip=_headline_tooltip()
                 ),
             )
         )
@@ -702,17 +856,186 @@ def headline_chart(calibration: Calibration) -> alt.TopLevelMixin:
         charts.append(
             _runs_chart(
                 "Never settled",
-                rows,
-                alt.Chart()
-                .mark_text(align="left", dx=4)
-                .encode(x=alt.datum(0), text="label:N", color=colour),
+                alt.InlineData(values=rows),
+                alt.Chart(),
+                alt.Chart().mark_text(align="left", dx=4).encode(x=alt.datum(0), text="label:N", color=colour),
             )
         )
     return alt.vconcat(*charts).resolve_scale(x="shared")
 
 
-def _runs_chart(title: str, rows: list[dict[str, Any]], *marks: alt.Chart) -> alt.TopLevelMixin:
-    """One row per run over its end-of-run estimate interval as a grey band, with `marks` on top."""
+_THREADS = alt.Shape("threads:N", title="Threads")
+
+
+def _headline_tooltip() -> list[alt.Tooltip]:
+    return [
+        alt.Tooltip("run_id:N", title="Run"),
+        alt.Tooltip("error:Q", title="Would-be estimate", format="+.2%"),
+        alt.Tooltip("low:Q", title="Would-be interval from", format="+.2%"),
+        alt.Tooltip("high:Q", title="Would-be interval to", format="+.2%"),
+        alt.Tooltip("band_high:Q", title="End-of-run half-width", format=".2%"),
+    ]
+
+
+def _replayed_headline_chart(calibration: Calibration, replay: Replay) -> alt.TopLevelMixin:
+    """The headline at the page's stop over every run's tightness checks under the selected pair,
+    against the pair's end-of-run estimates, with a caption that counts them.
+
+    As in the headline of the recorded decisions, a run is drawn if its stopping rule settled,
+    whatever its maximum duration; one a probe would have been capped on first is hollow. The strip
+    lists the runs that never settled, those a probe would have been capped on apart, and those not
+    replayed under the selected pair.
+    """
+    colour = alt.Color("formulation:N", title="Formulation")
+    # A run's status is the same on each of its checks, and every run has a check 0.
+    judged = with_stop(on_selected_pair(alt.Chart())).transform_calculate(
+        status="datum.replayed ? datum.probe_stop_reason : 'not replayed'",
+        band_low="-datum.end_width",
+        band_high="datum.end_width",
+    )
+    settled = judged.transform_filter("datum.stops_here").transform_calculate(
+        error="datum.steady_state_throughput / datum.end - 1",
+        low="datum.steady_state_throughput * (1 - datum.relative_half_width) / datum.end - 1",
+        high="datum.steady_state_throughput * (1 + datum.relative_half_width) / datum.end - 1",
+    )
+    never_settled = judged.transform_filter(
+        "datum.check_index == 0 && !isValid(datum.would_stop_ns)"
+    ).transform_calculate(
+        label="(datum.status == 'capped' ? 'never settled, capped at the maximum duration'"
+        " : datum.status == 'completed' ? 'never settled' : 'not replayed under these settings')"
+        " + ', ' + toString(datum.threads) + (datum.threads == 1 ? ' thread' : ' threads')"
+    )
+    data = alt.InlineData(values=_headline_checks(calibration, replay))
+    return (
+        alt.vconcat(
+            _runs_chart(
+                "Would-be estimate against the end-of-run estimate",
+                data,
+                settled,
+                settled.mark_rule(strokeWidth=2).encode(x="low:Q", x2="high:Q", color=colour),
+                settled.mark_point(filled=True, size=80, strokeWidth=1.5).encode(
+                    x="error:Q",
+                    color=colour,
+                    # The stroke keeps a hollow point's colour; it shares the colour's scheme.
+                    stroke=alt.Stroke("formulation:N", legend=None),
+                    fillOpacity=alt.condition("datum.status == 'capped'", alt.value(0), alt.value(1)),
+                    shape=_THREADS,
+                    tooltip=[*_headline_tooltip(), alt.Tooltip("status:N", title="A probe would have ended")],
+                ),
+            ),
+            _runs_chart(
+                "No would-be estimate",
+                data,
+                never_settled,
+                never_settled.mark_text(align="left", dx=4).encode(x=alt.datum(0), text="label:N", color=colour),
+            ),
+            _headline_caption(judged).properties(data=data),
+        )
+        .resolve_scale(x="shared")
+        .add_params(*selection_params(replay.selection))
+    )
+
+
+def _headline_checks(calibration: Calibration, replay: Replay) -> list[dict[str, Any]]:
+    """Every shadow run's tightness checks under every pair of the grid, as `with_stop` takes them,
+    each with its run's formulation and threads and the pair's end-of-run estimate, `end`, and its
+    relative half-width, `end_width`. A run not replayed under a pair has one row there that is
+    not `replayed`, so that every run is drawn under every pair."""
+    checks: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
+    for check in replay.checks.to_pylist():
+        checks.setdefault((check["run_id"], check["batch_duration_ns"], check["window_groups"]), []).append(check)
+    baselines = {
+        (baseline["run_id"], baseline["batch_duration_ns"], baseline["window_groups"]): baseline
+        for baseline in replay.baselines.to_pylist()
+    }
+    rows = []
+    for record in calibration.runs.to_pylist():
+        for batch_duration_ns, window_groups in replay.pairs:
+            run = {
+                "run_id": record["run_id"],
+                "formulation": record["formulation"],
+                "threads": record["threads"],
+                "batch_duration_ns": batch_duration_ns,
+                "window_groups": window_groups,
+            }
+            key = (record["run_id"], batch_duration_ns, window_groups)
+            baseline = baselines.get(key)
+            if baseline is None:
+                rows.append(run | {"replayed": False, "check_index": 0, "elapsed_ns": 0})
+                continue
+            run |= {
+                "replayed": True,
+                "first_partition_end_ns": record.get("first_partition_end_ns"),
+                "capped_at_ns": baseline["capped_at_ns"],
+                "end": baseline["steady_state_throughput"],
+                "end_width": baseline["relative_half_width"],
+            }
+            # A run that ended before its first probe batch did has no tightness check, and never
+            # settled; a check that fails stands in for it.
+            for check in checks.get(key) or [{"check_index": 0, "elapsed_ns": 0}]:
+                rows.append(
+                    run
+                    | {
+                        name: check.get(name)
+                        for name in [
+                            "check_index",
+                            "elapsed_ns",
+                            "warmup_end_ns",
+                            "steady_state_throughput",
+                            "relative_half_width",
+                        ]
+                    }
+                )
+    return rows
+
+
+def _headline_caption(judged: alt.Chart) -> alt.Chart:
+    """The caption of the headline: how many would-be estimate intervals cover the end-of-run
+    estimate, how many runs never settled, and how many a probe would have been capped on or were
+    not replayed. Every stop has an estimate interval, so none is counted without one."""
+    first = "datum.check_index == 0"
+    interval = "datum.stops_here && isValid(datum.relative_half_width)"
+    covers = (
+        f"{interval} && datum.steady_state_throughput * (1 - datum.relative_half_width) <= datum.end"
+        " && datum.end <= datum.steady_state_throughput * (1 + datum.relative_half_width)"
+    )
+    counts = {
+        "runs": first,
+        "settled": "datum.stops_here",
+        "intervals": interval,
+        "covered": covers,
+        "capped": f"{first} && datum.status == 'capped'",
+        "never_settled": f"{first} && datum.status != 'not replayed' && !isValid(datum.would_stop_ns)",
+        "not_replayed": f"{first} && datum.status == 'not replayed'",
+    }
+
+    def count(name: str) -> str:
+        return f"toString(datum.{name})"
+
+    sums: dict[str, Any] = {name: f"sum(is_{name})" for name in counts}
+    return (
+        judged.transform_calculate(**{f"is_{name}": f"{test} ? 1 : 0" for name, test in counts.items()})
+        .transform_aggregate(**sums)
+        # One sentence per line, as a text mark does not wrap.
+        .transform_calculate(
+            caption=f"(datum.intervals > 0 ? {count('covered')} + ' of ' + {count('intervals')}"
+            " + ' would-be estimate intervals cover the end-of-run estimate."
+            " About 95% should if the estimate interval is calibrated.\\n' : '')"
+            f" + {count('never_settled')} + ' of ' + {count('runs')} + ' shadow runs never settled.'"
+            f" + (datum.capped > 0 ? '\\n' + {count('capped')} + ' of ' + {count('runs')}"
+            " + ' shadow runs would have been capped at their maximum duration.' : '')"
+            f" + (datum.not_replayed > 0 ? '\\n' + {count('not_replayed')} + ' of ' + {count('runs')}"
+            " + ' shadow runs were not replayed under these settings.' : '')"
+        )
+        .mark_text(align="left", baseline="top", fontWeight="bold", lineBreak="\n", lineHeight=16)
+        .encode(x=alt.value(0), y=alt.value(0), text="caption:N")
+        .properties(width=600, height=64, view=alt.ViewBackground(stroke=None))
+    )
+
+
+def _runs_chart(title: str, data: alt.InlineData, rows: alt.Chart, *marks: alt.Chart) -> alt.LayerChart:
+    """One row per run of `rows` over its end-of-run estimate interval as a grey band, with `marks`
+    on top."""
     x = alt.X(
         "band_low:Q",
         title="Would-be over end-of-run steady-state throughput, less 1",
@@ -722,11 +1045,130 @@ def _runs_chart(title: str, rows: list[dict[str, Any]], *marks: alt.Chart) -> al
     zero = alt.Chart().mark_rule(color="black").encode(x=alt.datum(0))
     y = alt.Y("run_id:N", title=None)
     return alt.layer(
-        alt.Chart().mark_bar(color="#dddddd").encode(x, alt.X2("band_high:Q"), y=y),
+        rows.mark_bar(color="#dddddd").encode(x, alt.X2("band_high:Q"), y=y),
         *(mark.encode(y=y) for mark in marks),
         zero,
-        data=alt.Data(values=rows),
+        data=data,
     ).properties(title=title, width=600)
+
+
+def overview_chart(combinations: list[Combination], selection: Settings) -> alt.TopLevelMixin:
+    """Every combination of the replay grid, from `overview`.
+
+    A combination some run would stop steady under is placed by its median stop time and its worst
+    error, with the Pareto frontier joined; the rest are listed below by their settings. Colour
+    counts the runs a probe would not have stopped steady, and a diamond marks the recorded
+    combinations. The combination selected, at first `selection`, is outlined if the sliders sit on
+    the grid's values, and otherwise the selected pair's combinations are.
+    """
+    pairs = sorted({(c.settings.batch_duration_ns, c.settings.window_groups) for c in combinations})
+    stops = sorted({(c.settings.precision, c.settings.consecutive_checks, c.settings.min_duration_ns) for c in combinations})
+    rows = []
+    for combination in combinations:
+        settings = combination.settings
+        pair = (settings.batch_duration_ns, settings.window_groups)
+        stop = (settings.precision, settings.consecutive_checks, settings.min_duration_ns)
+        rows.append(
+            asdict(settings)
+            | {
+                "settings": f"{_pair_label(settings)}, {_stop_label(settings)}",
+                "pair": _pair_label(settings),
+                "pair_order": pairs.index(pair),
+                "stop": _stop_label(settings),
+                "stop_order": stops.index(stop),
+                "placed": combination.median_stop_ns is not None,
+                "median_stop_s": None if combination.median_stop_ns is None else combination.median_stop_ns / 1e9,
+                "worst_error": combination.worst_error,
+                "not_steady": combination.not_steady,
+                "stopped": f"{combination.steady} of {len(combination.runs)}",
+                "coverage": f"{combination.covered} of {combination.intervals}",
+                "not_replayed": ", ".join(combination.not_replayed) or "none",
+                "pareto": combination.pareto,
+                "recorded": combination.recorded,
+            }
+        )
+    judged = (
+        alt.Chart(alt.InlineData(values=rows))
+        .transform_calculate(
+            on_pair="datum.batch_duration_ns == batch_duration_ns && datum.window_groups == window_groups"
+        )
+        .transform_calculate(
+            selected="datum.on_pair && datum.precision == precision"
+            " && datum.consecutive_checks == consecutive_checks && datum.min_duration_ns == min_duration_ns ? 1 : 0"
+        )
+        .transform_joinaggregate(on_grid="max(selected)")
+        .transform_calculate(highlighted="datum.on_grid == 1 ? datum.selected == 1 : datum.on_pair")
+    )
+    runs = max((len(combination.runs) for combination in combinations), default=1)
+    colour = alt.Color(
+        "not_steady:Q",
+        title="Runs not stopped steady",
+        scale=alt.Scale(domain=[0, runs], scheme="redyellowblue", reverse=True),
+        legend=alt.Legend(values=list(range(runs + 1)), format="d"),
+    )
+    tooltip = [
+        alt.Tooltip("settings:N", title="Settings"),
+        alt.Tooltip("stopped:N", title="Runs stopped steady"),
+        alt.Tooltip("coverage:N", title="Would-be estimate intervals covering"),
+        alt.Tooltip("median_stop_s:Q", title="Median stop, seconds", format=".1f"),
+        alt.Tooltip("worst_error:Q", title="Worst error", format=".2%"),
+        alt.Tooltip("not_replayed:N", title="Not replayed"),
+    ]
+    outline = {
+        "strokeWidth": alt.condition("datum.highlighted", alt.value(2.5), alt.value(0.5)),
+        "opacity": alt.condition("datum.highlighted", alt.value(1), alt.value(0.5)),
+    }
+    recorded: dict[str, Any] = {"shape": "diamond", "size": 300, "filled": False, "color": "black"}
+    listed_recorded: dict[str, Any] = recorded | {"size": 200}
+
+    placed = judged.transform_filter("datum.placed")
+    x = alt.X(
+        "median_stop_s:Q",
+        title="Median would-stop time over the runs stopped steady, seconds",
+        scale=alt.Scale(type="log"),
+    )
+    y = alt.Y("worst_error:Q", title="Worst error of a would-be estimate", axis=alt.Axis(format="%"))
+    charts = [
+        alt.layer(
+            placed.transform_filter("datum.pareto")
+            .mark_line(color="#555555", strokeDash=[4, 2])
+            .encode(x, y, order="median_stop_s:Q"),
+            placed.mark_point(filled=True, size=70, stroke="black").encode(
+                x, y, color=colour, tooltip=tooltip, **outline
+            ),
+            placed.transform_filter("datum.recorded").mark_point(**recorded).encode(x, y, tooltip=tooltip),
+        ).properties(title="Settings combinations some run would stop steady under", width=600, height=300)
+    ]
+    if any(combination.median_stop_ns is None for combination in combinations):
+        listed = judged.transform_filter("!datum.placed")
+        column = alt.X(
+            "pair:N", title="Batch duration, window groups", sort=alt.EncodingSortField("pair_order", op="min")
+        )
+        row = alt.Y(
+            "stop:N",
+            title="Precision, consecutive checks, minimum duration",
+            sort=alt.EncodingSortField("stop_order", op="min"),
+        )
+        charts.append(
+            alt.layer(
+                listed.mark_square(size=80, stroke="black").encode(column, row, color=colour, tooltip=tooltip, **outline),
+                listed.transform_filter("datum.recorded")
+                .mark_point(**listed_recorded)
+                .encode(column, row, tooltip=tooltip),
+            ).properties(title="Settings combinations no run would stop steady under", height=alt.Step(14))
+        )
+    return alt.vconcat(*charts).resolve_scale(color="shared").add_params(*selection_params(selection))
+
+
+def _pair_label(settings: Settings) -> str:
+    return f"{settings.batch_duration_ns / 1e9:g} s batches, {settings.window_groups} window groups"
+
+
+def _stop_label(settings: Settings) -> str:
+    return (
+        f"{settings.precision * 100:g}%, {settings.consecutive_checks} consecutive,"
+        f" {settings.min_duration_ns / 1e9:g} s minimum"
+    )
 
 
 # Would-be marks are warm and end-of-run marks cool, so a legend entry is not needed to pair them.
@@ -751,26 +1193,24 @@ _SECONDS = alt.Axis(title="Seconds since execution started")
 def detail_chart(detail: RunDetail, bar: Controls | None = None) -> alt.TopLevelMixin:
     """The run's sample and batch rates over time, with its stopping rule's decisions on them.
 
-    A replayed run's would-be decision is the page's stop over its tightness checks at the
-    precision, consecutive checks and minimum duration `bar` selects, which the control bar moves;
-    under the rates go its tightness check panel and its end of warmup at each check. The rate axis
-    reaches every stop the control bar can move to.
+    A replayed run is drawn under the settings `bar` selects, which the page moves: its batch rates
+    and end-of-run marks under the selected pair, and its would-be decision at the page's stop over
+    the selected pair's tightness checks. Under the rates go its tightness check panel and its end
+    of warmup at each check. The rate axis reaches every stop the page can move to.
     """
     replayed = detail.replayed
     if replayed is None or bar is None:
         return _rates_chart(detail).properties(title=_detail_title(detail, replay_tables=bar is not None))
-    checks = alt.Data(values=replayed.checks)
+    checks = alt.InlineData(values=replayed.checks)
     return (
         alt.vconcat(
             _rates_chart(detail, bar.max_precision),
-            _tightness_check_panel(checks, bar.half_widths),
+            _tightness_check_panel(checks, bar.half_widths, replayed.missing),
             _warmup_strip(checks),
         )
         # The rates and the tightness checks each have their own colours.
         .resolve_scale(x="shared", color="independent")
-        .add_params(
-            *stop_params(bar.selection.precision, bar.selection.consecutive_checks, bar.selection.min_duration_ns)
-        )
+        .add_params(*selection_params(bar.selection))
         .properties(title=_detail_title(detail, replay_tables=True))
     )
 
@@ -783,10 +1223,6 @@ def _detail_title(detail: RunDetail, replay_tables: bool) -> alt.TitleParams:
             "The run was not replayed, so it has no tightness check panel and is drawn under its recorded"
             " settings. Run replay again to replay it."
         )
-    if detail.replayed is not None and not detail.replayed.checks:
-        subtitle.append(
-            "The run was not replayed under the selected batch duration, as it is shorter than its poll period."
-        )
     if detail.replayed is None and not detail.settled:
         subtitle.append("The stopping rule never settled.")
     if not detail.samples:
@@ -795,16 +1231,17 @@ def _detail_title(detail: RunDetail, replay_tables: bool) -> alt.TitleParams:
 
 
 def _rates_chart(detail: RunDetail, max_precision: float | None = None) -> alt.LayerChart:
-    """The run's rates and the marks it carries, with the would-be decision the page finds from its
-    tightness checks if it was replayed."""
+    """The run's rates and the marks it carries, with its batch rates, end-of-run marks and the
+    would-be decision the page finds under the selected settings if it was replayed."""
     replayed = detail.replayed
-    replayed_checks = [] if replayed is None else replayed.checks
+    batches: list[dict[str, Any]] = [asdict(batch) for batch in detail.batches]
     # The legend lists only the marks the run has, each in its fixed colour.
-    present = {"sample rate": detail.samples, "batch rate": detail.batches, "running estimate": detail.running}
     labels = {marker.label for marker in detail.times + detail.levels} | {bar.label for bar in detail.intervals}
+    if replayed is not None:
+        batches = replayed.batches
+        labels |= set(_STOP_MARKS) | _end_of_run_labels(replayed.baselines)
+    present = {"sample rate": detail.samples, "batch rate": batches, "running estimate": detail.running}
     labels |= {label for label, items in present.items() if items}
-    if replayed_checks:
-        labels |= set(_STOP_MARKS)
     shown = {label: colour for label, colour in _DETAIL_COLOURS.items() if label in labels}
     colour = alt.Color(
         "mark:N",
@@ -813,51 +1250,58 @@ def _rates_chart(detail: RunDetail, max_precision: float | None = None) -> alt.L
         legend=alt.Legend(orient="bottom", columns=3),
     )
     # Raw sample rates swing far wider than anything else, so they are clipped to the rest.
-    rates = [batch.rate for batch in detail.batches]
+    rates = [batch["rate"] for batch in batches]
     rates += [marker.value for marker in detail.levels]
     rates += [point.rate for point in detail.running]
     rates += [bound for bar in detail.intervals for bound in (bar.low, bar.high)]
     rates += list(detail.precision_band or ())
     if replayed is not None:
-        # Every stop the control bar reaches has an estimate interval narrower than its largest
-        # precision.
+        # Every stop the page reaches has an estimate interval narrower than its largest precision.
         rates += [
             bound
-            for check in replayed_checks
+            for check in replayed.checks
             if check["warmup_end_ns"] is not None
             and check["relative_half_width"] is not None
             and check["steady_state_throughput"] is not None
             and (max_precision is None or check["relative_half_width"] < max_precision)
             for bound in _around(check["steady_state_throughput"], check["relative_half_width"])
         ]
-        if replayed.end_of_run is not None and max_precision is not None:
-            rates += _around(replayed.end_of_run, max_precision)
+        for baseline in replayed.baselines:
+            end = baseline["steady_state_throughput"]
+            if end is None:
+                continue
+            rates.append(end)
+            if baseline["relative_half_width"] is not None:
+                rates += _around(end, baseline["relative_half_width"])
+            if max_precision is not None:
+                rates += _around(end, max_precision)
     y_scale = alt.Scale(zero=False)
     if rates:
         pad = (max(rates) - min(rates)) * 0.1 or max(rates) * 0.05
         y_scale = alt.Scale(domain=[min(rates) - pad, max(rates) + pad])
     y = alt.Y("rate:Q", title="Rows per second", scale=y_scale)
 
-    def rows(mark: str, items: list[Any]) -> alt.Data:
-        return alt.Data(values=[{"mark": mark, **asdict(item)} for item in items])
+    def rows(mark: str, items: list[Any]) -> alt.InlineData:
+        return alt.InlineData(values=[{"mark": mark, **asdict(item)} for item in items])
 
+    batch_rates = alt.Chart(alt.InlineData(values=[{"mark": "batch rate", **batch} for batch in batches]))
+    if replayed is not None:
+        batch_rates = batch_rates.transform_filter("datum.batch_duration_ns == batch_duration_ns")
     layers = [
         alt.Chart(rows("sample rate", detail.samples))
         .mark_rule(clip=True, strokeWidth=1.5)
         .encode(alt.X("start_s:Q", axis=_SECONDS), x2="end_s:Q", y=y, color=colour),
-        alt.Chart(rows("batch rate", detail.batches))
-        .mark_rule(strokeWidth=2.5)
-        .encode(
+        batch_rates.mark_rule(strokeWidth=2.5).encode(
             alt.X("start_s:Q", axis=_SECONDS),
             x2="end_s:Q",
             y=y,
             color=colour,
             tooltip=[alt.Tooltip("rate:Q", title="Batch rate", format=",.0f")],
         ),
-        alt.Chart(alt.Data(values=[{"mark": marker.label, "rate": marker.value} for marker in detail.levels]))
+        alt.Chart(alt.InlineData(values=[{"mark": marker.label, "rate": marker.value} for marker in detail.levels]))
         .mark_rule(strokeDash=[6, 3])
         .encode(y=y, color=colour, tooltip=[alt.Tooltip("mark:N"), alt.Tooltip("rate:Q", format=",.0f")]),
-        alt.Chart(alt.Data(values=[{"mark": marker.label, "elapsed_s": marker.value} for marker in detail.times]))
+        alt.Chart(alt.InlineData(values=[{"mark": marker.label, "elapsed_s": marker.value} for marker in detail.times]))
         .mark_rule(strokeDash=[4, 4])
         .encode(
             alt.X("elapsed_s:Q", axis=_SECONDS),
@@ -867,7 +1311,7 @@ def _rates_chart(detail: RunDetail, max_precision: float | None = None) -> alt.L
         alt.Chart(rows("running estimate", detail.running))
         .mark_line(strokeWidth=2)
         .encode(alt.X("elapsed_s:Q", axis=_SECONDS), y=y, color=colour),
-        alt.Chart(alt.Data(values=[asdict(bar) | {"mark": bar.label} for bar in detail.intervals]))
+        alt.Chart(alt.InlineData(values=[asdict(bar) | {"mark": bar.label} for bar in detail.intervals]))
         .mark_rule(strokeWidth=4)
         .encode(
             alt.X("elapsed_s:Q", axis=_SECONDS),
@@ -877,15 +1321,18 @@ def _rates_chart(detail: RunDetail, max_precision: float | None = None) -> alt.L
             tooltip=_interval_tooltip(),
         ),
     ]
-    if replayed_checks:
-        layers += _would_be_marks(alt.Data(values=replayed_checks), y, y_scale, colour)
     precision_band = None
     if detail.precision_band is not None:
         low, high = detail.precision_band
-        precision_band = alt.Chart(alt.Data(values=[{"low": low, "high": high}]))
-    elif replayed is not None and replayed.end_of_run is not None:
-        precision_band = alt.Chart(alt.Data(values=[{"end": replayed.end_of_run}])).transform_calculate(
-            low="datum.end * (1 - precision)", high="datum.end * (1 + precision)"
+        precision_band = alt.Chart(alt.InlineData(values=[{"low": low, "high": high}]))
+    if replayed is not None:
+        baselines = on_selected_pair(alt.Chart(alt.InlineData(values=replayed.baselines)))
+        layers += _end_of_run_marks(baselines, y, y_scale, colour)
+        layers += _would_be_marks(alt.InlineData(values=replayed.checks), y, y_scale, colour)
+        precision_band = baselines.transform_filter("isValid(datum.steady_state_throughput)").transform_calculate(
+            mark="'precision band'",
+            low="datum.steady_state_throughput * (1 - precision)",
+            high="datum.steady_state_throughput * (1 + precision)",
         )
     if precision_band is not None:
         # The band has no x, so it spans the chart; it goes first to sit behind everything.
@@ -898,10 +1345,62 @@ def _rates_chart(detail: RunDetail, max_precision: float | None = None) -> alt.L
     return alt.layer(*layers).properties(width=600, height=250).interactive()
 
 
-def _would_be_marks(checks: alt.Data, y: alt.Y, y_scale: alt.Scale, colour: alt.Color) -> list[alt.Chart]:
+def _end_of_run_labels(baselines: list[dict[str, Any]]) -> set[str]:
+    """The end-of-run marks some pair of a replayed run has."""
+    columns = {
+        END_OF_RUN_ESTIMATE: "steady_state_throughput",
+        "end-of-run warmup end": "warmup_end_ns",
+        MAXIMUM_DURATION: "capped_at_ns",
+    }
+    return {label for label, column in columns.items() if any(baseline[column] is not None for baseline in baselines)}
+
+
+def _end_of_run_marks(baselines: alt.Chart, y: alt.Y, y_scale: alt.Scale, colour: alt.Color) -> list[alt.Chart]:
+    """The end-of-run warmup end, estimate and estimate interval, and the sample that caps a probe,
+    under the selected pair."""
+
+    def time(mark: str, ns: str) -> alt.Chart:
+        return (
+            baselines.transform_filter(f"isValid(datum.{ns})")
+            .transform_calculate(mark=f"'{mark}'", elapsed_s=f"datum.{ns} / 1e9")
+            .mark_rule(strokeDash=[4, 4])
+            .encode(
+                alt.X("elapsed_s:Q", axis=_SECONDS),
+                color=colour,
+                tooltip=[alt.Tooltip("mark:N"), _seconds_tooltip("elapsed_s")],
+            )
+        )
+
+    estimate = baselines.transform_filter("isValid(datum.steady_state_throughput)")
+    # Each estimate interval is drawn where its measurement window ends.
+    return [
+        time("end-of-run warmup end", "warmup_end_ns"),
+        time(MAXIMUM_DURATION, "capped_at_ns"),
+        estimate.transform_calculate(mark=f"'{END_OF_RUN_ESTIMATE}'", rate="datum.steady_state_throughput")
+        .mark_rule(strokeDash=[6, 3])
+        .encode(y=y, color=colour, tooltip=[alt.Tooltip("mark:N"), alt.Tooltip("rate:Q", format=",.0f")]),
+        estimate.transform_filter("isValid(datum.relative_half_width) && isValid(datum.window_end_ns)")
+        .transform_calculate(
+            mark=f"'{END_OF_RUN_ESTIMATE}'",
+            elapsed_s="datum.window_end_ns / 1e9",
+            low="datum.steady_state_throughput * (1 - datum.relative_half_width)",
+            high="datum.steady_state_throughput * (1 + datum.relative_half_width)",
+        )
+        .mark_rule(strokeWidth=4)
+        .encode(
+            alt.X("elapsed_s:Q", axis=_SECONDS),
+            alt.Y("low:Q", scale=y_scale),
+            y2="high:Q",
+            color=colour,
+            tooltip=_interval_tooltip(),
+        ),
+    ]
+
+
+def _would_be_marks(checks: alt.InlineData, y: alt.Y, y_scale: alt.Scale, colour: alt.Color) -> list[alt.Chart]:
     """The would-stop point, the would-be warmup end, estimate and estimate interval, and the
     running estimate, at the page's stop over `checks`."""
-    stop = with_stop(alt.Chart(checks)).transform_filter("datum.stops_here")
+    stop = _stop_over(checks).transform_filter("datum.stops_here")
 
     def time(mark: str, ns: str) -> alt.Chart:
         return (
@@ -939,11 +1438,11 @@ def _would_be_marks(checks: alt.Data, y: alt.Y, y_scale: alt.Scale, colour: alt.
     ]
 
 
-def _running_estimate(checks: alt.Data) -> alt.Chart:
+def _running_estimate(checks: alt.InlineData) -> alt.Chart:
     """The running estimate from the page's stop: at each later tightness check, the rows since the
     sample of the stop's warmup end over the time since."""
     return (
-        with_stop(alt.Chart(checks))
+        _stop_over(checks)
         .transform_calculate(
             stop_warmup_sample_ns="datum.stops_here ? datum.warmup_sample_ns : null",
             stop_warmup_rows="datum.stops_here ? datum.warmup_rows : null",
@@ -965,10 +1464,13 @@ def _running_estimate(checks: alt.Data) -> alt.Chart:
     )
 
 
-def _tightness_check_panel(checks: alt.Data, half_widths: tuple[float, float]) -> alt.LayerChart:
-    """Each tightness check's relative half-width against the precision, on the axis `half_widths`,
-    coloured by whether it passes and hollow if it found no end of warmup, with the minimum
-    duration, the stop and how a probe would have ended.
+def _tightness_check_panel(
+    checks: alt.InlineData, half_widths: tuple[float, float], missing: list[tuple[int, int]]
+) -> alt.LayerChart:
+    """Each tightness check of the selected pair's relative half-width against the precision, on
+    the axis `half_widths`, coloured by whether it passes and hollow if it found no end of warmup,
+    with the minimum duration, the stop and how a probe would have ended. Under a pair the run is
+    `missing`, a note says why it has no tightness checks.
 
     A tightness check whose relative half-width is off the axis is pinned to its nearer edge as a
     triangle, and one that found no estimate interval to the top edge, so that every check shows.
@@ -990,7 +1492,7 @@ def _tightness_check_panel(checks: alt.Data, half_widths: tuple[float, float]) -
         alt.Tooltip("state:N", title="Tightness check"),
     ]
     points = (
-        with_stop(alt.Chart(checks))
+        _stop_over(checks)
         .transform_calculate(
             elapsed_s="datum.elapsed_ns / 1e9",
             warmup_end_s="isValid(datum.warmup_end_ns) ? datum.warmup_end_ns / 1e9 : null",
@@ -1020,32 +1522,49 @@ def _tightness_check_panel(checks: alt.Data, half_widths: tuple[float, float]) -
     return alt.layer(
         points.transform_filter("isValid(datum.warmup_end_ns)").mark_point(filled=True, size=30),
         points.transform_filter("!isValid(datum.warmup_end_ns)").mark_point(filled=False, size=30),
-        alt.Chart(alt.Data(values=[{}]))
+        alt.Chart(alt.InlineData(values=[{}]))
         .transform_calculate(relative_half_width="precision", mark="'precision'")
         .mark_rule(color="black", clip=True)
         .encode(y, tooltip=[alt.Tooltip("relative_half_width:Q", title="Precision", format=".2%")]),
-        alt.Chart(alt.Data(values=[{}]))
+        alt.Chart(alt.InlineData(values=[{}]))
         .transform_calculate(elapsed_s="min_duration_ns / 1e9", mark="'minimum duration'")
         .mark_rule(color="black", strokeDash=[2, 2])
         .encode(alt.X("elapsed_s:Q", axis=_SECONDS), tooltip=[_seconds_tooltip("elapsed_s", "Minimum duration")]),
-        with_stop(alt.Chart(checks))
+        _stop_over(checks)
         .transform_filter("datum.stops_here")
         .transform_calculate(elapsed_s="datum.elapsed_ns / 1e9")
         .mark_rule(color=_DETAIL_COLOURS["would-stop"], strokeDash=[4, 4], clip=True)
         .encode(alt.X("elapsed_s:Q", axis=_SECONDS)),
         # How a probe would have ended is the same on every check of the run; one says it.
-        with_stop(alt.Chart(checks))
+        _stop_over(checks)
         .transform_filter("datum.check_index == 0")
         .transform_calculate(reason=reason)
         .mark_text(align="left", baseline="bottom", dy=-4)
         .encode(x=alt.value(0), y=alt.value(0), text="reason:N"),
+        on_selected_pair(
+            alt.Chart(
+                alt.InlineData(
+                    values=[
+                        {
+                            "batch_duration_ns": batch_duration_ns,
+                            "window_groups": window_groups,
+                            "note": f"Not replayed under {batch_duration_ns / 1e9:g} s batches, as they are"
+                            " shorter than the run's poll period.",
+                        }
+                        for batch_duration_ns, window_groups in missing
+                    ]
+                )
+            )
+        )
+        .mark_text(align="left", baseline="bottom", dy=-4)
+        .encode(x=alt.value(0), y=alt.value(0), text="note:N"),
     ).properties(width=600, height=150)
 
 
-def _warmup_strip(checks: alt.Data) -> alt.Chart:
+def _warmup_strip(checks: alt.InlineData) -> alt.Chart:
     """The end of warmup each tightness check found, at the check's time."""
     return (
-        alt.Chart(checks)
+        on_selected_pair(alt.Chart(checks))
         .transform_filter("isValid(datum.warmup_end_ns)")
         .transform_calculate(elapsed_s="datum.elapsed_ns / 1e9", warmup_end_s="datum.warmup_end_ns / 1e9")
         .mark_line(
@@ -1060,6 +1579,11 @@ def _warmup_strip(checks: alt.Data) -> alt.Chart:
         )
         .properties(width=600, height=60)
     )
+
+
+def _stop_over(checks: alt.InlineData) -> alt.Chart:
+    """The selected pair's tightness checks among `checks`, with the page's stop over them."""
+    return with_stop(on_selected_pair(alt.Chart(checks)))
 
 
 def _seconds_tooltip(field: str, title: str = "Seconds") -> alt.Tooltip:
@@ -1175,6 +1699,7 @@ estimator, over a shorter and a longer measurement window. The page covers every
 recorded in the metrics directory and leaves out every other run.
 </p>
 $controls
+$overview
 
 <details>
 <summary><h2>Reading the headline</h2></summary>
@@ -1199,12 +1724,16 @@ a looser estimate than a run ends with.
 <p>
 A run whose stopping rule never settled before its first partition end has no would-be estimate.
 It appears in the never-settled strip below the headline, with only its end-of-run estimate
-interval.
+interval. When the metrics directory has replay tables, the headline follows the selected settings.
+A hollow point is a run that settled only after the sample that caps a probe at its maximum
+duration, so a probe would have been capped first. The strip below lists the runs that never
+settled, saying which a probe would have been capped on, and the runs not replayed under the
+selected batch duration.
 </p>
 </details>
 $headline_note
 $headline
-<p class="caption">$caption</p>
+$caption
 <p>Click a run in the headline to bring its detail chart into view.</p>
 
 <details>
@@ -1251,8 +1780,8 @@ rates and its end-of-run marks.
 <p>
 When the metrics directory has replay tables, each replayed run's chart shows how the stopping rule
 would have judged it under the settings in the control bar, which stays at the top of the page. Its
-batch duration and window groups decide the run's tightness checks, one at the end of each probe
-batch, and its end-of-run marks. Its precision, consecutive checks and minimum duration decide
+batch duration and window groups, which a click on the overview selects, decide the run's tightness
+checks, one at the end of each probe batch, and its end-of-run marks. Its precision, consecutive checks and minimum duration decide
 where the probe stops among those checks, and the sliders move them freely between the grid's
 values. The would-stop point, the would-be warmup end, estimate and estimate interval, the running
 estimate and the precision band follow the sliders. The grey dashed rule is the maximum duration:
@@ -1292,12 +1821,46 @@ function showDetail(run) {
     if (selected) section.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 }
-// The views whose stop the control bar moves: the replayed runs' detail charts.
-const stopViews = [];
+// The settings the page selects, each a parameter of every view that follows the selection.
+const SETTINGS = ["batch_duration_ns", "window_groups", "precision", "consecutive_checks", "min_duration_ns"];
+// Every setting moved since the page opened, so that a view that loads late catches up.
+const selection = {};
+const selectionViews = [];
+function apply(view, settings) {
+  for (const [name, value] of Object.entries(settings)) view.signal(name, value);
+  view.runAsync();
+}
+function select(settings) {
+  Object.assign(selection, settings);
+  for (const view of selectionViews) apply(view, settings);
+}
+function showSlider(input) {
+  input.nextElementSibling.textContent = input.value + (input.dataset.scale === "1" ? "" : " s");
+}
+function selectCombination(datum) {
+  for (const input of document.querySelectorAll(".controls input")) {
+    input.value = datum[input.dataset.param] / Number(input.dataset.scale);
+    showSlider(input);
+  }
+  document.getElementById("pair").textContent =
+    "Batch duration " + datum.batch_duration_ns / 1e9 + " s, " + datum.window_groups + " window groups";
+  select(Object.fromEntries(SETTINGS.map((name) => [name, datum[name]])));
+}
 for (const spec of document.querySelectorAll('script[type="application/json"]')) {
   const parsed = JSON.parse(spec.textContent);
   vegaEmbed("#" + spec.id + "-chart", parsed).then((result) => {
-    if ((parsed.params || []).some((param) => param.name === "precision")) stopViews.push(result.view);
+    if ((parsed.params || []).some((param) => param.name === "precision")) {
+      selectionViews.push(result.view);
+      apply(result.view, selection);
+    }
+    if (spec.id === "overview") {
+      result.view.addEventListener("click", (event, item) => {
+        // The frontier's line stands for several combinations, so a click on it selects none.
+        if (item && item.mark.marktype !== "line" && item.datum && item.datum.batch_duration_ns !== undefined) {
+          selectCombination(item.datum);
+        }
+      });
+    }
     if (spec.id !== "headline") return;
     result.view.addEventListener("click", (event, item) => {
       if (item && item.datum && item.datum.run_id) showDetail(item.datum.run_id);
@@ -1306,9 +1869,9 @@ for (const spec of document.querySelectorAll('script[type="application/json"]'))
 }
 for (const input of document.querySelectorAll(".controls input")) {
   input.addEventListener("input", () => {
-    const scale = Number(input.dataset.scale);
-    input.nextElementSibling.textContent = input.value + (scale === 1 ? "" : " s");
-    for (const view of stopViews) view.signal(input.dataset.param, Number(input.value) * scale).runAsync();
+    showSlider(input);
+    // Rounded, so that a slider on a grid value selects it exactly despite floating point steps.
+    select({ [input.dataset.param]: Number((Number(input.value) * Number(input.dataset.scale)).toPrecision(12)) });
   });
 }
 </script>
