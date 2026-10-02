@@ -290,6 +290,11 @@ One reading, taken during a throughput probe, of how many rows its sink has rece
 when.
 _Avoid_: poll, tick, snapshot
 
+**Probe batch**:
+A run of a throughput probe's consecutive progress samples spanning at least the batch duration,
+whose rate the stopping rule takes as one observation.
+_Avoid_: batch (unqualified: record batches, and **Sample group** avoids it), bucket, interval
+
 **Warmup**:
 The stretch at the start of a throughput probe whose progress samples its estimate leaves out,
 because throughput has not yet settled.
@@ -309,10 +314,25 @@ The uncertainty a throughput probe attaches to its steady-state throughput: the 
 likely lies in, judged by how that rate varied over the measurement window.
 _Avoid_: confidence interval (unqualified), error bar, CI
 
+**Stopping rule**:
+The judgement, from a throughput probe's progress samples and its settings alone, of when the probe
+stops and with what estimate.
+_Avoid_: stop condition, convergence test
+
+**Tightness check**:
+The stopping rule's judgement, at the end of a probe batch, of whether warmup has ended and the
+estimate interval is narrower than the precision.
+_Avoid_: check (unqualified), test, poll
+
 **Stop reason**:
 Why a throughput probe ended: its estimate settled (steady), a partition of its plan finished and
 closed its measurement window (completed), or it reached its time limit (capped).
 _Avoid_: exit status, termination cause
+
+**Replay**:
+Judging a recorded throughput probe again under other settings, from its recorded progress samples,
+as the stopping rule would have judged it had it run with them.
+_Avoid_: simulation, rerun, re-evaluation
 
 ### Benchmark settings
 

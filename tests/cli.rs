@@ -576,3 +576,170 @@ fn read_recorded_run(path: &str, run_id: &str) -> RecordedRun {
     )
     .unwrap()
 }
+
+/// Runs the binary with `args`, and hands back its standard output.
+fn run_binary(args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_datafusion-sandbox"))
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Shadow-probes the fixture `dataset` into `metrics_directory` as `run_id`, with the probe flags
+/// `settings`.
+fn shadow_probe(dataset: &str, metrics_directory: &str, run_id: &str, settings: &[&str]) {
+    let mut args = vec![
+        "--threads",
+        "1",
+        "combine-refs",
+        dataset,
+        "--probe",
+        "--shadow",
+        "--metrics",
+        metrics_directory,
+        "--run-id",
+        run_id,
+    ];
+    args.extend_from_slice(settings);
+    run_binary(&args);
+}
+
+/// The rows of the replay table at `path` whose settings columns render as `settings`, each row
+/// rendered at the columns `columns`.
+fn rows_at(path: &str, settings: &[(&str, &str)], columns: &[&str]) -> Vec<Vec<String>> {
+    let batches = read_file(path, &InputFormat::PARQUET);
+    batches
+        .iter()
+        .flat_map(|batch| {
+            (0..batch.num_rows())
+                .filter(|&row| {
+                    settings.iter().all(|&(name, value)| {
+                        array_value_to_string(batch.column_by_name(name).unwrap(), row).unwrap()
+                            == value
+                    })
+                })
+                .map(|row| {
+                    columns
+                        .iter()
+                        .map(|&name| {
+                            array_value_to_string(batch.column_by_name(name).unwrap(), row).unwrap()
+                        })
+                        .collect()
+                })
+                .collect::<Vec<Vec<String>>>()
+        })
+        .collect()
+}
+
+/// The would-be and end-of-run columns a replay at the recorded settings reproduces, as the run
+/// record names them and as the replays and replay baselines tables do.
+const WOULD_BE_COLUMNS: [&str; 4] = [
+    "would_stop_ns",
+    "would_be_steady_state_throughput",
+    "would_be_relative_half_width",
+    "would_be_warmup_end_ns",
+];
+const END_OF_RUN_COLUMNS: [&str; 4] = [
+    "steady_state_throughput",
+    "relative_half_width",
+    "warmup_end_ns",
+    "window_end_ns",
+];
+
+/// Asserts that the replay of `run_id` in `metrics_directory` at the settings `settings`, as its
+/// columns render them, reproduces exactly what the run recorded.
+fn assert_replay_reproduces_the_record(
+    metrics_directory: &str,
+    run_id: &str,
+    settings: &[(&str, &str)],
+) {
+    let directory = MetricsDirectory::new(metrics_directory);
+    let record = read_recorded_run(metrics_directory, run_id)
+        .record
+        .expect("a run record");
+    let recorded = |columns: &[&str]| -> Vec<String> {
+        columns
+            .iter()
+            .map(|&name| {
+                let [value] = column_strings(&record, name).try_into().unwrap();
+                value
+            })
+            .collect()
+    };
+    let pair = settings.get(..2).unwrap();
+
+    assert_eq!(
+        rows_at(&directory.replays_path(run_id), settings, &WOULD_BE_COLUMNS),
+        [recorded(&WOULD_BE_COLUMNS)]
+    );
+    assert_eq!(
+        rows_at(
+            &directory.replay_baselines_path(run_id),
+            pair,
+            &END_OF_RUN_COLUMNS
+        ),
+        [recorded(&END_OF_RUN_COLUMNS)]
+    );
+}
+
+/// `replay` replays the shadow probe and skips the probe, replacing any earlier replay's files,
+/// and at the shadow probe's recorded settings, the defaults on its grid, reproduces its record.
+#[test]
+fn replay_replays_each_shadow_probe_over_its_grid_and_skips_other_runs() {
+    let dataset = fixture::contig_position_disk_fixture(FixtureFormat::Vortex);
+    let dir = tempfile::tempdir().unwrap();
+    let metrics_directory = dir.path().join("metrics").to_str().unwrap().to_string();
+    shadow_probe(
+        dataset.table_path(),
+        &metrics_directory,
+        "cli-shadow",
+        &["--poll-period", "0.001"],
+    );
+    run_binary(&[
+        "--threads",
+        "1",
+        "combine-refs",
+        dataset.table_path(),
+        "--probe",
+        "--metrics",
+        &metrics_directory,
+        "--run-id",
+        "cli-probe",
+    ]);
+    let directory = MetricsDirectory::new(&metrics_directory);
+    let stale = directory.replays_path("cli-shadow");
+    std::fs::create_dir_all(std::path::Path::new(&stale).parent().unwrap()).unwrap();
+    std::fs::write(&stale, "not a parquet file").unwrap();
+
+    let stdout = run_binary(&["replay", &metrics_directory]);
+    let rerun = run_binary(&["replay", &metrics_directory]);
+
+    assert_eq!(
+        stdout,
+        "shadow probes replayed: 1\nother runs skipped: 1\nstale replays removed: 0\n"
+    );
+    assert_eq!(rerun, stdout);
+    let replays: usize = read_file(&stale, &InputFormat::PARQUET)
+        .iter()
+        .map(RecordBatch::num_rows)
+        .sum();
+    assert_eq!(replays, 576);
+    assert!(!std::path::Path::new(&directory.replays_path("cli-probe")).exists());
+    assert_replay_reproduces_the_record(
+        &metrics_directory,
+        "cli-shadow",
+        &[
+            ("batch_duration_ns", "1000000000"),
+            ("window_groups", "10"),
+            ("precision", "0.02"),
+            ("consecutive_checks", "3"),
+            ("min_duration_ns", "20000000000"),
+        ],
+    );
+}

@@ -173,7 +173,10 @@ takes.
 A probe records three tables under `DIR`, all Parquet and one file per run: the run record in
 `DIR/runs/<id>.parquet`, the run metrics as they stood at the stop in `DIR/metrics/<id>.parquet`,
 and its progress samples, one row each of run id, sample index, elapsed nanoseconds, and rows, in
-`DIR/progress/<id>.parquet`. Its run record holds the rows received as `rows_written`, times
+`DIR/progress/<id>.parquet`. Replaying a shadow probe adds three more tables, again one file per
+run: its tightness checks in `DIR/checks/<id>.parquet`, its end-of-run decisions in
+`DIR/replay-baselines/<id>.parquet`, and its stops in `DIR/replays/<id>.parquet`; see step 4 of
+the calibration below. Its run record holds the rows received as `rows_written`, times
 `execute_ns` to the stop, and fills the probe columns a measured write leaves empty: `action`,
 `stop_reason`, `steady_state_throughput`, `relative_half_width`, `warmup_end_ns`, `window_end_ns`,
 `window_rows`, `first_partition_end_ns`, and every setting, as `poll_period_ns`,
@@ -248,8 +251,34 @@ Calibrate the stopping rule with shadow probes before relying on it in a sweep:
    should not drift over the run, since the estimate stands for the loci a probe does not reach
    only if it doesn't. The probe viewer's detail chart for each shadow run draws its batch rates
    over the run, with the stopping rule's decisions and the running estimate on them.
-4. Tune `--batch` from the recorded progress samples. Their row counts are cumulative, so merging
-   samples replays the rule offline with any longer batch duration, and with any other setting.
+4. Tune the stopping rule by replaying the shadow probes. Their progress samples' row counts are
+   cumulative and the rule is a pure function of the samples and its settings, so
+   `cargo run -r -- replay DIR` judges every shadow probe in `DIR` again under a grid of settings
+   without rerunning a sweep. The grid holds every combination of a batch duration of 0.5, 1, 2
+   or 5 s, 5, 10, 20 or 40 window groups, a precision of 0.01, 0.02 or 0.05, 1, 3, 5 or 10
+   consecutive checks, and a minimum duration of 10, 20 or 60 s, with each run's own poll period
+   and maximum duration. A run leaves out every pair of batch duration and window groups whose
+   batch duration is shorter than its poll period. `replay` skips every other run and writes three
+   tables, one Parquet file per shadow probe, replacing any an earlier replay wrote. It then
+   deletes the tables' files of any run that is no longer a shadow probe in `DIR`, such as one
+   whose run record was removed, and prints how many runs it replayed, skipped and removed:
+   - `DIR/checks/<id>.parquet`, one row per tightness check under each pair: `batch_duration_ns`,
+     `window_groups`, `check_index`, `sample_index`, `elapsed_ns`, and the check's
+     `warmup_end_ns`, `steady_state_throughput`, and `relative_half_width`.
+   - `DIR/replay-baselines/<id>.parquet`, one row per pair: the end-of-run decision under it, as
+     the run record's `steady_state_throughput`, `relative_half_width`, `warmup_end_ns`, and
+     `window_end_ns` hold it, and `capped_at_ns`, the time of the first progress sample at or
+     past the maximum duration.
+   - `DIR/replays/<id>.parquet`, one row per combination of the five settings: `would_stop_ns`
+     and the `would_be_` columns as a shadow probe with it would have recorded them, and
+     `probe_stop_reason`, how a probe with it would have ended. It is `steady` if the probe would
+     have stopped steady no later than the cap. It is `capped` if the cap comes first and before
+     the first partition end. Otherwise it is `completed`.
+
+   At a shadow probe's recorded settings, its replay reproduces what it recorded.
+   ```
+   cargo run -r -- replay data/runs
+   ```
 
 An earlier variant of the reference combiner is still available as `cargo run -r --example combiner1`.
 

@@ -20,6 +20,7 @@ use datafusion_sandbox::locus::SplitPoints;
 use datafusion_sandbox::metrics_directory::MetricsDirectory;
 use datafusion_sandbox::ordered_frame::OutputLayout;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
+use datafusion_sandbox::replay::Grid;
 use datafusion_sandbox::split_points;
 use datafusion_sandbox::throughput_probe::{ProbeKind, ProbeSettings};
 use datafusion_sandbox::write::WriteTarget;
@@ -92,6 +93,20 @@ enum Command {
     CombineAlleles(CombinerArgs),
     /// Compute row-balanced split points from a locus-sorted table.
     BalanceSplitPoints(BalanceSplitPointsArgs),
+    /// Replay every shadow probe in the metrics directory DIR over a grid of stopping rule
+    /// settings.
+    ///
+    /// Writes each shadow probe's tightness checks, end-of-run decisions and stops to
+    /// DIR/checks/<ID>.parquet, DIR/replay-baselines/<ID>.parquet and DIR/replays/<ID>.parquet,
+    /// replacing any an earlier replay wrote, and removes those of runs no longer recorded as
+    /// shadow probes.
+    Replay(ReplayArgs),
+}
+
+#[derive(Args)]
+struct ReplayArgs {
+    #[arg(value_name = "DIR")]
+    metrics_dir: String,
 }
 
 #[derive(Args)]
@@ -473,6 +488,11 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
                 "balance-split-points was sent through the combiner resolver".to_string(),
             ));
         }
+        Command::Replay(_) => {
+            return Err(DataFusionError::Internal(
+                "replay was sent through the combiner resolver".to_string(),
+            ));
+        }
     };
     let CombinerArgs {
         path,
@@ -565,6 +585,18 @@ fn main() -> Result<()> {
                 options,
             )?;
             println!("{points}");
+        }
+        Command::Replay(ReplayArgs { metrics_dir }) => {
+            let threads = threads.unwrap_or_else(pipeline::default_thread_count);
+            let options = PipelineOptions::for_paths(threads, [metrics_dir.as_str()])?;
+            let directory = MetricsDirectory::new(&metrics_dir);
+            let count = pipeline::run(
+                move |ctx| async move { directory.replay(&ctx, &Grid::default()).await },
+                options,
+            )?;
+            println!("shadow probes replayed: {}", count.replayed);
+            println!("other runs skipped: {}", count.skipped);
+            println!("stale replays removed: {}", count.removed);
         }
         command => {
             let run = resolve(Cli { command, threads })?;

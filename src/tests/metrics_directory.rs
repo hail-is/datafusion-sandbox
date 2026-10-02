@@ -3,13 +3,17 @@
 
 use crate::{
     fixture::{self, MemoryStore, RecordedRun},
+    format::InputFormat,
     generated::make_range_table,
-    metrics_directory::MetricsDirectory,
+    metrics_directory::{MetricsDirectory, ReplayCount},
     pipeline::{self, PipelineOptions},
-    run_metrics,
+    replay::Grid,
+    run_metrics::{self, ProbeRecord, RunRecord},
     sink::{self, CollectingSink, DataSinkTarget},
-    tests::support::{run_record, string_values},
-    throughput_probe::ProgressSample,
+    tests::support::{
+        f64_values, noisy_series, recorded_would_stop, run_record, string_values, u64_values,
+    },
+    throughput_probe::{self, ProbeSettings, ProbedKind, ProgressSample},
 };
 
 use datafusion::{
@@ -19,7 +23,7 @@ use datafusion::{
     prelude::{JoinType, SessionContext, col},
 };
 use object_store::{ObjectStoreExt, PutPayload};
-use std::{future::Future, sync::Arc};
+use std::{future::Future, num::NonZeroU32, sync::Arc, time::Duration};
 
 /// The metrics directory every test here records under, on the store named `store`, spelled with
 /// a trailing slash that the layout does not repeat.
@@ -45,6 +49,18 @@ fn the_layout_names_one_file_per_run_in_each_table() {
     assert_eq!(
         directory.progress_samples_path("run-a"),
         "gs://bucket/benchmarks/progress/run-a.parquet"
+    );
+    assert_eq!(
+        directory.checks_path("run-a"),
+        "gs://bucket/benchmarks/checks/run-a.parquet"
+    );
+    assert_eq!(
+        directory.replay_baselines_path("run-a"),
+        "gs://bucket/benchmarks/replay-baselines/run-a.parquet"
+    );
+    assert_eq!(
+        directory.replays_path("run-a"),
+        "gs://bucket/benchmarks/replays/run-a.parquet"
     );
 }
 
@@ -293,6 +309,196 @@ fn a_record_of_another_run_is_refused() {
     let error = failed.unwrap_err().to_string();
     assert!(error.contains("run-b"), "{error}");
     assert!(recorded.record.is_none() && recorded.metrics.is_none());
+}
+
+/// Settings under which [`noisy_series`] settles quickly.
+fn eager_settings() -> ProbeSettings {
+    ProbeSettings {
+        batch_duration: Duration::from_millis(300),
+        precision: 0.3,
+        consecutive_checks: NonZeroU32::MIN,
+        window_groups: 5,
+        min_duration: Duration::ZERO,
+        ..ProbeSettings::default()
+    }
+}
+
+/// The run record of a shadow probe of `run_id` with `settings` over `samples`, whose first
+/// partition end is `first_partition_end_ns`, as a shadow probe deciding after every sample
+/// records it.
+fn shadow_record(
+    run_id: &str,
+    settings: &ProbeSettings,
+    samples: &[ProgressSample],
+    first_partition_end_ns: Option<u64>,
+) -> RunRecord {
+    let would_stop = recorded_would_stop(settings, samples, first_partition_end_ns);
+    RunRecord {
+        probe: Some(ProbeRecord {
+            settings: settings.clone(),
+            decision: throughput_probe::decide(settings, samples, first_partition_end_ns).unwrap(),
+            first_partition_end_ns,
+            kind: ProbedKind::Shadow { would_stop },
+        }),
+        ..run_record(run_id)
+    }
+}
+
+/// The grid of the one combination `settings`.
+fn grid_at(settings: &ProbeSettings) -> Grid {
+    Grid {
+        batch_durations: vec![settings.batch_duration],
+        window_groups: vec![settings.window_groups],
+        precisions: vec![settings.precision],
+        consecutive_checks: vec![settings.consecutive_checks],
+        min_durations: vec![settings.min_duration],
+    }
+}
+
+/// Replaying a directory replays its shadow probe and skips its probe and its measured write.
+/// Over a grid holding the shadow probe's recorded settings, the replay at them reproduces the
+/// would-stop and the end-of-run estimate it recorded.
+#[test]
+fn a_replay_at_a_shadow_probe_s_recorded_settings_reproduces_its_record() {
+    let store = MemoryStore::new("replayed");
+    let directory = directory(&store);
+    let settings = eager_settings();
+    let samples = noisy_series(2, 4, 0.05);
+    let first_partition_end_ns = samples.get(150).map(|sample| sample.elapsed_ns);
+    let shadow = shadow_record("shadow", &settings, &samples, first_partition_end_ns);
+    let ProbedKind::Shadow {
+        would_stop: Some(would_stop),
+    } = shadow.probe.as_ref().unwrap().kind.clone()
+    else {
+        panic!("the shadow probe never settled: {shadow:?}");
+    };
+    let decision = shadow.probe.as_ref().unwrap().decision.clone();
+    let probe = RunRecord {
+        probe: Some(ProbeRecord {
+            kind: ProbedKind::Probe,
+            ..shadow.probe.clone().unwrap()
+        }),
+        ..run_record("probe")
+    };
+    let grid = grid_at(&settings);
+
+    let (count, replays, baselines) = on(&store, move |ctx| async move {
+        let plan = executed_plan(&ctx, false).await?;
+        for record in [&shadow, &probe] {
+            let run = directory.unrecorded(&ctx, &record.run_id).await?;
+            run.record_probe(&ctx, record, &plan, &samples).await?;
+        }
+        let run = directory.unrecorded(&ctx, "write").await?;
+        run.record(&ctx, &run_record("write"), &plan).await?;
+        let count = directory.replay(&ctx, &grid).await?;
+        let read = |path: String| {
+            let ctx = ctx.clone();
+            async move { fixture::read_file(&ctx, &path, &InputFormat::PARQUET, None).await }
+        };
+        Ok((
+            count,
+            read(directory.replays_path("shadow")).await?,
+            read(directory.replay_baselines_path("shadow")).await?,
+        ))
+    });
+
+    assert_eq!(
+        count,
+        ReplayCount {
+            replayed: 1,
+            skipped: 2,
+            removed: 0,
+        }
+    );
+    let [replays] = replays.as_slice() else {
+        panic!("{replays:?}");
+    };
+    assert_eq!(
+        (
+            u64_values(replays, "would_stop_ns"),
+            f64_values(replays, "would_be_steady_state_throughput"),
+            f64_values(replays, "would_be_relative_half_width"),
+            u64_values(replays, "would_be_warmup_end_ns"),
+        ),
+        (
+            vec![Some(would_stop.window_end_ns)],
+            vec![would_stop.steady_state_throughput],
+            vec![would_stop.relative_half_width],
+            vec![would_stop.warmup_end_ns],
+        )
+    );
+    let [baselines] = baselines.as_slice() else {
+        panic!("{baselines:?}");
+    };
+    assert_eq!(
+        (
+            f64_values(baselines, "steady_state_throughput"),
+            f64_values(baselines, "relative_half_width"),
+            u64_values(baselines, "warmup_end_ns"),
+            u64_values(baselines, "window_end_ns"),
+        ),
+        (
+            vec![decision.steady_state_throughput],
+            vec![decision.relative_half_width],
+            vec![decision.warmup_end_ns],
+            vec![Some(decision.window_end_ns)],
+        )
+    );
+}
+
+/// A replay deletes the replay tables' files of runs that are not shadow probes here, such as
+/// one whose run record was removed, and leaves the current shadow probe's files and any file
+/// that is not a table's alone.
+#[test]
+fn a_replay_removes_the_replays_of_runs_no_longer_recorded() {
+    let store = MemoryStore::new("stale-replays");
+    let directory = directory(&store);
+    let settings = eager_settings();
+    let samples = noisy_series(2, 4, 0.05);
+    let first_partition_end_ns = samples.get(150).map(|sample| sample.elapsed_ns);
+    let shadow = shadow_record("shadow", &settings, &samples, first_partition_end_ns);
+    let grid = grid_at(&settings);
+    let stale = [
+        directory.checks_path("gone"),
+        directory.replay_baselines_path("gone"),
+        directory.replays_path("gone"),
+        directory.replays_path("older"),
+    ];
+    let note = format!("{}/replays/notes.txt", directory.path());
+
+    let held = store.clone();
+    let (count, left) = on(&store, move |ctx| async move {
+        let plan = executed_plan(&ctx, false).await?;
+        let run = directory.unrecorded(&ctx, "shadow").await?;
+        run.record_probe(&ctx, &shadow, &plan, &samples).await?;
+        for path in stale.iter().chain([&note]) {
+            put(&held, path).await?;
+        }
+        let count = directory.replay(&ctx, &grid).await?;
+        let mut left = Vec::new();
+        for table in ["checks", "replay-baselines", "replays"] {
+            left.extend(held.locations_under(&format!("benchmarks/{table}")).await);
+        }
+        Ok((count, left))
+    });
+
+    assert_eq!(
+        count,
+        ReplayCount {
+            replayed: 1,
+            skipped: 0,
+            removed: 2,
+        }
+    );
+    assert_eq!(
+        left.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        [
+            "benchmarks/checks/shadow.parquet",
+            "benchmarks/replay-baselines/shadow.parquet",
+            "benchmarks/replays/notes.txt",
+            "benchmarks/replays/shadow.parquet",
+        ]
+    );
 }
 
 /// Runs `pipeline` on a session with `store` registered.
