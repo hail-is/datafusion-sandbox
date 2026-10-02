@@ -19,7 +19,7 @@
 
 use super::{
     FORMATS, FixtureDataset, REPRESENTATIONS, collected_batches, dataset, expected_groups,
-    formulations, planned, sink_plan,
+    formulations, formulations_over, planned, reference_formulations, shared_datasets, sink_plan,
 };
 use crate::fixture::{self, FixtureFormat, SAMPLES, SampleRow, block_on};
 use crate::formulation::Formulation;
@@ -95,20 +95,22 @@ impl LocusRestriction {
 fn filtered_plans_keep_the_filter_inside_the_scans_in_both_formats_and_representations() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let dataset = dataset(format, representation);
-            for formulation in &formulations() {
-                for restriction in LocusRestriction::ALL {
-                    let plan = filtered_physical_plan(
-                        formulation,
-                        &dataset,
-                        restriction.filter(representation),
-                    );
-                    let shape = PlanShape::of(&plan);
-                    shape.assert_filter_stays_inside_the_scans(&expected_groups(
-                        formulation,
-                        SAMPLES.len(),
-                    ));
-                    shape.assert_filter_reaches_every_scan(SAMPLES.len(), representation);
+            for dataset in shared_datasets(format, representation) {
+                let n_input_tables = dataset.input_tables.len();
+                for formulation in &formulations_over(&dataset) {
+                    for restriction in LocusRestriction::ALL {
+                        let plan = filtered_physical_plan(
+                            formulation,
+                            &dataset,
+                            restriction.filter(representation),
+                        );
+                        let shape = PlanShape::of(&plan);
+                        shape.assert_filter_stays_inside_the_scans(&expected_groups(
+                            formulation,
+                            n_input_tables,
+                        ));
+                        shape.assert_filter_reaches_every_scan(n_input_tables, representation);
+                    }
                 }
             }
         }
@@ -119,36 +121,32 @@ fn filtered_plans_keep_the_filter_inside_the_scans_in_both_formats_and_represent
 #[test]
 fn parquet_and_vortex_filtered_plans_have_the_same_operators() {
     for representation in REPRESENTATIONS {
-        let parquet = dataset(FixtureFormat::Parquet, representation);
-        let vortex = dataset(FixtureFormat::Vortex, representation);
-        for formulation in &formulations() {
-            for restriction in LocusRestriction::ALL {
-                let parquet_plan = filtered_physical_plan(
-                    formulation,
-                    &parquet,
-                    restriction.filter(representation),
-                );
-                let vortex_plan = filtered_physical_plan(
-                    formulation,
-                    &vortex,
-                    restriction.filter(representation),
-                );
-                let parquet_shape = PlanShape::of(&parquet_plan);
-                let vortex_shape = PlanShape::of(&vortex_plan);
-                assert_eq!(
-                    parquet_shape.operators(),
-                    vortex_shape.operators(),
-                    "{representation:?} {formulation:?} {restriction:?}:\n{parquet_shape}\n{vortex_shape}",
-                );
+        let [parquet, vortex] = [FixtureFormat::Parquet, FixtureFormat::Vortex]
+            .map(|format| shared_datasets(format, representation));
+        for (parquet, vortex) in parquet.iter().zip(&vortex) {
+            for formulation in &formulations_over(parquet) {
+                for restriction in LocusRestriction::ALL {
+                    let parquet_plan = filtered_physical_plan(
+                        formulation,
+                        parquet,
+                        restriction.filter(representation),
+                    );
+                    let vortex_plan = filtered_physical_plan(
+                        formulation,
+                        vortex,
+                        restriction.filter(representation),
+                    );
+                    let parquet_shape = PlanShape::of(&parquet_plan);
+                    let vortex_shape = PlanShape::of(&vortex_plan);
+                    assert_eq!(
+                        parquet_shape.operators(),
+                        vortex_shape.operators(),
+                        "{representation:?} {formulation:?} {restriction:?}:\n{parquet_shape}\n{vortex_shape}",
+                    );
+                }
             }
         }
     }
-}
-
-/// The reference combiner's formulations among the shared list.
-fn reference_formulations() -> [Formulation; 2] {
-    let [union, grouped_merge, _] = formulations();
-    [union, grouped_merge]
 }
 
 /// The reference combiner has no parallel operators between its unions and its merges, so a
@@ -163,22 +161,23 @@ fn filtering_the_reference_combiner_leaves_its_operators_unchanged() {
     }
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let dataset = dataset(format, representation);
-            for formulation in &reference_formulations() {
-                let unfiltered = super::physical_plan(formulation, &dataset);
-                for restriction in LocusRestriction::ALL {
-                    let filtered = filtered_physical_plan(
-                        formulation,
-                        &dataset,
-                        restriction.filter(representation),
-                    );
-                    let filtered_shape = PlanShape::of(&filtered);
-                    let unfiltered_shape = PlanShape::of(&unfiltered);
-                    assert_eq!(
-                        filtered_shape.operators(),
-                        unfiltered_shape.operators(),
-                        "{format:?} {representation:?} {formulation:?} {restriction:?}:\n{filtered_shape}\n{unfiltered_shape}",
-                    );
+            for dataset in shared_datasets(format, representation) {
+                for formulation in &reference_formulations() {
+                    let unfiltered = super::physical_plan(formulation, &dataset);
+                    for restriction in LocusRestriction::ALL {
+                        let filtered = filtered_physical_plan(
+                            formulation,
+                            &dataset,
+                            restriction.filter(representation),
+                        );
+                        let filtered_shape = PlanShape::of(&filtered);
+                        let unfiltered_shape = PlanShape::of(&unfiltered);
+                        assert_eq!(
+                            filtered_shape.operators(),
+                            unfiltered_shape.operators(),
+                            "{format:?} {representation:?} {formulation:?} {restriction:?}:\n{filtered_shape}\n{unfiltered_shape}",
+                        );
+                    }
                 }
             }
         }
