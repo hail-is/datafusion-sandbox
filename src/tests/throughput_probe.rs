@@ -1,4 +1,7 @@
-use crate::throughput_probe::{self, Decision, ProbeSettings, ProgressSample, StopReason};
+use crate::{
+    tests::support::{noisy_series, recorded_would_stop},
+    throughput_probe::{self, Decision, ProbeSettings, ProgressSample, StopReason, TightnessCheck},
+};
 
 use std::{num::NonZeroU32, time::Duration};
 
@@ -537,5 +540,480 @@ fn a_group_spanning_no_time_leaves_no_relative_half_width() {
         throughput_probe::decide(&settings, &samples, None)
             .map(|decision| (decision.stop_reason, decision.relative_half_width)),
         Some((StopReason::Capped, None))
+    );
+}
+
+/// A tightness check at `seconds` into a probe polled every 100 ms, with an end of warmup at the
+/// first sample if `warmed_up`.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "made-up checks are far too early to overflow"
+)]
+fn check(seconds: u64, warmed_up: bool, relative_half_width: Option<f64>) -> TightnessCheck {
+    TightnessCheck {
+        elapsed_ns: seconds * 1_000 * MS,
+        sample_index: usize::try_from(seconds * 10).unwrap(),
+        warmup_end_ns: warmed_up.then_some(0),
+        steady_state_throughput: Some(1_000.0),
+        relative_half_width,
+    }
+}
+
+/// Settings that judge the stop with `precision`, `consecutive` checks and a minimum duration of
+/// `min_seconds`.
+fn judging(precision: f64, consecutive: u32, min_seconds: u64) -> ProbeSettings {
+    ProbeSettings {
+        precision,
+        consecutive_checks: NonZeroU32::new(consecutive).unwrap(),
+        min_duration: Duration::from_secs(min_seconds),
+        ..ProbeSettings::default()
+    }
+}
+
+/// Tightness checks, one a second for 12 seconds, at each edge of the stop: no end of warmup at
+/// 1 s, no relative half-width at 2 s, one of 0.02 at 3 s, three of 0.01 from 4 s, one of 0.03 at
+/// 7 s, and five of 0.005 from 8 s.
+fn edge_checks() -> Vec<TightnessCheck> {
+    let mut checks = vec![
+        check(1, false, Some(0.001)),
+        check(2, true, None),
+        check(3, true, Some(0.02)),
+    ];
+    checks.extend((4..=6).map(|seconds| check(seconds, true, Some(0.01))));
+    checks.push(check(7, true, Some(0.03)));
+    checks.extend((8..=12).map(|seconds| check(seconds, true, Some(0.005))));
+    checks
+}
+
+/// The elapsed nanoseconds of the check that stops a probe with `settings` over `checks`.
+fn stop_ns(
+    settings: &ProbeSettings,
+    checks: &[TightnessCheck],
+    first_partition_end_ns: Option<u64>,
+) -> Option<u64> {
+    throughput_probe::stop(settings, checks, first_partition_end_ns).map(|check| check.elapsed_ns)
+}
+
+#[test]
+fn a_check_without_an_end_of_warmup_fails_at_any_precision() {
+    let unwarmed = check(1, false, Some(0.0));
+
+    assert!(!unwarmed.passes(1.0));
+    assert_eq!(stop_ns(&judging(0.002, 1, 0), &edge_checks(), None), None);
+}
+
+#[test]
+fn a_check_without_a_relative_half_width_fails_at_any_precision() {
+    assert!(!check(2, true, None).passes(f64::MAX));
+}
+
+/// A check passes only when its relative half-width is strictly below the precision.
+#[test]
+fn a_relative_half_width_equal_to_the_precision_fails() {
+    let checks = edge_checks();
+
+    assert_eq!(
+        stop_ns(&judging(0.02, 1, 0), &checks, None),
+        Some(4_000 * MS)
+    );
+    assert_eq!(
+        stop_ns(&judging(0.05, 1, 0), &checks, None),
+        Some(3_000 * MS)
+    );
+}
+
+#[test]
+fn stops_at_the_first_check_that_ends_a_streak_of_consecutive_passes() {
+    let checks = edge_checks();
+
+    assert_eq!(
+        stop_ns(&judging(0.02, 3, 0), &checks, None),
+        Some(6_000 * MS)
+    );
+    assert_eq!(
+        stop_ns(&judging(0.05, 5, 0), &checks, None),
+        Some(7_000 * MS)
+    );
+    assert_eq!(stop_ns(&judging(0.02, 10, 0), &checks, None), None);
+}
+
+/// A failed check ends the streak: three passes from 4 s and a failure at 7 s leave four
+/// consecutive passes to the checks from 8 s, though four checks have passed by then.
+#[test]
+fn a_failed_check_starts_the_streak_again() {
+    assert_eq!(
+        stop_ns(&judging(0.02, 4, 0), &edge_checks(), None),
+        Some(11_000 * MS)
+    );
+}
+
+/// Passes before the minimum duration count toward the streak: the checks at 8 and 9 s pass
+/// before a minimum duration of 10 s, so the check at 10 s ends a streak of three.
+#[test]
+fn passes_before_the_minimum_duration_count_toward_the_streak() {
+    assert_eq!(
+        stop_ns(&judging(0.02, 3, 10), &edge_checks(), None),
+        Some(10_000 * MS)
+    );
+}
+
+/// The check at the sample that showed the first partition end would end a streak of three, but
+/// a probe would have completed there.
+#[test]
+fn no_check_at_or_after_the_first_partition_end_stops_the_probe() {
+    let checks = edge_checks();
+    let settings = judging(0.02, 3, 0);
+
+    assert_eq!(
+        stop_ns(&settings, &checks, Some(6_000 * MS + 1)),
+        Some(6_000 * MS)
+    );
+    assert_eq!(stop_ns(&settings, &checks, Some(6_000 * MS)), None);
+}
+
+#[test]
+fn a_stop_no_later_than_the_cap_is_steady() {
+    assert_eq!(
+        throughput_probe::probe_stop_reason(
+            Some(5 * 1_000 * MS),
+            Some(6 * 1_000 * MS),
+            Some(7 * 1_000 * MS)
+        ),
+        StopReason::Steady
+    );
+    assert_eq!(
+        throughput_probe::probe_stop_reason(
+            Some(6 * 1_000 * MS),
+            Some(6 * 1_000 * MS),
+            Some(7 * 1_000 * MS)
+        ),
+        StopReason::Steady
+    );
+    assert_eq!(
+        throughput_probe::probe_stop_reason(Some(6 * 1_000 * MS), None, Some(7 * 1_000 * MS)),
+        StopReason::Steady
+    );
+}
+
+#[test]
+fn a_cap_before_the_stop_and_the_first_partition_end_is_capped() {
+    assert_eq!(
+        throughput_probe::probe_stop_reason(
+            Some(7 * 1_000 * MS),
+            Some(6 * 1_000 * MS),
+            Some(8 * 1_000 * MS)
+        ),
+        StopReason::Capped
+    );
+    assert_eq!(
+        throughput_probe::probe_stop_reason(None, Some(6 * 1_000 * MS), Some(8 * 1_000 * MS)),
+        StopReason::Capped
+    );
+    assert_eq!(
+        throughput_probe::probe_stop_reason(None, Some(6 * 1_000 * MS), None),
+        StopReason::Capped
+    );
+}
+
+/// The first partition end and the cap at the same sample complete the probe, as deciding there
+/// does.
+#[test]
+fn a_first_partition_end_before_or_at_the_cap_completes() {
+    assert_eq!(
+        throughput_probe::probe_stop_reason(None, Some(6 * 1_000 * MS), Some(6 * 1_000 * MS)),
+        StopReason::Completed
+    );
+    assert_eq!(
+        throughput_probe::probe_stop_reason(None, Some(6 * 1_000 * MS), Some(5 * 1_000 * MS)),
+        StopReason::Completed
+    );
+    assert_eq!(
+        throughput_probe::probe_stop_reason(None, None, Some(5 * 1_000 * MS)),
+        StopReason::Completed
+    );
+}
+
+/// The series and first partition ends the equivalence tests judge. A first partition end is a
+/// sample's time, the sample that showed it.
+fn judged_series() -> Vec<(Vec<ProgressSample>, Option<u64>)> {
+    let ending_at = |samples: Vec<ProgressSample>, index: usize| {
+        let end_ns = samples.get(index).map(|sample| sample.elapsed_ns);
+        (samples, end_ns)
+    };
+    vec![
+        (noisy_series(1, 0, 0.0), None),
+        (noisy_series(2, 4, 0.05), None),
+        (noisy_series(3, 6, 0.3), None),
+        ending_at(noisy_series(4, 3, 0.1), 110),
+        ending_at(noisy_series(5, 8, 0.02), 160),
+        ending_at(noisy_series(6, 2, 0.05), 90),
+    ]
+}
+
+/// Settings over every batch duration, window groups, precision, consecutive checks and minimum
+/// duration the equivalence tests judge.
+fn judged_settings() -> Vec<ProbeSettings> {
+    let mut settings = Vec::new();
+    for batch_ms in [300, 1_000, 2_500] {
+        for window_groups in [2, 5, 10] {
+            for precision in [0.02, 0.2] {
+                for consecutive in [1, 3] {
+                    for min_seconds in [0, 8] {
+                        settings.push(ProbeSettings {
+                            batch_duration: Duration::from_millis(batch_ms),
+                            window_groups,
+                            ..judging(precision, consecutive, min_seconds)
+                        });
+                    }
+                }
+            }
+        }
+    }
+    settings
+}
+
+/// The estimate a decision takes, as a tightness check carries it.
+fn estimate(decision: &Decision) -> (u64, Option<f64>, Option<u64>, Option<f64>) {
+    (
+        decision.window_end_ns,
+        decision.steady_state_throughput,
+        decision.warmup_end_ns,
+        decision.relative_half_width,
+    )
+}
+
+/// The estimate a tightness check carries.
+fn check_estimate(check: &TightnessCheck) -> (u64, Option<f64>, Option<u64>, Option<f64>) {
+    (
+        check.elapsed_ns,
+        check.steady_state_throughput,
+        check.warmup_end_ns,
+        check.relative_half_width,
+    )
+}
+
+/// The stop over a series' tightness checks is where a shadow probe judging after every sample
+/// first records a would-stop, with the same estimate.
+#[test]
+fn the_stop_over_tightness_checks_is_the_first_would_stop_after_each_sample() {
+    let mut stops = 0;
+    for (samples, first_partition_end_ns) in judged_series() {
+        for settings in judged_settings() {
+            let checks = throughput_probe::tightness_checks(&settings, &samples);
+            let replayed = recorded_would_stop(&settings, &samples, first_partition_end_ns);
+            let stopped = throughput_probe::stop(&settings, &checks, first_partition_end_ns);
+
+            stops += usize::from(stopped.is_some());
+            assert_eq!(
+                stopped.map(check_estimate),
+                replayed.as_ref().map(estimate),
+                "{settings:?}"
+            );
+        }
+    }
+    // The series stop under some settings and not under others.
+    assert!(stops > 20, "{stops}");
+    assert!(
+        stops < judged_series().len() * judged_settings().len() - 20,
+        "{stops}"
+    );
+}
+
+/// Each tightness check carries the estimate the rule takes over the samples up to it, and
+/// there is one at every probe batch end.
+#[test]
+fn a_tightness_check_carries_the_estimate_decided_at_its_batch_end() {
+    for (samples, _) in judged_series() {
+        for settings in judged_settings() {
+            // Capped at once, the rule decides after every sample, steady or not.
+            let settings = ProbeSettings {
+                max_duration: Duration::ZERO,
+                ..settings
+            };
+            let checks = throughput_probe::tightness_checks(&settings, &samples);
+            let batch_ns = u64::try_from(settings.batch_duration.as_nanos()).unwrap();
+
+            assert!(
+                checks
+                    .windows(2)
+                    .all(|pair| pair[1].elapsed_ns - pair[0].elapsed_ns >= batch_ns),
+                "{settings:?}"
+            );
+            for check in &checks {
+                let decided = throughput_probe::decide(
+                    &settings,
+                    samples.get(..=check.sample_index).unwrap(),
+                    None,
+                )
+                .unwrap();
+
+                assert_eq!(check_estimate(check), estimate(&decided), "{settings:?}");
+            }
+        }
+    }
+}
+
+/// The shared fixture of stops over tightness checks, which the probe viewer's copy of the stop
+/// is tested against.
+const STOP_FIXTURE: &str =
+    include_str!("../../python/tests/fixtures/stop_over_tightness_checks.json");
+
+/// Runs over [`edge_checks`], with their first partition end and the time of their first sample
+/// at or past the maximum duration, at every edge of the stop reason under `judging(0.02, 3, 0)`,
+/// which stops at 6 s: a cap after the stop, at it and before it, a first partition end at the
+/// cap, and a streak that crosses the first partition end.
+const FIXTURE_RUNS: [(&str, Option<u64>, Option<u64>); 6] = [
+    ("uncapped", Some(12 * 1_000 * MS), None),
+    (
+        "capped_after_the_stop",
+        Some(12 * 1_000 * MS),
+        Some(8 * 1_000 * MS),
+    ),
+    (
+        "capped_at_the_stop",
+        Some(12 * 1_000 * MS),
+        Some(6 * 1_000 * MS),
+    ),
+    (
+        "capped_before_the_stop",
+        Some(12 * 1_000 * MS),
+        Some(5 * 1_000 * MS),
+    ),
+    (
+        "completed_at_the_cap",
+        Some(5 * 1_000 * MS),
+        Some(5 * 1_000 * MS),
+    ),
+    (
+        "a_streak_crosses_the_first_partition_end",
+        Some(6 * 1_000 * MS),
+        None,
+    ),
+];
+
+/// The settings the fixture finds stops under, each at an edge of the stop over [`edge_checks`].
+fn fixture_settings() -> Vec<ProbeSettings> {
+    vec![
+        judging(0.02, 1, 0),
+        judging(0.05, 1, 0),
+        judging(0.01, 1, 0),
+        judging(0.002, 1, 0),
+        judging(0.02, 3, 0),
+        judging(0.02, 4, 0),
+        judging(0.05, 5, 0),
+        judging(0.02, 3, 10),
+        judging(0.02, 10, 0),
+    ]
+}
+
+/// The stop over [`edge_checks`] for a fixture run, and how a probe with `settings` would end.
+fn fixture_stop(
+    settings: &ProbeSettings,
+    (_, first_partition_end_ns, capped_at_ns): (&str, Option<u64>, Option<u64>),
+) -> (Option<u64>, StopReason) {
+    let stop_ns = stop_ns(settings, &edge_checks(), first_partition_end_ns);
+    (
+        stop_ns,
+        throughput_probe::probe_stop_reason(stop_ns, capped_at_ns, first_partition_end_ns),
+    )
+}
+
+/// `value` as JSON: a number, or `null`.
+fn json<T: std::fmt::Debug>(value: Option<T>) -> String {
+    value.map_or_else(|| "null".to_string(), |value| format!("{value:?}"))
+}
+
+/// The JSON array of `rows`, one to a line.
+fn json_rows(rows: &[String]) -> String {
+    let rows: Vec<String> = rows.iter().map(|row| format!("    {row}")).collect();
+    format!("[\n{}\n  ]", rows.join(",\n"))
+}
+
+/// The shared fixture as this rule generates it: the runs, their tightness checks in the columns
+/// of the checks table, and the stop and stop reason under each setting in those of the replays
+/// table.
+fn stop_fixture_json() -> String {
+    let runs: Vec<String> = FIXTURE_RUNS
+        .iter()
+        .map(|&(run_id, first_partition_end_ns, capped_at_ns)| {
+            format!(
+                r#"{{"run_id": "{run_id}", "first_partition_end_ns": {}, "capped_at_ns": {}}}"#,
+                json(first_partition_end_ns),
+                json(capped_at_ns)
+            )
+        })
+        .collect();
+    let checks: Vec<String> = FIXTURE_RUNS
+        .iter()
+        .flat_map(|&(run_id, ..)| {
+            edge_checks().into_iter().enumerate().map(move |(index, check)| {
+                format!(
+                    r#"{{"run_id": "{run_id}", "check_index": {index}, "sample_index": {}, "elapsed_ns": {}, "warmup_end_ns": {}, "steady_state_throughput": {}, "relative_half_width": {}}}"#,
+                    check.sample_index,
+                    check.elapsed_ns,
+                    json(check.warmup_end_ns),
+                    json(check.steady_state_throughput),
+                    json(check.relative_half_width)
+                )
+            })
+        })
+        .collect();
+    let stops: Vec<String> = fixture_settings()
+        .iter()
+        .flat_map(|settings| {
+            FIXTURE_RUNS.iter().map(move |&run| {
+                let (stop_ns, reason) = fixture_stop(settings, run);
+                format!(
+                    r#"{{"run_id": "{}", "precision": {:?}, "consecutive_checks": {}, "min_duration_ns": {}, "would_stop_ns": {}, "probe_stop_reason": "{}"}}"#,
+                    run.0,
+                    settings.precision,
+                    settings.consecutive_checks,
+                    settings.min_duration.as_nanos(),
+                    json(stop_ns),
+                    reason.name()
+                )
+            })
+        })
+        .collect();
+    format!(
+        "{{\n  \"about\": \"Stops over tightness checks, generated by the module test the_shared_stop_fixture_is_current in src/tests/throughput_probe.rs. Do not edit by hand.\",\n  \"runs\": {},\n  \"checks\": {},\n  \"stops\": {}\n}}\n",
+        json_rows(&runs),
+        json_rows(&checks),
+        json_rows(&stops)
+    )
+}
+
+/// The checked-in fixture is the one this rule generates. When it is stale, the failure prints
+/// the regenerated fixture to paste over it.
+#[test]
+fn the_shared_stop_fixture_is_current() {
+    let regenerated = stop_fixture_json();
+
+    assert!(
+        STOP_FIXTURE == regenerated,
+        "python/tests/fixtures/stop_over_tightness_checks.json is stale; replace it with:\n{regenerated}"
+    );
+}
+
+/// The fixture's runs reach every ending at the edges of the stop reason: a stop before and at the
+/// cap is steady, after it capped, and a cap at the first partition end, or a streak that would
+/// end there, completed.
+#[test]
+fn the_shared_stop_fixture_ends_at_every_edge_of_the_stop_reason() {
+    let settings = judging(0.02, 3, 0);
+
+    assert_eq!(
+        FIXTURE_RUNS
+            .iter()
+            .map(|&run| fixture_stop(&settings, run))
+            .collect::<Vec<_>>(),
+        [
+            (Some(6_000 * MS), StopReason::Steady),
+            (Some(6_000 * MS), StopReason::Steady),
+            (Some(6_000 * MS), StopReason::Steady),
+            (Some(6_000 * MS), StopReason::Capped),
+            (None, StopReason::Completed),
+            (None, StopReason::Completed),
+        ]
     );
 }

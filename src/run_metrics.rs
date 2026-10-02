@@ -4,7 +4,8 @@
 //! This module owns the schemas and the pure functions that fill them: [`run_record_batch`] turns
 //! the facts of one combiner run into its one-row run record, [`run_metrics_batch`] turns an
 //! executed plan into its run metrics, one row per operator per partition, and
-//! [`progress_samples_batch`] turns a probe's samples into one row each. None knows about
+//! [`progress_samples_batch`] turns a probe's samples into one row each. [`recorded_probe`] and
+//! [`progress_samples`] read a probe's run record and samples back. None knows about
 //! datasets, formulations, or storage. A formulation and a write target describe their
 //! settings as a [`FormulationRecord`] and a [`WriteRecord`], the combiner run supplies the other
 //! facts and the plan, and the metrics directory writes the batches where they go. See
@@ -25,14 +26,18 @@
 //! `DataFusion`'s fallback grouped hash aggregate stream; the streams it picks for the allele
 //! combiner's distinct do not report it, so the column is null for every current plan.
 
-use crate::throughput_probe::{Decision, ProbeSettings, ProbedKind, ProgressSample};
+use crate::throughput_probe::{Decision, ProbeKind, ProbeSettings, ProbedKind, ProgressSample};
 
 use datafusion::{
     arrow::{
-        array::{ArrayRef, Float64Array, StringArray, TimestampNanosecondArray, UInt64Array},
+        array::{
+            Array, ArrayRef, Float64Array, StringArray, TimestampNanosecondArray, UInt64Array,
+        },
+        compute::cast,
         datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
         record_batch::RecordBatch,
     },
+    common::cast::{as_float64_array, as_string_array, as_uint64_array},
     error::{DataFusionError, Result},
     physical_plan::{
         ExecutionPlan, displayable,
@@ -42,6 +47,7 @@ use datafusion::{
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -450,6 +456,112 @@ pub fn progress_samples_batch(run_id: &str, samples: &[ProgressSample]) -> Resul
         )),
     ];
     Ok(RecordBatch::try_new(progress_samples_schema(), columns)?)
+}
+
+/// The progress samples in `batches` of the progress samples table, in their rows' order.
+///
+/// # Errors
+///
+/// Returns an error if a batch lacks the `elapsed_ns` or `rows` column, or holds one of another
+/// type.
+pub fn progress_samples(batches: &[RecordBatch]) -> Result<Vec<ProgressSample>> {
+    let mut samples = Vec::new();
+    for batch in batches {
+        let elapsed = column_as(batch, "elapsed_ns", &DataType::UInt64)?;
+        let rows = column_as(batch, "rows", &DataType::UInt64)?;
+        samples.extend(
+            as_uint64_array(&elapsed)?
+                .values()
+                .iter()
+                .zip(as_uint64_array(&rows)?.values())
+                .map(|(&elapsed_ns, &rows)| ProgressSample { elapsed_ns, rows }),
+        );
+    }
+    Ok(samples)
+}
+
+/// A throughput probe as its run record holds it, read back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordedProbe {
+    pub run_id: String,
+    pub kind: ProbeKind,
+    pub settings: ProbeSettings,
+    /// The elapsed nanoseconds of the first sample that showed a finished partition; `None` if
+    /// none did before the stop.
+    pub first_partition_end_ns: Option<u64>,
+}
+
+/// The throughput probe the run record at `row` of `records`, a batch of the run record table,
+/// holds; `None` for a measured write, which has no action.
+///
+/// # Errors
+///
+/// Returns an error if `records` lacks a column of the run record table or holds one of another
+/// type, or if the run's action is not a probe's, or a probe lacks a setting or holds one out of
+/// range.
+pub fn recorded_probe(records: &RecordBatch, row: usize) -> Result<Option<RecordedProbe>> {
+    let run_id = string_cell(records, "run_id", row)?.unwrap_or_default();
+    let invalid = |problem: String| {
+        DataFusionError::Execution(format!("the run record of '{run_id}' {problem}"))
+    };
+    let kind = match string_cell(records, "action", row)?.as_deref() {
+        None => return Ok(None),
+        Some("probe") => ProbeKind::Probe,
+        Some("shadow") => ProbeKind::Shadow,
+        Some(action) => return Err(invalid(format!("has an unknown action '{action}'"))),
+    };
+    let setting =
+        |name: &str| u64_cell(records, name, row)?.ok_or_else(|| invalid(format!("has no {name}")));
+    let count = |name: &str| {
+        u32::try_from(setting(name)?).map_err(|error| invalid(format!("has a {name} {error}")))
+    };
+    let settings = ProbeSettings {
+        poll_period: Duration::from_nanos(setting("poll_period_ns")?),
+        batch_duration: Duration::from_nanos(setting("batch_duration_ns")?),
+        precision: f64_cell(records, "precision", row)?
+            .ok_or_else(|| invalid("has no precision".to_string()))?,
+        consecutive_checks: NonZeroU32::new(count("consecutive_checks")?)
+            .ok_or_else(|| invalid("has no consecutive checks".to_string()))?,
+        window_groups: count("window_groups")?,
+        min_duration: Duration::from_nanos(setting("min_duration_ns")?),
+        max_duration: Duration::from_nanos(setting("max_duration_ns")?),
+    };
+    Ok(Some(RecordedProbe {
+        first_partition_end_ns: u64_cell(records, "first_partition_end_ns", row)?,
+        run_id,
+        kind,
+        settings,
+    }))
+}
+
+/// The column `name` of `batch`, cast to `data_type`, as a table read back may hold it as
+/// another type: Parquet reads strings back as views.
+fn column_as(batch: &RecordBatch, name: &str, data_type: &DataType) -> Result<ArrayRef> {
+    let column = batch.column_by_name(name).ok_or_else(|| {
+        DataFusionError::Execution(format!("the table read back has no column {name}"))
+    })?;
+    Ok(cast(column, data_type)?)
+}
+
+/// The cell of the string column `name` of `batch` at `row`; `None` if it is null.
+fn string_cell(batch: &RecordBatch, name: &str, row: usize) -> Result<Option<String>> {
+    let column = column_as(batch, name, &DataType::Utf8)?;
+    let column = as_string_array(&column)?;
+    Ok((!column.is_null(row)).then(|| column.value(row).to_string()))
+}
+
+/// The cell of the `UInt64` column `name` of `batch` at `row`; `None` if it is null.
+fn u64_cell(batch: &RecordBatch, name: &str, row: usize) -> Result<Option<u64>> {
+    let column = column_as(batch, name, &DataType::UInt64)?;
+    let column = as_uint64_array(&column)?;
+    Ok((!column.is_null(row)).then(|| column.value(row)))
+}
+
+/// The cell of the `Float64` column `name` of `batch` at `row`; `None` if it is null.
+fn f64_cell(batch: &RecordBatch, name: &str, row: usize) -> Result<Option<f64>> {
+    let column = column_as(batch, name, &DataType::Float64)?;
+    let column = as_float64_array(&column)?;
+    Ok((!column.is_null(row)).then(|| column.value(row)))
 }
 
 /// The run metrics of one executed plan, and the names of the metrics it reported that the table
@@ -931,11 +1043,11 @@ fn timestamp_nanos(time: SystemTime) -> Result<i64> {
 
 /// A count as the table stores it. Saturates rather than failing on a platform whose `usize` is
 /// wider than 64 bits.
-fn to_u64(value: usize) -> u64 {
+pub(crate) fn to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 /// `duration` in nanoseconds as the table stores it, saturating at `u64::MAX`.
-fn duration_ns(duration: Duration) -> u64 {
+pub(crate) fn duration_ns(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }

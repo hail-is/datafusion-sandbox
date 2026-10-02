@@ -9,14 +9,16 @@ use crate::{
     locus::LocusRepresentation,
     ordered_frame::OutputLayout,
     pipeline::{self, PipelineOptions},
-    run_metrics::{self, FormulationRecord, ProbeRecord, RunRecord, WriteRecord},
+    run_metrics::{self, FormulationRecord, ProbeRecord, RecordedProbe, RunRecord, WriteRecord},
     sink::{self, CollectingSink, DataSinkTarget},
     stored::dataset::Dataset,
     tests::support::{
         grouped_merge, interval_merge, rows_of_operator, run_record, string_values,
         timestamp_values, u64_values,
     },
-    throughput_probe::{Decision, ProbeSettings, ProbedKind, ProgressSample, StopReason},
+    throughput_probe::{
+        Decision, ProbeKind, ProbeSettings, ProbedKind, ProgressSample, StopReason,
+    },
     write::WriteTarget,
 };
 
@@ -328,6 +330,88 @@ fn a_shadow_probe_that_never_would_have_stopped_leaves_its_would_stop_columns_nu
     assert_eq!(string_values(&batch, "action"), ["shadow"]);
     assert_eq!(string_values(&batch, "stop_reason"), ["completed"]);
     assert_eq!(string_values(&batch, "relative_half_width"), ["0.5"]);
+}
+
+/// A probe's run record reads back as the probe it records, a shadow probe's or another's, and a
+/// measured write's as none.
+#[test]
+fn a_probe_s_run_record_reads_back_as_its_probe() {
+    let settings = ProbeSettings {
+        poll_period: Duration::from_millis(50),
+        batch_duration: Duration::from_millis(2_500),
+        precision: 0.05,
+        consecutive_checks: NonZeroU32::new(5).unwrap(),
+        window_groups: 20,
+        min_duration: Duration::from_secs(60),
+        max_duration: Duration::from_secs(600),
+    };
+    let probe = |kind| ProbeRecord {
+        settings: settings.clone(),
+        decision: Decision {
+            stop_reason: StopReason::Completed,
+            steady_state_throughput: Some(1_000.0),
+            warmup_end_ns: None,
+            window_end_ns: 1_000,
+            window_rows: 32,
+            relative_half_width: Some(0.5),
+        },
+        first_partition_end_ns: Some(1_000),
+        kind,
+    };
+    let records = [
+        RunRecord {
+            probe: Some(probe(ProbedKind::Shadow { would_stop: None })),
+            ..run_record("shadow")
+        },
+        RunRecord {
+            probe: Some(ProbeRecord {
+                first_partition_end_ns: None,
+                ..probe(ProbedKind::Probe)
+            }),
+            ..run_record("probe")
+        },
+        run_record("write"),
+    ];
+
+    let read_back: Vec<Option<RecordedProbe>> = records
+        .iter()
+        .map(|record| {
+            let batch = run_metrics::run_record_batch(record).unwrap();
+            run_metrics::recorded_probe(&batch, 0).unwrap()
+        })
+        .collect();
+
+    assert_eq!(
+        read_back,
+        [
+            Some(RecordedProbe {
+                run_id: "shadow".to_string(),
+                kind: ProbeKind::Shadow,
+                settings: settings.clone(),
+                first_partition_end_ns: Some(1_000),
+            }),
+            Some(RecordedProbe {
+                run_id: "probe".to_string(),
+                kind: ProbeKind::Probe,
+                settings,
+                first_partition_end_ns: None,
+            }),
+            None,
+        ]
+    );
+}
+
+#[test]
+fn progress_samples_read_back_in_order() {
+    let samples = [(3_000, 0), (100_004_000, 512), (200_001_000, 1_536)]
+        .map(|(elapsed_ns, rows)| ProgressSample { elapsed_ns, rows });
+    let (first, rest) = samples.split_at(1);
+    let batches = [
+        run_metrics::progress_samples_batch("run-1", first).unwrap(),
+        run_metrics::progress_samples_batch("run-1", rest).unwrap(),
+    ];
+
+    assert_eq!(run_metrics::progress_samples(&batches).unwrap(), samples);
 }
 
 /// The progress samples table holds one row per sample, in the order taken, each with its index

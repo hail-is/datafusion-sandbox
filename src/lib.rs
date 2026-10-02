@@ -9,9 +9,10 @@
 //! - [`locus`] describes the supported stored locus representations, split points, and locus
 //!   intervals.
 //! - [`ordered_frame`] carries a formulation's deferred rows, ordering, and output layout.
-//! - [`metrics_directory`] lays out the run tables under a metrics directory and records a run
-//!   there.
+//! - [`metrics_directory`] lays out the run tables under a metrics directory, records a run
+//!   there, and replays the shadow probes it holds.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
+//! - [`replay`] judges recorded shadow probes again under a grid of stopping rule settings.
 //! - [`run_metrics`] fills the run record and run metrics tables of a measured write.
 //! - [`sample_annotation_table`] names and writes the table that declares a written input table's
 //!   sample set.
@@ -57,6 +58,7 @@ pub mod metrics_directory;
 pub mod ordered_frame;
 pub mod pipeline;
 pub mod process;
+pub mod replay;
 pub mod run_metrics;
 pub mod sample_annotation_table;
 pub mod sink;

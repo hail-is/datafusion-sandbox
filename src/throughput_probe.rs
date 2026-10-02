@@ -9,6 +9,10 @@
 //! stops, steady, once the estimate interval for the rate over the measurement window that
 //! follows has been tight at several consecutive batch ends. See
 //! [ADR 0017](../docs/adr/0017-estimate-throughput-by-stopping-full-plan-runs.md).
+//!
+//! The rule takes two steps: [`tightness_checks`] judges each probe batch end, and [`stop`] finds
+//! the check that stops the probe. [`decide`] and [`would_stop`] take them after every sample, and
+//! a [replay](crate::replay) once over a whole run under many settings.
 
 use std::{num::NonZeroU32, time::Duration};
 
@@ -124,9 +128,7 @@ pub fn decide(
             samples.get(..samples.partition_point(|sample| sample.elapsed_ns <= end_ns))?,
         ),
         None if steady(settings, samples) => (StopReason::Steady, samples),
-        None if Duration::from_nanos(latest.elapsed_ns) >= settings.max_duration => {
-            (StopReason::Capped, samples)
-        }
+        None if at_or_past_max_duration(settings, latest) => (StopReason::Capped, samples),
         None => return None,
     };
     let window = Window::after_warmup(settings, until_window_end)?;
@@ -217,25 +219,184 @@ pub fn would_stop(
     decide(&uncapped, samples, None)
 }
 
-/// Whether `samples` end at a batch end past the minimum duration, and the checks at the last
-/// `consecutive_checks` batch ends were all tight.
+/// The stopping rule's judgement at the end of a probe batch: where warmup ends over the samples
+/// up to it, and how tight the estimate interval over the window after that is.
+///
+/// A check depends on the batch duration and the window groups alone, so one series of checks
+/// serves every precision, number of consecutive checks and minimum duration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TightnessCheck {
+    /// The elapsed nanoseconds of the sample that ends the batch.
+    pub elapsed_ns: u64,
+    /// The index of that sample among the probe's progress samples.
+    pub sample_index: usize,
+    /// The elapsed nanoseconds of the sample that ends warmup and starts the window; `None` when
+    /// MSER found no end of warmup, and the window starts at the first sample.
+    pub warmup_end_ns: Option<u64>,
+    /// The rows received per second over the window; `None` when it spans no time.
+    pub steady_state_throughput: Option<f64>,
+    /// The half-width of the window's estimate interval over its mean; `None` when the window
+    /// has no interval, or its mean is not positive.
+    pub relative_half_width: Option<f64>,
+}
+
+impl TightnessCheck {
+    /// Whether the check passes at `precision`: it found an end of warmup, and its relative
+    /// half-width is below the precision.
+    #[must_use]
+    pub fn passes(&self, precision: f64) -> bool {
+        self.warmup_end_ns.is_some()
+            && self
+                .relative_half_width
+                .is_some_and(|half_width| half_width < precision)
+    }
+}
+
+/// The tightness checks of a probe with `settings` over `samples`, one per probe batch end, in
+/// order. Only the batch duration and the window groups of `settings` matter.
+#[must_use]
+pub fn tightness_checks(
+    settings: &ProbeSettings,
+    samples: &[ProgressSample],
+) -> Vec<TightnessCheck> {
+    let ends = batch_ends(settings.batch_duration, samples);
+    checks_from(settings, samples, &ends, 0)
+}
+
+/// The tightness check that stops a probe with `settings`, from its `checks` in order; `None` if
+/// none does.
+///
+/// That is the first check at or past the minimum duration whose last `consecutive_checks`
+/// checks, itself included, all passed at the precision. Only the precision, the consecutive
+/// checks and the minimum duration of `settings` matter. `first_partition_end_ns` is the elapsed
+/// nanoseconds of the first sample that showed a finished partition, if one has.
+///
+/// Passes before the minimum duration count toward a streak. Only checks before the sample that
+/// showed the first partition end count, since a probe would have completed there. This takes
+/// samples to have strictly increasing times, so that a check comes before that sample exactly
+/// when its time is before `first_partition_end_ns`: the run record holds the partition end as a
+/// time, not as a sample.
+///
+/// The probe viewer keeps a copy of this function as Vega-Lite transforms (#220), so that its
+/// sliders move the stop without a replay; the ADR that lands with it records why. Change both
+/// together. The shared fixture `python/tests/fixtures/stop_over_tightness_checks.json` holds
+/// stops this function finds, which the copy is tested against, and a module test fails with the
+/// regenerated fixture when it is stale.
+#[must_use]
+pub fn stop<'a>(
+    settings: &ProbeSettings,
+    checks: &'a [TightnessCheck],
+    first_partition_end_ns: Option<u64>,
+) -> Option<&'a TightnessCheck> {
+    let consecutive = consecutive_checks(settings);
+    let mut streak = 0_usize;
+    checks
+        .iter()
+        .take_while(|check| first_partition_end_ns.is_none_or(|end_ns| check.elapsed_ns < end_ns))
+        .find(|check| {
+            streak = if check.passes(settings.precision) {
+                streak.saturating_add(1)
+            } else {
+                0
+            };
+            streak >= consecutive && Duration::from_nanos(check.elapsed_ns) >= settings.min_duration
+        })
+}
+
+/// The elapsed nanoseconds of the first of `samples` at or past the maximum duration of
+/// `settings`, at which a probe with them is capped unless it stopped first; `None` if none is.
+#[must_use]
+pub fn capped_at_ns(settings: &ProbeSettings, samples: &[ProgressSample]) -> Option<u64> {
+    samples
+        .iter()
+        .find(|sample| at_or_past_max_duration(settings, sample))
+        .map(|sample| sample.elapsed_ns)
+}
+
+/// How a probe would have ended, in the stop reason vocabulary.
+///
+/// The arguments are the elapsed nanoseconds of the tightness check that stops it, of the first
+/// sample at or past its maximum duration, and of the first sample that showed a finished
+/// partition, each if there is one. The probe ends steady if a check stops it no later than the
+/// cap. Otherwise it is capped if the cap comes before the first partition end. Otherwise it
+/// completes, as it does when the cap and the first partition end are the same sample.
+#[must_use]
+pub fn probe_stop_reason(
+    stop_ns: Option<u64>,
+    capped_at_ns: Option<u64>,
+    first_partition_end_ns: Option<u64>,
+) -> StopReason {
+    match (stop_ns, capped_at_ns) {
+        (Some(stop_ns), capped_at_ns) if capped_at_ns.is_none_or(|capped| stop_ns <= capped) => {
+            StopReason::Steady
+        }
+        (_, Some(capped_at_ns))
+            if first_partition_end_ns.is_none_or(|end_ns| capped_at_ns < end_ns) =>
+        {
+            StopReason::Capped
+        }
+        _ => StopReason::Completed,
+    }
+}
+
+/// Whether `sample` was taken at or past the maximum duration of `settings`.
+fn at_or_past_max_duration(settings: &ProbeSettings, sample: &ProgressSample) -> bool {
+    Duration::from_nanos(sample.elapsed_ns) >= settings.max_duration
+}
+
+/// The consecutive checks of `settings` as a count of checks.
+fn consecutive_checks(settings: &ProbeSettings) -> usize {
+    usize::try_from(settings.consecutive_checks.get()).unwrap_or(usize::MAX)
+}
+
+/// Whether the latest of `samples` ends a probe batch whose tightness check stops the probe.
 fn steady(settings: &ProbeSettings, samples: &[ProgressSample]) -> bool {
     let ends = batch_ends(settings.batch_duration, samples);
-    let Some(latest) = samples.len().checked_sub(1) else {
-        return false;
-    };
-    let consecutive = usize::try_from(settings.consecutive_checks.get()).unwrap_or(usize::MAX);
-    ends.last() == Some(&latest)
-        && samples
+    let consecutive = consecutive_checks(settings);
+    // A probe judges after every sample, so rule out first, without building any check, a latest
+    // sample that ends no batch, comes before the minimum duration, or ends too few batches.
+    let latest = samples.len().checked_sub(1);
+    if ends.last().copied() != latest
+        || samples
             .last()
-            .is_some_and(|sample| Duration::from_nanos(sample.elapsed_ns) >= settings.min_duration)
-        && ends.len() >= consecutive
-        && ends.iter().rev().take(consecutive).all(|&end| {
-            samples
-                .get(..=end)
-                .and_then(|checked| Window::after_warmup(settings, checked))
-                .is_some_and(|window| window.warmup_end_ns.is_some() && window.tight(settings))
+            .is_none_or(|sample| Duration::from_nanos(sample.elapsed_ns) < settings.min_duration)
+        || ends.len() < consecutive
+    {
+        return false;
+    }
+    // Only the checks at the last `consecutive` batch ends can make up a streak that ends at the
+    // latest one.
+    let latest_checks = checks_from(
+        settings,
+        samples,
+        &ends,
+        ends.len().saturating_sub(consecutive),
+    );
+    stop(settings, &latest_checks, None).is_some_and(|check| Some(check.sample_index) == latest)
+}
+
+/// The tightness checks at the batch ends `ends` of `samples`, from the one at position `from`.
+fn checks_from(
+    settings: &ProbeSettings,
+    samples: &[ProgressSample],
+    ends: &[usize],
+    from: usize,
+) -> Vec<TightnessCheck> {
+    (from..ends.len())
+        .filter_map(|position| {
+            let &end = ends.get(position)?;
+            // The batch ends of the samples up to a batch end are those up to it.
+            let window = Window::over(samples.get(..=end)?, ends.get(..=position)?)?;
+            let (first, last) = (window.samples.first()?, window.samples.last()?);
+            Some(TightnessCheck {
+                elapsed_ns: last.elapsed_ns,
+                sample_index: end,
+                warmup_end_ns: window.warmup_end_ns,
+                steady_state_throughput: rate_between(first, last),
+                relative_half_width: window.relative_half_width(settings),
+            })
         })
+        .collect()
 }
 
 /// The indexes of the samples that end each batch. A batch runs from the end of the one before,
@@ -268,7 +429,11 @@ impl<'a> Window<'a> {
     /// The window of `samples` after the end of warmup MSER finds over their batches, or all of
     /// them if it finds none. `None` when there are no samples.
     fn after_warmup(settings: &ProbeSettings, samples: &'a [ProgressSample]) -> Option<Self> {
-        let ends = batch_ends(settings.batch_duration, samples);
+        Self::over(samples, &batch_ends(settings.batch_duration, samples))
+    }
+
+    /// [`Self::after_warmup`], given the batch ends of `samples`.
+    fn over(samples: &'a [ProgressSample], ends: &[usize]) -> Option<Self> {
         let boundaries = || {
             std::iter::once(0)
                 .chain(ends.iter().copied())
@@ -294,12 +459,6 @@ impl<'a> Window<'a> {
             warmup_end_ns: Some(samples.get(start)?.elapsed_ns),
             samples: samples.get(start..)?,
         })
-    }
-
-    /// Whether the relative half-width of the window's estimate interval is below the precision.
-    fn tight(&self, settings: &ProbeSettings) -> bool {
-        self.relative_half_width(settings)
-            .is_some_and(|half_width| half_width < settings.precision)
     }
 
     /// The half-width of the window's estimate interval over its mean; `None` when there is no

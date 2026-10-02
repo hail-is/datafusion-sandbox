@@ -9,6 +9,7 @@ mod metrics_directory;
 mod pipeline;
 pub mod plan_shape;
 mod process;
+mod replay;
 mod run_metrics;
 mod sample_annotation_table;
 mod sink;
