@@ -292,8 +292,28 @@ Calibrate the stopping rule with shadow probes before relying on it in a sweep:
    ([ADR 0019](docs/adr/0019-copy-the-stopping-rules-final-step-into-the-probe-viewer.md)), so the
    stop marker, the would-be estimate and its estimate interval follow the sliders, and the panel
    says whether a probe would have stopped steady, been capped or completed. The detail chart's
-   batch rates are drawn at the selected batch duration. The headline still shows the would-be
-   decisions each run recorded.
+   batch rates are drawn at the selected batch duration.
+
+   Above the headline, an overview draws every combination of the grid as one point, judged by
+   `replay` with the stopping rule itself rather than the page's copy. A point's x is the median
+   `would_stop_ns` over the runs a probe with it would have stopped steady, its y the worst
+   relative error of their would-be steady-state throughput against the end-of-run one under its
+   batch duration and window groups, from `replay-baselines`, and its colour the count of runs a
+   probe with it would have capped or completed. A dashed line joins the Pareto frontier, the
+   combinations no other is both faster and more accurate than, and a diamond marks the
+   combination the shadow probes were recorded with. A combination under which no run stops
+   steady has no median or error, so it is listed by its settings under the points. Hovering
+   over a combination gives its settings, how many of the runs it replayed stopped steady, how
+   many would-be estimate intervals cover the end-of-run estimate, its median stop and worst
+   error, and the runs it could not replay. Clicking it selects it: the pair moves to its batch
+   duration and window groups, the sliders move to its precision, consecutive checks and minimum
+   duration, and the headline and every detail chart follow. The overview outlines the selected
+   combination while the sliders sit on the grid's values, and the selected pair's combinations
+   while they sit between them. The headline draws the page's stop over each run's tightness
+   checks under the selected pair against the pair's end-of-run estimate. It draws a run that
+   settles only after a probe would have been capped hollow, and lists the runs that never
+   settled with those a probe would have capped apart. Under the recorded settings it matches the
+   headline of the recorded decisions.
 
 An earlier variant of the reference combiner is still available as `cargo run -r --example combiner1`.
 
