@@ -1,4 +1,4 @@
-//! Stored tables read under a declared locus ordering, validated against their files at
+//! Stored tables read under a declared row ordering, validated against their files at
 //! construction.
 //!
 //! - [`dataset`] reads a dataset's input tables, each with its sample set.

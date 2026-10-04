@@ -1,14 +1,15 @@
-use crate::locus::{LocusOrdering, StoredOrdering};
+use crate::locus::{RowOrdering, StoredOrdering};
 use crate::stored::dataset::Dataset;
 
 use datafusion::{error::Result, prelude::*};
 
-/// The reference combiner's ordering, shared by every reference combiner formulation.
-pub fn required_ordering() -> LocusOrdering {
-    LocusOrdering::locus()
+/// The least row ordering of the reference combiner, shared by every reference combiner
+/// formulation.
+pub fn required_ordering() -> RowOrdering {
+    RowOrdering::locus()
 }
 
-/// Builds the union-of-input-table-scans formulation.
+/// Builds the union-of-input-table-scans formulation, sorted by the dataset's whole row ordering.
 ///
 /// Many `DataSourceExec`s feed a `UnionExec`, which feeds a
 /// `SortPreservingMergeExec` with one partition per input table.

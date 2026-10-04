@@ -8,7 +8,7 @@ use crate::tests::plan_shape::PlanShape;
 
 use crate::{
     format::{InputFormat, OutputFormat},
-    locus::{Locus, LocusOrdering, LocusRepresentation},
+    locus::{Locus, LocusRepresentation, RowOrdering},
     pipeline::{self, PipelineOptions},
     stored::dataset::{Dataset, InputTable, InputTableKind},
     write::WriteTarget,
@@ -52,7 +52,7 @@ fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached_as_a
                             &ctx,
                             fixture.table_path().clone(),
                             fixture.input_format(),
-                            LocusOrdering::locus_then_alleles(),
+                            RowOrdering::locus_then_alleles(),
                             None,
                         )
                         .await?
@@ -61,7 +61,7 @@ fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached_as_a
                         let sample = df.schema().field_with_unqualified_name("s")?;
                         assert_eq!(sample.data_type(), &DataType::Utf8View);
                         assert!(!sample.is_nullable());
-                        let mut columns = LocusOrdering::locus_then_alleles()
+                        let mut columns = RowOrdering::locus_then_alleles()
                             .expand(representation)
                             .column_names();
                         columns.push("s".to_string());
@@ -128,7 +128,7 @@ fn reading_a_dataset_unions_one_single_partition_input_per_sample() {
                     &ctx,
                     fixture.table_path().clone(),
                     fixture.input_format(),
-                    LocusOrdering::locus_then_alleles(),
+                    RowOrdering::locus_then_alleles(),
                     None,
                 )
                 .await
@@ -168,7 +168,7 @@ fn filtering_the_attached_sample_column_composes_with_the_dataset_sample_set() {
                             &ctx,
                             fixture.table_path().clone(),
                             fixture.input_format(),
-                            LocusOrdering::locus_then_alleles(),
+                            RowOrdering::locus_then_alleles(),
                             None,
                         )
                         .await?
@@ -230,7 +230,7 @@ fn rejects_an_inferred_schema_missing_a_required_ordering_column() {
             &ctx,
             fixture.table_path().clone(),
             fixture.input_format(),
-            LocusOrdering::locus_then_alleles(),
+            RowOrdering::locus_then_alleles(),
             None,
         )
         .await
@@ -249,7 +249,7 @@ fn rejects_a_resolved_schema_missing_a_required_ordering_column() {
     let error = Dataset::new(
         ListingTableUrl::parse("memory:///samples").unwrap(),
         InputFormat::VORTEX,
-        LocusOrdering::locus_then_alleles(),
+        RowOrdering::locus_then_alleles(),
         contig_position_schema(false),
         vec![InputTable::single_sample("sample-a")],
     )
@@ -267,7 +267,7 @@ fn rejects_two_input_tables_with_one_name() {
     let error = Dataset::new(
         ListingTableUrl::parse("memory:///samples").unwrap(),
         InputFormat::VORTEX,
-        LocusOrdering::locus_then_alleles(),
+        RowOrdering::locus_then_alleles(),
         contig_position_schema(true),
         ["sample-b", "sample-a", "sample-b"]
             .map(InputTable::single_sample)
@@ -302,7 +302,7 @@ fn inferred_schema_locus_fields_match_the_representation_fields() {
                     &ctx,
                     fixture.table_path().clone(),
                     fixture.input_format(),
-                    LocusOrdering::locus(),
+                    RowOrdering::locus(),
                     None,
                 )
                 .await
@@ -356,7 +356,7 @@ fn infers_the_schema_from_one_input_file() {
                     &ctx,
                     table_path,
                     InputFormat::VORTEX,
-                    LocusOrdering::locus(),
+                    RowOrdering::locus(),
                     None,
                 )
                 .await
@@ -394,7 +394,7 @@ fn uses_a_pinned_schema_without_inference() {
             &ctx,
             ListingTableUrl::parse("memory:///samples").unwrap(),
             InputFormat::VORTEX,
-            LocusOrdering::locus(),
+            RowOrdering::locus(),
             Some(Arc::clone(&schema)),
         )
         .await
@@ -516,7 +516,7 @@ fn dataset_from_data(sample_set: &[&str]) -> Dataset {
     Dataset::new(
         ListingTableUrl::parse("memory:///samples").unwrap(),
         InputFormat::VORTEX,
-        LocusOrdering::locus_then_alleles(),
+        RowOrdering::locus_then_alleles(),
         contig_position_schema(true),
         sample_set
             .iter()
@@ -548,7 +548,7 @@ async fn discover_in_memory_with_schema(sample_set: &[&str], schema: SchemaRef) 
         &ctx,
         ListingTableUrl::parse("memory:///samples")?,
         InputFormat::VORTEX,
-        LocusOrdering::locus(),
+        RowOrdering::locus(),
         Some(schema),
     )
     .await
@@ -623,7 +623,7 @@ fn reads_a_mixed_dataset_with_one_view_string_sample_column_and_each_tables_rows
                             &ctx,
                             fixture.table_path().clone(),
                             fixture.input_format(),
-                            LocusOrdering::locus_then_alleles(),
+                            RowOrdering::locus_then_alleles(),
                             None,
                         )
                         .await?;
@@ -678,7 +678,7 @@ fn reading_a_mixed_dataset_unions_one_single_partition_input_per_input_table() {
                     &ctx,
                     fixture.table_path().clone(),
                     fixture.input_format(),
-                    LocusOrdering::locus_then_alleles(),
+                    RowOrdering::locus_then_alleles(),
                     None,
                 )
                 .await
@@ -776,7 +776,7 @@ fn rejects_a_sample_in_two_input_tables_naming_both() {
     let error = Dataset::new(
         ListingTableUrl::parse("memory:///samples").unwrap(),
         InputFormat::VORTEX,
-        LocusOrdering::locus_then_alleles(),
+        RowOrdering::locus_then_alleles(),
         contig_position_schema(true),
         vec![
             InputTable::single_sample("sample-b"),
@@ -1039,7 +1039,7 @@ fn discover_written(entries: Vec<(&str, Vec<(Field, ArrayRef)>)>) -> Result<Data
                     &ctx,
                     ListingTableUrl::parse(&root)?,
                     InputFormat::VORTEX,
-                    LocusOrdering::locus(),
+                    RowOrdering::locus(),
                     None,
                 )
                 .await
@@ -1057,7 +1057,7 @@ fn discover_mixed(format: fixture::FixtureFormat, representation: LocusRepresent
         &ctx,
         fixture.table_path().clone(),
         fixture.input_format(),
-        LocusOrdering::locus_then_alleles(),
+        RowOrdering::locus_then_alleles(),
         None,
     ))
     .unwrap()
@@ -1082,7 +1082,7 @@ async fn discover_entries_in_memory(entries: &[&str]) -> Result<Dataset> {
         &ctx,
         ListingTableUrl::parse("memory:///samples")?,
         InputFormat::VORTEX,
-        LocusOrdering::locus(),
+        RowOrdering::locus(),
         Some(contig_position_schema(false)),
     )
     .await

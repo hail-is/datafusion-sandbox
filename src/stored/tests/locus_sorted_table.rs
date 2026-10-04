@@ -1,7 +1,7 @@
 use crate::{
     fixture::{self, FixtureFormat},
     format::InputFormat,
-    locus::{Locus, LocusOrdering, LocusRepresentation},
+    locus::{Locus, LocusRepresentation},
     pipeline::{self, PipelineOptions},
     stored::locus_sorted_table::LocusSortedTable,
 };
@@ -46,13 +46,9 @@ fn reads_a_file_and_a_directory_in_locus_order() {
                             (fixture.table_path().clone(), [&first[..], &second].concat()),
                             (unslashed_directory, [&first[..], &second].concat()),
                         ] {
-                            let table = LocusSortedTable::open(
-                                &ctx,
-                                path.clone(),
-                                fixture.input_format(),
-                                LocusOrdering::locus(),
-                            )
-                            .await?;
+                            let table =
+                                LocusSortedTable::open(&ctx, path.clone(), fixture.input_format())
+                                    .await?;
                             let actual = loci(table.read(&ctx)?, representation).await?;
                             assert_eq!(
                                 actual,
@@ -118,7 +114,6 @@ fn ignores_files_with_another_formats_extension() {
                     &ctx,
                     fixture.table_path().clone(),
                     fixture.input_format(),
-                    LocusOrdering::locus(),
                 )
                 .await?;
                 let actual = loci(table.read(&ctx)?, fixture.representation()).await?;
@@ -129,36 +124,6 @@ fn ignores_files_with_another_formats_extension() {
         PipelineOptions::single_threaded(),
     )
     .unwrap();
-}
-
-#[test]
-fn rejects_a_missing_ordering_column_at_construction() {
-    let fixture = fixture::sorted_table_fixture(
-        "locus-sorted-table-missing-alleles",
-        FixtureFormat::Parquet,
-        LocusRepresentation::Packed,
-        vec![vec![Locus::new(1, 1).unwrap()]],
-    );
-
-    let error = pipeline::run(
-        move |ctx| {
-            fixture.register(&ctx);
-            async move {
-                LocusSortedTable::open(
-                    &ctx,
-                    fixture.table_path().clone(),
-                    fixture.input_format(),
-                    LocusOrdering::locus_then_alleles(),
-                )
-                .await
-            }
-        },
-        PipelineOptions::single_threaded(),
-    )
-    .expect_err("the fixture's files have no alleles column");
-
-    assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
-    assert!(error.to_string().contains("'alleles'"), "{error}");
 }
 
 #[test]
@@ -176,13 +141,8 @@ fn rejects_a_path_with_no_nonempty_file_of_the_format() {
             async move {
                 let empty = Path::from(format!("{}/empty.parquet", fixture.table_path().prefix()));
                 fixture.store().put(&empty, Vec::new().into()).await?;
-                LocusSortedTable::open(
-                    &ctx,
-                    fixture.table_path().clone(),
-                    InputFormat::PARQUET,
-                    LocusOrdering::locus(),
-                )
-                .await
+                LocusSortedTable::open(&ctx, fixture.table_path().clone(), InputFormat::PARQUET)
+                    .await
             }
         },
         PipelineOptions::single_threaded(),
@@ -203,12 +163,7 @@ fn open(
 ) -> Result<LocusSortedTable> {
     let ctx = SessionContext::new();
     fixture.register(&ctx);
-    fixture::block_on(LocusSortedTable::open(
-        &ctx,
-        path.clone(),
-        input_format,
-        LocusOrdering::locus(),
-    ))
+    fixture::block_on(LocusSortedTable::open(&ctx, path.clone(), input_format))
 }
 
 async fn loci(frame: DataFrame, representation: LocusRepresentation) -> Result<Vec<Locus>> {

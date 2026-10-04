@@ -65,6 +65,7 @@ fn the_run_record_schema_names_its_columns_in_order() {
             ("formulation", &DataType::Utf8, false),
             ("groups", &DataType::UInt64, true),
             ("split_points", &DataType::Utf8, true),
+            ("row_ordering", &DataType::Utf8, false),
             ("dataset_path", &DataType::Utf8, false),
             ("input_format", &DataType::Utf8, false),
             ("output_format", &DataType::Utf8, true),
@@ -112,6 +113,7 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
             groups: Some(3),
             split_points: Some("1:5,2:1".to_string()),
         },
+        row_ordering: "locus,s".to_string(),
         dataset_path: "gs://bucket/refs".to_string(),
         input_format: "vortex".to_string(),
         write: Some(WriteRecord {
@@ -168,6 +170,7 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
         ("formulation", "grouped-merge"),
         ("groups", "3"),
         ("split_points", "1:5,2:1"),
+        ("row_ordering", "locus,s"),
         ("dataset_path", "gs://bucket/refs"),
         ("input_format", "vortex"),
         ("output_format", "parquet"),

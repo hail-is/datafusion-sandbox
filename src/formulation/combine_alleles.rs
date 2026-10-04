@@ -1,4 +1,4 @@
-use crate::locus::{LocusOrdering, StoredOrdering};
+use crate::locus::{RowOrdering, StoredOrdering};
 use crate::stored::dataset::Dataset;
 
 use datafusion::{
@@ -7,8 +7,9 @@ use datafusion::{
     prelude::*,
 };
 
-pub fn required_ordering() -> LocusOrdering {
-    LocusOrdering::locus_then_alleles()
+/// The least row ordering of the allele combiner.
+pub fn required_ordering() -> RowOrdering {
+    RowOrdering::locus_then_alleles()
 }
 
 /// Builds the union-of-per-sample-scans formulation. Produces the distinct set

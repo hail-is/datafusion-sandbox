@@ -16,7 +16,7 @@ use datafusion::{
 use datafusion_sandbox::combiner_run::{Action, CombinerRun, PlanInputs};
 use datafusion_sandbox::format::{InputFormat, OutputFormat};
 use datafusion_sandbox::formulation::Formulation;
-use datafusion_sandbox::locus::SplitPoints;
+use datafusion_sandbox::locus::{RowOrdering, SplitPoints};
 use datafusion_sandbox::metrics_directory::MetricsDirectory;
 use datafusion_sandbox::ordered_frame::OutputLayout;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
@@ -133,12 +133,17 @@ struct CombineRefsArgs {
     /// Accepted only with `--formulation grouped-merge`.
     #[arg(long, value_name = "N")]
     groups: Option<NonZeroUsize>,
-    /// The loci cutting the locus ordering into the intervals the interval-merge formulation
+    /// The loci cutting locus order into the intervals the interval-merge formulation
     /// merges, one file each: comma-separated `contig:position`, strictly increasing, where
     /// `contig` is the contig ordinal. Required by, and accepted only with,
     /// `--formulation interval-merge`.
     #[arg(long, value_name = "CONTIG:POSITION,...")]
     split_points: Option<SplitPoints>,
+    /// Merge under the `(locus, s)` row ordering rather than the locus alone. Every input table
+    /// is trusted to already be in that order, and the output keeps it; nothing is sorted by
+    /// sample or verified.
+    #[arg(long)]
+    preserve_sample_ordering: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -476,13 +481,22 @@ impl TryFrom<ActionArgs> for CliAction {
 fn resolve(cli: Cli) -> Result<CombinerRun> {
     let Cli { command, threads } = cli;
     let threads = threads.unwrap_or_else(pipeline::default_thread_count);
-    let (formulation, args) = match command {
+    let (formulation, row_ordering, args) = match command {
         Command::CombineRefs(args) => (
             args.formulation
                 .formulation(args.groups, args.split_points, threads)?,
+            if args.preserve_sample_ordering {
+                RowOrdering::locus_then_sample()
+            } else {
+                RowOrdering::locus()
+            },
             args.combiner,
         ),
-        Command::CombineAlleles(args) => (Formulation::CombineAllelesUnion, args),
+        Command::CombineAlleles(args) => (
+            Formulation::CombineAllelesUnion,
+            RowOrdering::locus_then_alleles(),
+            args,
+        ),
         Command::BalanceSplitPoints(_) => {
             return Err(DataFusionError::Internal(
                 "balance-split-points was sent through the combiner resolver".to_string(),
@@ -556,6 +570,7 @@ fn resolve(cli: Cli) -> Result<CombinerRun> {
     Ok(CombinerRun {
         inputs: PlanInputs {
             formulation,
+            row_ordering,
             input_path: path,
             input_format,
             input_tables: inputs,
@@ -1142,6 +1157,31 @@ mod tests {
             diagnostic.contains("possible values: union, grouped-merge, interval-merge"),
             "diagnostic:\n{diagnostic}"
         );
+    }
+
+    #[test]
+    fn preserving_sample_ordering_selects_the_locus_then_sample_row_ordering() {
+        let run = resolve(parse_combiner(["--preserve-sample-ordering", "--show"])).unwrap();
+
+        assert_eq!(run.inputs.row_ordering, RowOrdering::locus_then_sample());
+    }
+
+    #[test]
+    fn the_reference_combiner_selects_the_locus_row_ordering_by_default() {
+        let run = resolve(parse_combiner(["--show"])).unwrap();
+
+        assert_eq!(run.inputs.row_ordering, RowOrdering::locus());
+    }
+
+    #[test]
+    fn the_allele_combiner_selects_the_locus_then_alleles_row_ordering() {
+        let run = resolve(
+            Cli::try_parse_from(["datafusion-sandbox", "combine-alleles", "input", "--show"])
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(run.inputs.row_ordering, RowOrdering::locus_then_alleles());
     }
 
     #[test]

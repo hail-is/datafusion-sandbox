@@ -27,7 +27,7 @@ use crate::fixture;
 use crate::{
     format::OutputFormat,
     formulation::Formulation,
-    locus::{LocusOrdering, LocusRepresentation, StoredOrdering},
+    locus::{LocusRepresentation, RowOrdering, StoredOrdering},
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
     run_metrics::FormulationRecord,
@@ -103,11 +103,11 @@ fn each_formulation_describes_its_recorded_settings() {
 }
 
 #[test]
-fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
+fn rejects_a_dataset_with_an_insufficient_row_ordering() {
     let dataset = dataset_with_ordering(
         FixtureFormat::Vortex,
         LocusRepresentation::ContigPosition,
-        LocusOrdering::locus(),
+        RowOrdering::locus(),
     );
     let ctx = SessionContext::new();
     dataset.fixture.register(&ctx);
@@ -116,7 +116,7 @@ fn rejects_a_dataset_with_an_insufficient_locus_ordering() {
         .expect_err("the allele formulation requires alleles ordering");
 
     assert!(matches!(error, DataFusionError::Plan(_)));
-    assert!(error.to_string().contains("locus ordering"));
+    assert!(error.to_string().contains("row ordering"));
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn target_partitions_do_not_introduce_sorts_into_either_formulation() {
     }
 }
 
-/// `DataFusion`'s parquet reader preserves the declared locus ordering through
+/// `DataFusion`'s parquet reader preserves the declared row ordering through
 /// the reference combiner's union, so the requested ordering needs a merge but
 /// no re-sort.
 #[test]
@@ -228,7 +228,7 @@ fn combine_refs_union_vortex_merges_one_partition_per_sample_without_re_sorting(
     }
 }
 
-/// `DataFusion`'s parquet reader preserves the declared locus ordering through the
+/// `DataFusion`'s parquet reader preserves the declared row ordering through the
 /// allele combiner's union, and its de-duplication and ranking don't reintroduce
 /// a sort.
 #[test]
@@ -372,7 +372,7 @@ fn mixed_dataset(format: FixtureFormat, representation: LocusRepresentation) -> 
 fn dataset_with_ordering(
     format: FixtureFormat,
     representation: LocusRepresentation,
-    ordering: LocusOrdering,
+    ordering: RowOrdering,
 ) -> FixtureDataset {
     discovered(
         fixture::dataset_fixture(format, representation),
@@ -386,7 +386,7 @@ fn discovered(
     fixture: &'static Arc<fixture::DatasetFixture>,
     input_tables: &'static [&'static str],
     format: FixtureFormat,
-    ordering: LocusOrdering,
+    ordering: RowOrdering,
 ) -> FixtureDataset {
     let ctx = SessionContext::new();
     fixture.register(&ctx);

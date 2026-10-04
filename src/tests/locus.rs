@@ -1,4 +1,4 @@
-use crate::locus::{Locus, LocusInterval, LocusOrdering, LocusRepresentation, SplitPoints};
+use crate::locus::{Locus, LocusInterval, LocusRepresentation, RowOrdering, SplitPoints};
 use datafusion::{
     arrow::{
         array::BooleanArray,
@@ -328,24 +328,44 @@ fn the_whole_ordering_has_no_filter() {
 }
 
 #[test]
-fn accepts_an_exact_locus_ordering_prefix() {
-    assert!(LocusOrdering::locus().is_prefix_of(&LocusOrdering::locus()));
+fn accepts_an_exact_row_ordering_prefix() {
+    assert!(RowOrdering::locus().is_prefix_of(&RowOrdering::locus()));
 }
 
 #[test]
-fn accepts_a_finer_locus_ordering_prefix() {
-    assert!(LocusOrdering::locus().is_prefix_of(&LocusOrdering::locus_then_alleles()));
+fn accepts_a_finer_row_ordering_prefix() {
+    assert!(RowOrdering::locus().is_prefix_of(&RowOrdering::locus_then_alleles()));
 }
 
 #[test]
-fn rejects_an_insufficient_locus_ordering_prefix() {
-    assert!(!LocusOrdering::locus_then_alleles().is_prefix_of(&LocusOrdering::locus()));
+fn rejects_an_insufficient_row_ordering_prefix() {
+    assert!(!RowOrdering::locus_then_alleles().is_prefix_of(&RowOrdering::locus()));
 }
 
 #[test]
-fn expands_a_contig_position_locus_ordering() {
+fn a_locus_then_sample_ordering_satisfies_a_locus_requirement_only() {
+    let sample = RowOrdering::locus_then_sample();
+    let alleles = RowOrdering::locus_then_alleles();
+
+    assert!(RowOrdering::locus().is_prefix_of(&sample));
+    assert!(!alleles.is_prefix_of(&sample));
+    assert!(!sample.is_prefix_of(&alleles));
+}
+
+#[test]
+fn expands_a_contig_position_locus_then_sample_ordering_with_the_sample_last() {
     assert_eq!(
-        LocusOrdering::locus()
+        RowOrdering::locus_then_sample()
+            .expand(LocusRepresentation::ContigPosition)
+            .column_names(),
+        ["contig", "position", "s"]
+    );
+}
+
+#[test]
+fn expands_a_contig_position_row_ordering() {
+    assert_eq!(
+        RowOrdering::locus()
             .expand(LocusRepresentation::ContigPosition)
             .sort_expressions(),
         vec![
@@ -358,7 +378,7 @@ fn expands_a_contig_position_locus_ordering() {
 #[test]
 fn expands_a_packed_locus_then_alleles_ordering() {
     assert_eq!(
-        LocusOrdering::locus_then_alleles()
+        RowOrdering::locus_then_alleles()
             .expand(LocusRepresentation::Packed)
             .sort_expressions(),
         vec![
@@ -370,7 +390,7 @@ fn expands_a_packed_locus_then_alleles_ordering() {
 
 #[test]
 fn contig_position_stored_ordering_exposes_its_columns_and_locus_prefix() {
-    let ordering = LocusOrdering::locus_then_alleles().expand(LocusRepresentation::ContigPosition);
+    let ordering = RowOrdering::locus_then_alleles().expand(LocusRepresentation::ContigPosition);
 
     assert_eq!(ordering.column_names(), ["contig", "position", "alleles"]);
     let locus_prefix = ordering.locus_prefix();
@@ -389,7 +409,7 @@ fn contig_position_stored_ordering_exposes_its_columns_and_locus_prefix() {
 
 #[test]
 fn packed_stored_ordering_exposes_its_columns_and_locus_prefix() {
-    let ordering = LocusOrdering::locus_then_alleles().expand(LocusRepresentation::Packed);
+    let ordering = RowOrdering::locus_then_alleles().expand(LocusRepresentation::Packed);
 
     assert_eq!(ordering.column_names(), ["locus", "alleles"]);
     let locus_prefix = ordering.locus_prefix();
@@ -528,8 +548,8 @@ fn rejects_a_non_int64_packed_locus_representation() {
 }
 
 #[test]
-fn validating_a_locus_ordering_detects_the_representation_and_expands_under_it() {
-    let (representation, stored_ordering) = LocusOrdering::locus_then_alleles()
+fn validating_a_row_ordering_detects_the_representation_and_expands_under_it() {
+    let (representation, stored_ordering) = RowOrdering::locus_then_alleles()
         .validate_against(&schema(vec![
             Field::new("locus", DataType::Int64, false),
             Field::new("alleles", DataType::Utf8, false),
@@ -541,8 +561,8 @@ fn validating_a_locus_ordering_detects_the_representation_and_expands_under_it()
 }
 
 #[test]
-fn validating_a_locus_ordering_rejects_a_schema_missing_an_ordering_column() {
-    let error = LocusOrdering::locus_then_alleles()
+fn validating_a_row_ordering_rejects_a_schema_missing_an_ordering_column() {
+    let error = RowOrdering::locus_then_alleles()
         .validate_against(&schema(vec![
             Field::new("contig", DataType::Utf8View, false),
             Field::new("position", DataType::Int32, false),
@@ -554,8 +574,8 @@ fn validating_a_locus_ordering_rejects_a_schema_missing_an_ordering_column() {
 }
 
 #[test]
-fn validating_a_locus_ordering_surfaces_a_representation_error() {
-    let error = LocusOrdering::locus()
+fn validating_a_row_ordering_surfaces_a_representation_error() {
+    let error = RowOrdering::locus()
         .validate_against(&schema(vec![Field::new("alleles", DataType::Utf8, false)]))
         .expect_err("the schema has no locus representation");
 

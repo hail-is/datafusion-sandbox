@@ -8,7 +8,7 @@
 //! - Parquet with packed loci
 //! - Mixed datasets, in both formats and both representations: the input tables
 //!   [`MIXED_INPUT_TABLES`], which are a multi-sample file `g0.<ext>` of the first two
-//!   samples' rows in locus order, a multi-sample directory `g1/` of the third sample's
+//!   samples' rows in `(locus, s)` order, a multi-sample directory `g1/` of the third sample's
 //!   files with its rows carrying their sample, each beside its sample annotation table,
 //!   and the single-sample table `s=NA18534/`
 //!
@@ -564,10 +564,12 @@ fn build_in_memory_mixed_fixture(
     let [g0_samples, g1_samples @ [g1_sample], single_sample] = MIXED_SAMPLE_SETS else {
         panic!("the mixed fixture has three input tables, the second of one sample");
     };
-    let g0_rows = sample_rows()
+    let mut g0_rows = sample_rows()
         .into_iter()
         .flat_map(|row| g0_samples.iter().map(move |&sample| (row, sample)))
         .collect::<Vec<_>>();
+    // Stable, so each sample's rows at a locus stay in alleles order.
+    g0_rows.sort_by_key(|&((locus, _), sample)| (locus, sample));
     let mut writes = vec![(format!("g0.{extension}"), g0_rows)];
     for (filename, rows) in SAMPLE_FILES.iter() {
         let rows = rows

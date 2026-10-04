@@ -20,7 +20,7 @@
 //!   every partition.
 //! - [`sorted_table`] scans files as one ordered partition.
 //! - [`split_points`] computes exact row-balanced split points from a locus-sorted table.
-//! - [`stored`] reads stored tables under a locus ordering: datasets and locus-sorted tables.
+//! - [`stored`] reads stored tables under a row ordering: datasets and locus-sorted tables.
 //! - [`throughput_probe`] holds a throughput probe's settings and progress samples, and decides
 //!   when it stops.
 //! - [`mod@write`] builds and executes file writes.

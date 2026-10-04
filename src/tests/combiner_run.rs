@@ -4,7 +4,7 @@ use crate::{
     combiner_run::{Action, CombinerRun, Outcome, PlanInputs},
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
-    locus::{Locus, LocusOrdering, LocusRepresentation},
+    locus::{Locus, LocusRepresentation, RowOrdering},
     metrics_directory::MetricsDirectory,
     ordered_frame::OutputLayout,
     pipeline::{self, PipelineOptions},
@@ -266,7 +266,7 @@ fn collects_references_in_locus_order_across_file_cuts() {
                     )
                     .unwrap(),
                 );
-                let columns = LocusOrdering::locus().expand(representation).column_names();
+                let columns = RowOrdering::locus().expand(representation).column_names();
                 let loci = batches
                     .iter()
                     .flat_map(|batch| {
@@ -1152,6 +1152,66 @@ fn every_reference_write_leaves_a_sample_annotation_table_beside_its_output() {
 /// the same loci in the same order as the one-level union, and the same rows.
 #[test]
 fn a_second_level_run_over_first_level_outputs_returns_the_one_level_unions_rows() {
+    for HierarchyRows {
+        extension,
+        one_level: expected,
+        second_level,
+    } in hierarchy_rows(&RowOrdering::locus())
+    {
+        assert_eq!(expected.len(), 32, "{extension}");
+        let mut sorted_expected = expected.clone();
+        sorted_expected.sort();
+        for (formulation, mut rows) in second_level {
+            let context = format!("{extension} {formulation}");
+            assert_eq!(loci_of(&rows), loci_of(&expected), "{context}");
+            rows.sort();
+            assert_eq!(rows, sorted_expected, "{context}");
+        }
+    }
+}
+
+/// Under the `(locus, s)` row ordering at both levels, a second-level run over first-level outputs
+/// collects the one-level union's rows in the same locus-then-sample order, so a flagged run's
+/// written output is an input table a flagged run above it merges without re-sorting.
+#[test]
+fn a_second_level_run_under_sample_ordering_returns_the_one_level_rows_in_locus_then_sample_order()
+{
+    for HierarchyRows {
+        extension,
+        one_level: expected,
+        second_level,
+    } in hierarchy_rows(&RowOrdering::locus_then_sample())
+    {
+        assert_eq!(expected.len(), 32, "{extension}");
+        let mut sorted_expected = expected.clone();
+        sorted_expected.sort();
+        for (formulation, mut rows) in second_level {
+            let context = format!("{extension} {formulation}");
+            assert_eq!(
+                locus_samples_of(&rows),
+                locus_samples_of(&expected),
+                "{context}"
+            );
+            rows.sort();
+            assert_eq!(rows, sorted_expected, "{context}");
+        }
+    }
+}
+
+/// The rendered rows of one output format's hierarchy: those of a one-level union over every
+/// sample, and those each reference formulation collects at the second level, by its name.
+struct HierarchyRows {
+    extension: String,
+    one_level: Vec<Vec<String>>,
+    second_level: Vec<(String, Vec<Vec<String>>)>,
+}
+
+/// For each output format, the rows of a hierarchy whose every run is under `row_ordering`. Two
+/// first-level runs over disjoint input tables write into one directory, one a single file and
+/// the other a directory of one file per interval, and a held-back sample joins them there as a
+/// single-sample input table. Each reference formulation's second-level run reads that directory.
+fn hierarchy_rows(row_ordering: &RowOrdering) -> Vec<HierarchyRows> {
+    let mut hierarchies = Vec::new();
     for (fixture_format, output_format) in [
         (FixtureFormat::Parquet, OutputFormat::PARQUET),
         (FixtureFormat::Vortex, OutputFormat::VORTEX),
@@ -1163,6 +1223,11 @@ fn a_second_level_run_over_first_level_outputs_returns_the_one_level_unions_rows
         let store = MemoryStore::new("hierarchy");
         let url = store.url().as_str().to_string();
         let extension = output_format.extension().to_string();
+        let ordered_run = |formulation, action| {
+            let mut run = whole_dataset_run(&input, formulation, action);
+            run.inputs.row_ordering = row_ordering.clone();
+            run
+        };
         let first_level = [
             (
                 grouped_merge(2),
@@ -1176,8 +1241,7 @@ fn a_second_level_run_over_first_level_outputs_returns_the_one_level_unions_rows
             ),
         ]
         .map(|(formulation, output_path, input_tables)| {
-            let mut run = whole_dataset_run(
-                &input,
+            let mut run = ordered_run(
                 formulation,
                 Action::Write(WriteTarget {
                     output_path,
@@ -1187,16 +1251,14 @@ fn a_second_level_run_over_first_level_outputs_returns_the_one_level_unions_rows
             run.inputs.input_tables = Some(input_tables.iter().map(ToString::to_string).collect());
             run
         });
-        let mut one_level =
-            whole_dataset_run(&input, Formulation::CombineRefsUnion, Action::Collect);
-        one_level.inputs.input_tables = None;
+        let one_level = ordered_run(Formulation::CombineRefsUnion, Action::Collect);
         let second_level = [
             Formulation::CombineRefsUnion,
             grouped_merge(2),
             interval_merge("1:3,2:2"),
         ]
         .map(|formulation| {
-            let mut run = whole_dataset_run(&input, formulation, Action::Collect);
+            let mut run = ordered_run(formulation, Action::Collect);
             run.inputs.input_path = format!("{url}dataset/");
             run
         });
@@ -1227,18 +1289,268 @@ fn a_second_level_run_over_first_level_outputs_returns_the_one_level_unions_rows
             }
             Ok((one_level, collected))
         });
+        let second_level = second_level
+            .into_iter()
+            .map(|(formulation, batches)| (formulation, rows_of(&batches)))
+            .collect();
+        hierarchies.push(HierarchyRows {
+            extension,
+            one_level: rows_of(&one_level),
+            second_level,
+        });
+    }
+    hierarchies
+}
 
-        let mut expected = rows_of(&one_level);
-        assert_eq!(expected.len(), 32, "{extension}");
-        for (formulation, batches) in second_level {
-            let context = format!("{extension} {formulation}");
-            let mut rows = rows_of(&batches);
-            assert_eq!(loci_of(&rows), loci_of(&expected), "{context}");
-            rows.sort();
-            expected.sort();
-            assert_eq!(rows, expected, "{context}");
+/// Under the `(locus, s)` row ordering, every reference formulation collects the mixed dataset's
+/// rows in locus-then-sample order. The ordering reaches every kind of input table: its
+/// multi-sample file is stored in that order, each file of its multi-sample directory holds one
+/// sample, and its single-sample table's sample is attached rather than stored.
+#[test]
+fn each_reference_formulation_collects_rows_in_locus_then_sample_order_under_sample_ordering() {
+    for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
+        for representation in [
+            LocusRepresentation::ContigPosition,
+            LocusRepresentation::Packed,
+        ] {
+            let input = Arc::clone(fixture::mixed_dataset_fixture(format, representation));
+            for formulation in [
+                Formulation::CombineRefsUnion,
+                grouped_merge(2),
+                interval_merge("1:3,2:2"),
+            ] {
+                let context = format!("{format:?} {representation:?} {formulation}");
+                let run = sample_ordered_run(&input, formulation, Action::Collect);
+                let batches = on_memory_stores(
+                    &input,
+                    &MemoryStore::new("sample-ordered-collect"),
+                    move |ctx| async move { Ok(expect_batches(run.execute_in(&ctx).await?)) },
+                );
+
+                let mut rows = decoded_rows(&batches, representation);
+                assert_eq!(
+                    locus_sample_keys(&rows),
+                    expected_locus_sample_keys(),
+                    "{context}"
+                );
+                rows.sort();
+                assert_eq!(rows, expected_mixed_rows(), "{context}");
+            }
         }
     }
+}
+
+/// Under the `(locus, s)` row ordering, interval-merge writes each locus interval's file in
+/// locus-then-sample order, so its file-per-partition output is in the run's row ordering.
+#[test]
+fn interval_merge_writes_each_interval_in_locus_then_sample_order_under_sample_ordering() {
+    for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
+        let representation = LocusRepresentation::ContigPosition;
+        let input = Arc::clone(fixture::mixed_dataset_fixture(format, representation));
+        let store = MemoryStore::new("sample-ordered-intervals");
+        let output_format = match format {
+            FixtureFormat::Parquet => OutputFormat::PARQUET,
+            FixtureFormat::Vortex => OutputFormat::VORTEX,
+        };
+        let directory = format!("{}intervals", store.url().as_str());
+        let paths = (0..3)
+            .map(|index| output_format.partition_file_path(&directory, index, 3))
+            .collect::<Vec<_>>();
+        let run = sample_ordered_run(
+            &input,
+            interval_merge("1:3,2:2"),
+            Action::Write(WriteTarget {
+                output_path: directory,
+                output_format,
+            }),
+        );
+        let input_format = input.input_format();
+        let read_paths = paths.clone();
+
+        let files = on_memory_stores(&input, &store, move |ctx| async move {
+            run.execute_in(&ctx).await?;
+            let mut files = Vec::new();
+            for path in read_paths {
+                files.push(fixture::read_file(&ctx, &path, &input_format, None).await?);
+            }
+            Ok(files)
+        });
+
+        let mut written = Vec::new();
+        for (path, batches) in paths.iter().zip(files) {
+            let rows = decoded_rows(&batches, representation);
+            assert!(!rows.is_empty(), "{format:?}: {path} is empty");
+            let keys = locus_sample_keys(&rows);
+            assert!(keys.is_sorted(), "{format:?}: {path}: {keys:?}");
+            written.extend(rows);
+        }
+        assert_eq!(
+            locus_sample_keys(&written),
+            expected_locus_sample_keys(),
+            "{format:?}"
+        );
+    }
+}
+
+/// A measured write records the run's row ordering: `locus,s` under sample ordering and `locus`
+/// without it, over the same dataset.
+#[test]
+fn a_measured_write_records_its_row_ordering() {
+    let input = Arc::clone(fixture::mixed_dataset_fixture(
+        FixtureFormat::Vortex,
+        LocusRepresentation::ContigPosition,
+    ));
+    let store = MemoryStore::new("recorded-row-ordering");
+    let url = store.url().as_str().to_string();
+    let metrics_directory = MetricsDirectory::new(&format!("{url}metrics"));
+    let runs = [
+        ("sample-ordered", RowOrdering::locus_then_sample()),
+        ("locus-ordered", RowOrdering::locus()),
+    ]
+    .map(|(run_id, row_ordering)| {
+        let mut run = measured_run(
+            &input,
+            format!("{url}{run_id}.parquet"),
+            metrics_directory.clone(),
+            run_id,
+        );
+        run.inputs.row_ordering = row_ordering;
+        run
+    });
+
+    let records = on_memory_stores(&input, &store, move |ctx| async move {
+        let mut records = Vec::new();
+        for run in runs {
+            run.execute_in(&ctx).await?;
+        }
+        for run_id in ["sample-ordered", "locus-ordered"] {
+            let recorded = fixture::read_recorded_run(&ctx, &metrics_directory, run_id).await?;
+            records.push(recorded.record.expect("a measured write records its run"));
+        }
+        Ok(records)
+    });
+
+    let [sample_ordered, locus_ordered] = records.as_slice() else {
+        panic!("expected two records, got {}", records.len());
+    };
+    assert_eq!(string_values(sample_ordered, "row_ordering"), ["locus,s"]);
+    assert_eq!(string_values(locus_ordered, "row_ordering"), ["locus"]);
+}
+
+/// Under the `(locus, s)` row ordering, the explained grouped-merge write requires the locus
+/// fields followed by `s` of its sink, and stays a merge tree with no sort above its scans.
+#[test]
+fn an_explained_write_under_sample_ordering_requires_locus_then_sample_and_stays_a_merge_tree() {
+    for representation in [
+        LocusRepresentation::ContigPosition,
+        LocusRepresentation::Packed,
+    ] {
+        let input = Arc::clone(fixture::mixed_dataset_fixture(
+            FixtureFormat::Vortex,
+            representation,
+        ));
+        let store = MemoryStore::new("sample-ordered-explain");
+        let run = sample_ordered_run(
+            &input,
+            grouped_merge(2),
+            Action::Explain {
+                write: Some(WriteTarget {
+                    output_path: format!("{}combined.parquet", store.url().as_str()),
+                    output_format: OutputFormat::PARQUET,
+                }),
+            },
+        );
+
+        let explained = on_memory_stores(&input, &store, move |ctx| async move {
+            Ok(expect_plan(run.execute_in(&ctx).await?))
+        });
+
+        let required = match representation {
+            LocusRepresentation::ContigPosition => {
+                "[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, s@3 ASC NULLS LAST]"
+            }
+            LocusRepresentation::Packed => "[locus@0 ASC NULLS LAST, s@2 ASC NULLS LAST]",
+        };
+        let final_merge = explained
+            .lines()
+            .find(|line| line.contains("SortPreservingMergeExec"))
+            .unwrap_or_else(|| panic!("{representation:?}: no merge in\n{explained}"));
+        assert!(
+            final_merge.contains(required),
+            "{representation:?}: {final_merge}\n{explained}"
+        );
+        assert!(
+            !exec_names(&explained).contains(&"SortExec"),
+            "{representation:?}\n{explained}"
+        );
+    }
+}
+
+/// A run of `formulation` over the whole of `input` under the `(locus, s)` row ordering that
+/// performs `action`.
+fn sample_ordered_run(
+    input: &fixture::DatasetFixture,
+    formulation: Formulation,
+    action: Action,
+) -> CombinerRun {
+    let mut run = whole_dataset_run(input, formulation, action);
+    run.inputs.row_ordering = RowOrdering::locus_then_sample();
+    run
+}
+
+/// The locus, alleles, and sample of every row of `batches`, in row order.
+fn decoded_rows(batches: &[RecordBatch], representation: LocusRepresentation) -> Vec<fixture::Row> {
+    batches
+        .iter()
+        .flat_map(|batch| fixture::decode_rows(batch, representation))
+        .collect()
+}
+
+/// The locus and sample of each row, in row order.
+fn locus_sample_keys(rows: &[fixture::Row]) -> Vec<(Locus, &str)> {
+    rows.iter()
+        .map(|(locus, _, sample)| (*locus, sample.as_str()))
+        .collect()
+}
+
+/// Every row of the mixed dataset, sorted.
+fn expected_mixed_rows() -> Vec<fixture::Row> {
+    let mut rows = SAMPLES
+        .iter()
+        .flat_map(|&sample| {
+            fixture::sample_rows()
+                .into_iter()
+                .map(move |(locus, alleles)| (locus, alleles.to_string(), sample.to_string()))
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
+/// The locus and sample of every row of the mixed dataset, in locus-then-sample order.
+fn expected_locus_sample_keys() -> Vec<(Locus, &'static str)> {
+    let mut keys = SAMPLES
+        .iter()
+        .flat_map(|&sample| {
+            fixture::sample_rows()
+                .into_iter()
+                .map(move |(locus, _)| (locus, sample))
+        })
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
+/// The locus and sample of each rendered row: every column but the alleles before the trailing
+/// sample.
+fn locus_samples_of(rows: &[Vec<String>]) -> Vec<Vec<&String>> {
+    rows.iter()
+        .map(|row| {
+            let (sample, rest) = row.split_last().unwrap();
+            let (_, locus) = rest.split_last().unwrap();
+            locus.iter().chain([sample]).collect()
+        })
+        .collect()
 }
 
 /// A first-level write that replaces an earlier write's output, and whose data write fails, leaves
@@ -1585,6 +1897,7 @@ fn a_drained_probe_of_every_formulation_completes_and_records_three_tables() {
         let directory = MetricsDirectory::new(&format!("{}metrics", store.url().as_str()));
         let mut run = probe_run(&input, directory.clone(), "run-a");
         run.inputs.formulation = formulation.clone();
+        run.inputs.row_ordering = formulation.required_ordering();
 
         let (outcome, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
             let outcome = run.execute_in(&ctx).await?;
@@ -1699,6 +2012,7 @@ fn a_recorded_probe_replays_to_its_recorded_decision() {
         let directory = MetricsDirectory::new(&format!("{}metrics", store.url().as_str()));
         let mut run = probe_run(&input, directory.clone(), "run-a");
         run.inputs.formulation = formulation.clone();
+        run.inputs.row_ordering = formulation.required_ordering();
         run.action = Action::Probe {
             write: None,
             metrics_directory: directory.clone(),
@@ -1877,6 +2191,7 @@ fn a_written_probe_of_each_output_layout_writes_through_the_plain_writes_sink_an
             ProbeSettings::default(),
         );
         run.inputs.formulation = formulation.clone();
+        run.inputs.row_ordering = formulation.required_ordering();
 
         let (outcome, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
             let outcome = run.execute_in(&ctx).await?;
@@ -2007,6 +2322,7 @@ fn a_capped_or_failed_written_probe_keeps_nothing() {
             ProbeSettings::default(),
         );
         run.inputs.formulation = formulation.clone();
+        run.inputs.row_ordering = formulation.required_ordering();
         let (failed, recorded) = on_memory_stores(&input, &failing, move |ctx| async move {
             let failed = run.execute_in(&ctx).await;
             let recorded = fixture::read_recorded_run(&ctx, &directory, "run-a").await?;
@@ -2157,6 +2473,7 @@ fn a_shadow_probe_runs_past_its_maximum_duration_to_completion_without_a_would_s
         let directory = MetricsDirectory::new(&format!("{}metrics", store.url().as_str()));
         let mut run = probe_run(&input, directory.clone(), "run-a");
         run.inputs.formulation = formulation.clone();
+        run.inputs.row_ordering = formulation.required_ordering();
         run.action = Action::Probe {
             write: None,
             metrics_directory: directory.clone(),
@@ -2243,6 +2560,7 @@ fn probe_run(
     CombinerRun {
         inputs: PlanInputs {
             formulation: grouped_merge(2),
+            row_ordering: RowOrdering::locus(),
             input_path: input.table_path().to_string(),
             input_format: input.input_format(),
             input_tables: None,
@@ -2278,6 +2596,7 @@ fn measured_run(
     CombinerRun {
         inputs: PlanInputs {
             formulation: grouped_merge(2),
+            row_ordering: RowOrdering::locus(),
             input_path: input.table_path().to_string(),
             input_format: input.input_format(),
             input_tables: None,
@@ -2303,6 +2622,7 @@ fn whole_dataset_run(
 ) -> CombinerRun {
     CombinerRun {
         inputs: PlanInputs {
+            row_ordering: formulation.required_ordering(),
             formulation,
             input_path: input.table_path().to_string(),
             input_format: input.input_format(),
@@ -2511,6 +2831,7 @@ fn run(
 ) -> Result<Outcome> {
     CombinerRun {
         inputs: PlanInputs {
+            row_ordering: formulation.required_ordering(),
             formulation,
             input_path: input_path.to_string(),
             input_format,
