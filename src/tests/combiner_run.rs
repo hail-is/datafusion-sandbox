@@ -1330,7 +1330,7 @@ fn each_reference_formulation_collects_rows_in_locus_then_sample_order_under_sam
                 let mut rows = decoded_rows(&batches, representation);
                 assert_eq!(
                     locus_sample_keys(&rows),
-                    expected_locus_sample_keys(),
+                    sorted_locus_sample_keys(&expected_mixed_rows()),
                     "{context}"
                 );
                 rows.sort();
@@ -1386,7 +1386,7 @@ fn interval_merge_writes_each_interval_in_locus_then_sample_order_under_sample_o
         }
         assert_eq!(
             locus_sample_keys(&written),
-            expected_locus_sample_keys(),
+            sorted_locus_sample_keys(&expected_mixed_rows()),
             "{format:?}"
         );
     }
@@ -1450,7 +1450,7 @@ fn an_explained_write_under_sample_ordering_requires_locus_then_sample_and_stays
             representation,
         ));
         let store = MemoryStore::new("sample-ordered-explain");
-        let run = sample_ordered_run(
+        let explain = sample_ordered_run(
             &input,
             grouped_merge(2),
             Action::Explain {
@@ -1460,23 +1460,28 @@ fn an_explained_write_under_sample_ordering_requires_locus_then_sample_and_stays
                 }),
             },
         );
+        let collect = sample_ordered_run(&input, grouped_merge(2), Action::Collect);
 
-        let explained = on_memory_stores(&input, &store, move |ctx| async move {
-            Ok(expect_plan(run.execute_in(&ctx).await?))
+        let (explained, schema) = on_memory_stores(&input, &store, move |ctx| async move {
+            let explained = expect_plan(explain.execute_in(&ctx).await?);
+            let batches = expect_batches(collect.execute_in(&ctx).await?);
+            Ok((explained, batches[0].schema()))
         });
 
-        let required = match representation {
-            LocusRepresentation::ContigPosition => {
-                "[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, s@3 ASC NULLS LAST]"
-            }
-            LocusRepresentation::Packed => "[locus@0 ASC NULLS LAST, s@2 ASC NULLS LAST]",
-        };
+        let required = RowOrdering::locus_then_sample()
+            .expand(representation)
+            .column_names()
+            .iter()
+            .map(|name| format!("{name}@{} ASC NULLS LAST", schema.index_of(name).unwrap()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let required = format!("[{required}]");
         let final_merge = explained
             .lines()
             .find(|line| line.contains("SortPreservingMergeExec"))
             .unwrap_or_else(|| panic!("{representation:?}: no merge in\n{explained}"));
         assert!(
-            final_merge.contains(required),
+            final_merge.contains(&required),
             "{representation:?}: {final_merge}\n{explained}"
         );
         assert!(
@@ -1527,16 +1532,9 @@ fn expected_mixed_rows() -> Vec<fixture::Row> {
     rows
 }
 
-/// The locus and sample of every row of the mixed dataset, in locus-then-sample order.
-fn expected_locus_sample_keys() -> Vec<(Locus, &'static str)> {
-    let mut keys = SAMPLES
-        .iter()
-        .flat_map(|&sample| {
-            fixture::sample_rows()
-                .into_iter()
-                .map(move |(locus, _)| (locus, sample))
-        })
-        .collect::<Vec<_>>();
+/// The locus and sample of each row, in locus-then-sample order.
+fn sorted_locus_sample_keys(rows: &[fixture::Row]) -> Vec<(Locus, &str)> {
+    let mut keys = locus_sample_keys(rows);
     keys.sort();
     keys
 }
