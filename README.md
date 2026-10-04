@@ -385,7 +385,7 @@ Combiner runs on GCE read their dataset from, and write their output and metrics
 ```
 combiner-bench/datasets/<name>/                     datasets, uploaded with gcloud storage rsync
 combiner-bench/bin/<commit>/<family>/<profile>/     published binaries, each with a build-info.txt
-combiner-bench/runs/<campaign>/                     metrics directories
+combiner-bench/runs/<campaign>/                     metrics directories, with a record of each runner in runners/
 scratch/<campaign>/<run-id>/                        outputs; deleted after 7 days
 ```
 
@@ -442,6 +442,39 @@ SPLIT_POINTS=$(./datafusion-sandbox balance-split-points \
 gcloud compute instances delete combiner-runner --zone us-central1-a
 gcloud storage rsync -r gs://hail-pschultz/combiner-bench/runs/CAMPAIGN data/CAMPAIGN
 ```
+
+A sweep instead runs a **cell list** on runners that delete themselves.
+`scripts/gce/launch-runners.sh` creates one runner per runner shape and repetition, trying each
+`us-central1` zone in turn on a stockout, and returns once all are created. A shape is a machine
+type and a threads per core of 1 or 2, and `REPETITIONS` lists the repetitions to launch, `1` by
+default. Each runner's startup script, `scripts/gce/runner.sh`, downloads the binary published for
+the commit and the shape's family, runs every cell once in a shuffled order, and deletes the
+runner, after a failure too. A cell is one line of the cell list, a name and then `combine-refs`
+arguments without quoting; lines starting with `#` are skipped. The script adds `--metrics`,
+`--run-id`, and a `--write` path under `scratch/CAMPAIGN/`, so a cell with `--probe` is a written
+probe and one without is a measured write:
+
+```
+cat >cells.txt <<'EOF'
+pre-vortices_prod_10s_1f-b50 gs://hail-pschultz/combiner-bench/datasets/vortices_prod_10s_1f --threads 1 --probe --shadow
+pre-vortices_prod_10s_1f-b50-ord gs://hail-pschultz/combiner-bench/datasets/vortices_prod_10s_1f --threads 1 --probe --shadow --preserve-sample-ordering
+EOF
+REPETITIONS="1 2 3" scripts/gce/launch-runners.sh COMMIT CAMPAIGN cells.txt c4-standard-2:1 c4-standard-2:2
+```
+
+A runner is named `<machine type>-tpc<threads per core>-r<repetition>`, its instance
+`CAMPAIGN-<runner>`, and each of its runs `<cell>-<runner>`, such as
+`pre-vortices_prod_10s_1f-b50-c4-standard-2-tpc2-r1`. The run record has no column for the
+runner shape, so each runner also records itself in `combiner-bench/runs/CAMPAIGN/runners/`:
+`<runner>.json` holds its machine type, threads per core, zone, CPU platform, shuffled cell order,
+each cell's exit status and duration, and a `status` of `running`, `done`, `failed`, or
+`interrupted`, and `<runner>.log` holds the script's output. A cell that fails, which a run out of
+memory does with status 137, does not stop the cells after it; `failed` means the script itself
+failed, and `interrupted` that the runner rebooted part way and stopped. A runner still `running`
+with no instance left was deleted by its maximum run duration, `MAX_RUN_DURATION`, `24h` by
+default. The launcher refuses a runner that already has a record, since its run ids would
+be taken. Watch a runner with
+`gcloud compute instances get-serial-port-output CAMPAIGN-<runner> --zone ZONE`.
 
 On the first runner of each new family, also check that the family's computed CPU features are
 really there. `gce.py verify` asks rustc for them, so it needs a minimal stable toolchain and the

@@ -364,6 +364,21 @@ A throwaway GCE instance that runs combiner runs from a published binary and hol
 it is deleted.
 _Avoid_: worker, bench VM
 
+**Runner shape**:
+The hardware a runner presents to a combiner run: a machine type and a number of threads per
+physical core. Runs on runners of one shape are comparable; repetitions of a shape are separate
+runners.
+_Avoid_: machine, configuration, instance type
+
+**Cell**:
+One combination of combiner run settings that a campaign compares, apart from the runner shape.
+The runs of one cell differ only in the runner that ran them.
+_Avoid_: config, job, case
+
+**Campaign**:
+A named body of combiner runs recorded together, in one metrics directory, for one comparison.
+_Avoid_: experiment, sweep run, batch
+
 **Published binary**:
 A combiner binary built once for one commit, instance family and profile, and stored where every
 runner can fetch it. It is never overwritten, so its commit, family and profile name exactly one
