@@ -466,15 +466,26 @@ A runner is named `<machine type>-tpc<threads per core>-r<repetition>`, its inst
 `CAMPAIGN-<runner>`, and each of its runs `<cell>-<runner>`, such as
 `pre-vortices_prod_10s_1f-b50-c4-standard-2-tpc2-r1`. The run record has no column for the
 runner shape, so each runner also records itself in `combiner-bench/runs/CAMPAIGN/runners/`:
-`<runner>.json` holds its machine type, threads per core, zone, CPU platform, shuffled cell order,
-each cell's exit status and duration, and a `status` of `running`, `done`, `failed`, or
-`interrupted`, and `<runner>.log` holds the script's output. A cell that fails, which a run out of
-memory does with status 137, does not stop the cells after it; `failed` means the script itself
+`<runner>.json` holds its machine type, threads per core, zone, CPU platform, memory, the memory
+limit its cells ran under, shuffled cell order, each cell's exit status and duration, and a
+`status` of `running`, `done`, `failed`, or `interrupted`, and `<runner>.log` holds the script's
+output. Each cell runs in a cgroup whose `MemoryMax` leaves 512 MiB of the runner's memory to
+everything else. Without it, a cell just short of the runner's memory left it thrashing, out of
+reach by SSH, with no OOM kill. A cell that fails, which a run out of memory does with status
+137, does not stop the cells after it; `failed` means the script itself
 failed, and `interrupted` that the runner rebooted part way and stopped. A runner still `running`
 with no instance left was deleted by its maximum run duration, `MAX_RUN_DURATION`, `24h` by
 default. The launcher refuses a runner that already has a record, since its run ids would
 be taken. Watch a runner with
 `gcloud compute instances get-serial-port-output CAMPAIGN-<runner> --zone ZONE`.
+
+Once a campaign's runners are done, `uv run --directory python hailtools sweep-report CAMPAIGN`
+after the `rsync` above prints a Markdown table with a row per cell and runner shape. It gives
+the mean over repetitions, ± half their range, of the whole-run and steady-state normalized
+throughput in millions of rows per second, their ratio, and the largest peak RSS. A second table
+gives the same figures for each repetition. It joins run records to runner records by run id, and
+lists after the tables every cell that failed or left no run record, and every runner whose status
+is not `done`. A relative path is under `data/`.
 
 On the first runner of each new family, also check that the family's computed CPU features are
 really there. `gce.py verify` asks rustc for them, so it needs a minimal stable toolchain and the

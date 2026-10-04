@@ -14,7 +14,10 @@
 # <machine type>-tpc<threads per core>-r<repetition>, and runs each cell once, in a shuffled order,
 # as the run <cell>-<runner>. The script adds --metrics, --run-id, and a --write path under the
 # scratch directory, so a cell with --probe is a written probe and one without is a measured write.
-# A failed cell does not stop the cells after it.
+# A failed cell does not stop the cells after it. Each cell runs in a cgroup whose memory limit
+# leaves $MEMORY_HEADROOM_MIB of the runner's memory to everything else, so a cell that outgrows
+# memory is killed, exiting with status 137, rather than leaving the runner thrashing until its
+# maximum run duration.
 #
 # Beside the run records, in runners/ under the metrics directory, it writes <runner>.json,
 # describing the runner, its shuffled cell order, and each cell's exit status, and <runner>.log,
@@ -23,6 +26,7 @@ set -euo pipefail
 
 BUCKET=gs://hail-pschultz
 WORK=/var/lib/runner
+MEMORY_HEADROOM_MIB=512
 
 main() {
   # main runs in a pipeline's subshell, which inherits the set +e that lets finish run after it.
@@ -52,14 +56,18 @@ main() {
   } >>"$WORK/description"
 
   # Each lookup is assigned before it is used, since set -e ignores a failure inside an argument.
-  local instance zone cpu_platform commit family binary
+  local instance zone cpu_platform memory_mib memory_max_mib commit family binary
   instance=$(metadata name)
   zone=$(metadata zone | sed 's|.*/||')
   cpu_platform=$(metadata cpu-platform)
+  memory_mib=$(($(sed -n 's/^MemTotal: *\([0-9]*\) kB$/\1/p' /proc/meminfo) / 1024))
+  memory_max_mib=$((memory_mib - MEMORY_HEADROOM_MIB))
   {
     field instance "$instance"
     field zone "$zone"
     field cpu_platform "$cpu_platform"
+    field memory_mib "$memory_mib"
+    field memory_max_mib "$memory_max_mib"
   } >>"$WORK/description"
   commit=$(attribute commit)
   family=$(attribute family)
@@ -85,7 +93,9 @@ main() {
     run_id=$cell-$runner
     echo "runner: running $run_id"
     start=$(date +%s)
-    if "$WORK/datafusion-sandbox" combine-refs "${words[@]:1}" \
+    # A scope runs the command itself, so its exit status is the cell's.
+    if systemd-run --scope --quiet -p MemoryMax="${memory_max_mib}M" -p MemorySwapMax=0 \
+      "$WORK/datafusion-sandbox" combine-refs "${words[@]:1}" \
       --metrics "$records" --run-id "$run_id" \
       --write "$(write_path "$BUCKET/scratch/$campaign/$run_id" "${words[@]:1}")" </dev/null; then
       status=0

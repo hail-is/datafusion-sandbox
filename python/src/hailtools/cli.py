@@ -24,7 +24,7 @@ import hail as hl
 from hail.vds.combiner import transform_gvcf
 from hail.vds.combiner.combine import combine_references
 
-from . import gce, probe_viewer
+from . import gce, probe_viewer, sweep_report
 
 app = typer.Typer(
     help="Utilities for creating parquet and vortex files from Hail data.",
@@ -88,6 +88,18 @@ def probe_viewer_page(
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from None
     print(f"wrote {written}")
+
+
+@app.command("sweep-report")
+def sweep_report_table(metrics_dir: Path) -> None:
+    """Print, as a Markdown table, the whole-run and steady-state normalized throughput and the
+    peak RSS of each cell on each runner shape recorded in the campaign's METRICS_DIR, over its
+    repetitions. Relative paths are under data/."""
+    try:
+        print(sweep_report.render_markdown(sweep_report.report(resolve_path(metrics_dir))), end="")
+    except sweep_report.SweepReportError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from None
 
 
 @app.command()
