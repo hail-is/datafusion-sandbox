@@ -7,7 +7,7 @@
 
 use crate::{
     format::InputFormat,
-    locus::{Locus, LocusOrdering, SplitPoints},
+    locus::{Locus, SplitPoints},
     stored::locus_sorted_table::LocusSortedTable,
 };
 
@@ -36,8 +36,7 @@ pub async fn row_balanced(
     intervals: NonZeroUsize,
 ) -> Result<SplitPoints> {
     validate_interval_count(intervals)?;
-    let table =
-        LocusSortedTable::open(ctx, table_path, input_format, LocusOrdering::locus()).await?;
+    let table = LocusSortedTable::open(ctx, table_path, input_format).await?;
     let (targets, selected) = selected_rows(ctx, &table, intervals).await?;
     let batches = selected.collect().await?;
     let representation = table.locus_representation();

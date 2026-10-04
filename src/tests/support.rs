@@ -158,6 +158,7 @@ pub(super) fn run_record(run_id: &str) -> RunRecord {
             groups: Some(2),
             split_points: None,
         },
+        row_ordering: "locus".to_string(),
         dataset_path: "gs://bucket/refs".to_string(),
         input_format: "vortex".to_string(),
         write: Some(WriteRecord {

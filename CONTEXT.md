@@ -72,9 +72,9 @@ requires the combiner's ordering. See
 _Avoid_: consumer, writer, terminal, output
 
 **Combiner**:
-A merge of input tables into a single locus-ordered table, named by the table it produces. A
-combiner says what is produced, not how; the reference combiner and the allele combiner are the
-two we have.
+A merge of input tables into a single table in a row ordering, named by the table it produces. A
+combiner says what is produced, not how, and its row ordering is part of what it produces; the
+reference combiner and the allele combiner are the two we have.
 _Avoid_: merger, joiner
 
 **Formulation**:
@@ -120,7 +120,7 @@ an order of magnitude in time.
 _Avoid_: query plan (ambiguous between logical and physical), execution graph
 
 **Merge tree**:
-The plan shape that yields a combiner's rows in locus order with no sort: one sort-preserving merge
+The plan shape that yields a combiner's rows in its row ordering with no sort: one sort-preserving merge
 over each input group's union of scans, beneath a final merge of the groups. With one group it is a
 flat merge, one merge over every input table's scan.
 _Avoid_: nested merge, merge hierarchy, sort tree
@@ -150,10 +150,10 @@ neither empty nor extend it.
 _Avoid_: samples (unqualified), sample list, cohort
 
 **Input table**:
-One locus-sorted table a combiner run merges, together with its sample set. A single-sample input
-table's sample is given by where it is stored and its rows do not carry it; a multi-sample input
-table's rows each carry their sample, and its sample set is declared in its sample annotation
-table. A combiner run's written output is a multi-sample input table to the runs above it.
+One table a combiner run merges, sorted in its dataset's row ordering, together with its sample
+set. A single-sample input table's sample is given by where it is stored and its rows do not carry
+it; a multi-sample input table's rows each carry their sample, and its sample set is declared in its
+sample annotation table. A combiner run's written output is a multi-sample input table to the runs above it.
 _Avoid_: per-sample table (now the single-sample case), source, part
 
 **Sample annotation table**:
@@ -165,7 +165,7 @@ _Avoid_: sidecar, manifest, sample list, cols table
 
 **Split point**:
 A locus at which one locus interval ends and the next begins. `j - 1` split points, strictly
-increasing in the locus ordering, define `j` locus intervals.
+increasing in locus order, define `j` locus intervals.
 _Avoid_: boundary, breakpoint, cut point, partition key
 
 **Row-balanced split points**:
@@ -176,8 +176,8 @@ statistics is a method, not a different kind of split point.
 _Avoid_: oracle split points, ideal split points, even split points
 
 **Locus interval**:
-A contiguous stretch of loci in the dataset's locus ordering, half-open: it includes its start and
-excludes its end. The locus intervals of a run partition the whole ordering, so every row falls in
+A contiguous stretch of loci in locus order, half-open: it includes its start and excludes its
+end. The locus intervals of a run partition every locus, so every row falls in
 exactly one; a plan that merges by locus interval merges every input table within each interval
 and writes each interval's rows to its own file.
 _Avoid_: range, region, vertical partition, genome partition
@@ -189,15 +189,15 @@ _Avoid_: sample group (retired: a group holds input tables, not samples), batch,
 partition
 
 **Dataset**:
-One stored collection of input tables under a declared locus ordering, identified by its path, the
+One stored collection of input tables under a declared row ordering, identified by its path, the
 format of each file, and the input tables found there, single-sample and multi-sample alike. No
-sample is in two of its input tables. A dataset without a declared locus ordering does not exist.
+sample is in two of its input tables. A dataset without a declared row ordering does not exist.
 _Avoid_: input, table (a dataset holds many input tables), corpus, dataset layout (retired)
 
 **Locus-sorted table**:
-One file or a directory of files read as a single sorted table under a locus ordering; it has no
-sample set. Unlike a sorted table it knows its locus ordering, and unlike a dataset it holds one
-table rather than many. An input table is one together with a sample set.
+One file or a directory of files read as a single sorted table in locus order; it has no sample
+set. Unlike a sorted table it knows its locus representation, and unlike a dataset it holds one
+table rather than many.
 _Avoid_: standalone table, sorted frame, table (unqualified)
 
 **Generated table**:
@@ -248,7 +248,7 @@ order and group by.
 _Avoid_: site, coordinate, variant (a variant is a locus plus alleles)
 
 **Contig ordinal**:
-The integer standing for a contig, which names it and places it in the locus ordering. The packed
+The integer standing for a contig, which names it and places it in locus order. The packed
 representation stores loci by it; a caller names split points by it.
 _Avoid_: contig index, chromosome number, contig id
 
@@ -257,18 +257,19 @@ How one stored row records its locus. `contig-position` uses separate `contig` a
 fields; `packed` uses one `Int64` `locus` field.
 _Avoid_: encoding (ambiguous next to compression and Vortex encoding sets), locus format
 
-**Locus ordering**:
-A sequence of locus components, the locus optionally followed by alleles, declaring the sort order
-that makes a plan mergeable rather than re-sorted. It names no stored field, so one ordering is
-declarable against either locus representation, and a finer ordering satisfies a coarser
-requirement.
-_Avoid_: sort key, ordering (unqualified), stored ordering (the expansion, a separate term)
+**Row ordering**:
+A sequence of row components declaring the sort order that makes a plan mergeable rather than
+re-sorted, typically beginning with the locus and possibly followed by others such as alleles or
+the sample. It names no stored field, so one ordering is declarable against either locus
+representation, and a finer ordering satisfies a coarser requirement.
+_Avoid_: locus ordering (retired: not every component is a locus), sort key, ordering
+(unqualified), stored ordering (the expansion, a separate term)
 
 **Stored ordering**:
-The expansion of a locus ordering into stored fields under the locus representation of a dataset or
-a locus-sorted table: `contig` then `position`, or the packed `locus` field, optionally followed by
-`alleles`.
-_Avoid_: sort expressions, physical ordering, locus ordering (the declaration, a separate term)
+The expansion of a row ordering into stored fields under the locus representation of a dataset or
+a locus-sorted table: the locus becomes `contig` then `position`, or the packed `locus` field, and
+each other component its own field.
+_Avoid_: sort expressions, physical ordering, row ordering (the declaration, a separate term)
 
 **Reference data**:
 The per-sample records covering loci where a sample matches the reference genome, stored as
@@ -280,8 +281,8 @@ _Avoid_: ref blocks, non-variant data
 **Format**:
 The encoding of one file, together with how to read or write it, its extension, and the compression
 modes it accepts. It does not describe how a dataset arranges rows across files; that is the
-dataset's locus ordering and its output layout.
-_Avoid_: locus ordering, output layout, codec, encoding
+dataset's row ordering and its output layout.
+_Avoid_: row ordering, output layout, codec, encoding
 
 ### Throughput
 

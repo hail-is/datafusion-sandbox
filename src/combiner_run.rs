@@ -3,6 +3,7 @@
 use crate::{
     format::InputFormat,
     formulation::Formulation,
+    locus::RowOrdering,
     metrics_directory::{MetricsDirectory, UnrecordedRun},
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
@@ -399,6 +400,7 @@ impl Started {
 struct RunFacts {
     started: Started,
     formulation: FormulationRecord,
+    row_ordering: String,
     dataset_path: String,
     input_format: String,
     threads: usize,
@@ -411,6 +413,7 @@ impl RunFacts {
         Self {
             started,
             formulation: (&inputs.formulation).into(),
+            row_ordering: inputs.row_ordering.to_string(),
             dataset_path: inputs.input_path.clone(),
             input_format: inputs.input_format.name().to_string(),
             threads: threads.get(),
@@ -433,6 +436,7 @@ impl RunFacts {
             run_id,
             started_at: self.started.at,
             formulation: self.formulation,
+            row_ordering: self.row_ordering,
             dataset_path: self.dataset_path,
             input_format: self.input_format,
             write,
@@ -449,9 +453,13 @@ impl RunFacts {
 }
 
 /// What a run plans its rows from: the formulation's rows over the dataset at `input_path`,
-/// restricted to the named `input_tables` and limited to `row_limit` rows when given.
+/// declared in `row_ordering`, restricted to the named `input_tables` and limited to `row_limit`
+/// rows when given.
+///
+/// The formulation merges under the whole row ordering, which must satisfy its required ordering.
 pub struct PlanInputs {
     pub formulation: Formulation,
+    pub row_ordering: RowOrdering,
     pub input_path: String,
     pub input_format: InputFormat,
     pub input_tables: Option<Vec<String>>,
@@ -465,7 +473,7 @@ impl PlanInputs {
             ctx,
             ListingTableUrl::parse(&self.input_path)?,
             self.input_format.clone(),
-            self.formulation.required_ordering(),
+            self.row_ordering.clone(),
             None,
         )
         .await?;

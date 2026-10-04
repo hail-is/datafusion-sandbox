@@ -58,6 +58,8 @@ pub struct RunRecord {
     pub run_id: String,
     pub started_at: SystemTime,
     pub formulation: FormulationRecord,
+    /// The run's row ordering, as its components joined by commas, such as `locus,s`.
+    pub row_ordering: String,
     pub dataset_path: String,
     pub input_format: String,
     /// The write the run made; `None` for a drained probe.
@@ -164,6 +166,10 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
     RecordColumn {
         name: "split_points",
         cell: RecordCell::OptionalString(|record| record.formulation.split_points.as_deref()),
+    },
+    RecordColumn {
+        name: "row_ordering",
+        cell: RecordCell::String(|record| &record.row_ordering),
     },
     RecordColumn {
         name: "dataset_path",

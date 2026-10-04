@@ -94,7 +94,7 @@ tables in name order, first and then merges the groups, so the merges run on sev
 `--groups N` sets the number of input groups and defaults to the thread count. `--formulation
 interval-merge` merges every input table within each locus interval and writes one file per
 interval, so the merges run on several cores and the write does too; `--split-points` names the loci
-that cut the ordering into intervals, as comma-separated `contig:position` with the contig ordinal,
+that cut locus order into intervals, as comma-separated `contig:position` with the contig ordinal,
 strictly increasing, and is required. Its `--write` path names a directory, which gets one file per
 interval named by index, `0.vortex`, `1.vortex`, and so on; a path with an extension is rejected.
 Such a write replaces only the files it writes, so a write, measured or analyzed, refuses a path
@@ -103,6 +103,12 @@ among its own; remove an earlier output first. A `--limit` makes no promise abou
 and a limited write of this formulation puts one file in the directory. `--explain` and
 `--explain-analyze` may be combined with `--write` to render or analyze the plan of the write
 itself.
+Every formulation merges under the run's row ordering, the locus alone by default.
+`--preserve-sample-ordering` makes it the locus then the sample `s`: every input table is trusted to
+be in that order already, and the output keeps it, so a written output is an input table a run
+with the flag above it merges without re-sorting. Without the flag, ties on a locus come out in
+any order. The run record names the row ordering in its `row_ordering` column, `locus` or
+`locus,s`.
 ```
 cargo run -r -- combine-refs data/vortices_chr22 --formulation grouped-merge --groups 7 --explain --write data/combined.vortex
 cargo run -r -- combine-refs data/vortices_chr22 --formulation interval-merge --split-points 22:20000000,22:30000000,22:40000000 --write data/combined

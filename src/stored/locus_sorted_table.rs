@@ -1,13 +1,13 @@
-//! Locus-sorted tables: one file or one directory of files read as a single sorted table under a
-//! locus ordering.
+//! Locus-sorted tables: one file or one directory of files read as a single sorted table in locus
+//! order.
 //!
 //! Construction classifies the path against its object store, infers the schema from the first
-//! nonempty file of the input format, and validates the locus ordering against that schema.
+//! nonempty file of the input format, and detects the locus representation from that schema.
 
 use super::{first_nonempty_file, list_files_by_extension, normalize_table_path};
 use crate::{
     format::InputFormat,
-    locus::{LocusOrdering, LocusRepresentation, StoredOrdering},
+    locus::{LocusRepresentation, RowOrdering, StoredOrdering},
     sorted_table::SortedTable,
 };
 
@@ -41,13 +41,12 @@ impl LocusSortedTable {
     /// # Errors
     ///
     /// Returns an error if the object store cannot be read, the path holds no nonempty file of
-    /// `input_format`, schema inference fails, the schema has no supported locus representation,
-    /// or it lacks a stored ordering column.
+    /// `input_format`, schema inference fails, or the schema has no supported locus
+    /// representation.
     pub async fn open(
         ctx: &SessionContext,
         table_path: ListingTableUrl,
         input_format: InputFormat,
-        locus_ordering: LocusOrdering,
     ) -> Result<Self> {
         let store = ctx.runtime_env().object_store(&table_path)?;
         let table_path = if table_path.is_collection() {
@@ -70,7 +69,8 @@ impl LocusSortedTable {
         let schema = format
             .infer_schema(&ctx.state(), &store, std::slice::from_ref(input_file))
             .await?;
-        let (locus_representation, stored_ordering) = locus_ordering.validate_against(&schema)?;
+        let (locus_representation, stored_ordering) =
+            RowOrdering::locus().validate_against(&schema)?;
         let table = SortedTable::new(
             table_path.object_store(),
             format,
@@ -104,7 +104,7 @@ impl LocusSortedTable {
         self.locus_representation
     }
 
-    /// The table's locus ordering expanded into its stored fields.
+    /// The table's locus order expanded into its stored fields.
     #[must_use]
     pub const fn stored_ordering(&self) -> &StoredOrdering {
         &self.stored_ordering

@@ -100,7 +100,6 @@ pub struct SortedTable {
     object_store_url: ObjectStoreUrl,
     format: Arc<dyn FileFormat>,
     files: Vec<PartitionedFile>,
-    file_schema: SchemaRef,
     table_schema: TableSchema,
     ordering: Vec<SortExpr>,
     attached_scalar: Option<AttachedScalar>,
@@ -123,16 +122,12 @@ impl SortedTable {
         let table_schema = TableSchema::builder(Arc::clone(&file_schema))
             .with_table_partition_cols(partition_fields)
             .build();
-        let statistics_source = StatisticsSource::new(
-            Arc::clone(&format),
-            object_store_url.clone(),
-            Arc::clone(&file_schema),
-        );
+        let statistics_source =
+            StatisticsSource::new(Arc::clone(&format), object_store_url.clone(), file_schema);
         Self {
             object_store_url,
             format,
             files,
-            file_schema,
             table_schema,
             ordering,
             attached_scalar,
@@ -158,10 +153,11 @@ impl SortedTable {
         self.statistics_source.for_files(state, files).await
     }
 
-    /// The file-schema index and direction of every ordering column.
+    /// The table-schema index and direction of every ordering column.
     ///
-    /// The attached scalar is a table column but not a file column, so ordering by it is an
-    /// error here rather than a constant bound.
+    /// The attached scalar is the last table column, and its index is that of the exact constant
+    /// bound attaching statistics appends to every file's column statistics, so ordering by it
+    /// orders files by that constant.
     fn ordering_columns(&self) -> Result<Vec<OrderingColumn>> {
         self.ordering
             .iter()
@@ -173,13 +169,14 @@ impl SortedTable {
                     )));
                 };
                 let index = self
-                    .file_schema
+                    .table_schema
+                    .table_schema()
                     .fields()
                     .iter()
                     .position(|field| field.name() == &column.name)
                     .ok_or_else(|| {
                         DataFusionError::Plan(format!(
-                            "sorted table ordering column '{}' is not in the file schema",
+                            "sorted table ordering column '{}' is not in the table schema",
                             column.name
                         ))
                     })?;

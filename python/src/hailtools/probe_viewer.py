@@ -1632,6 +1632,7 @@ _SETTINGS: list[tuple[str, str, Callable[[Any], str]]] = [
     ("Formulation", "formulation", str),
     ("Groups", "groups", str),
     ("Split points", "split_points", str),
+    ("Row ordering", "row_ordering", str),
     ("Threads", "threads", str),
     ("Samples", "samples", str),
     ("Dataset", "dataset_path", str),

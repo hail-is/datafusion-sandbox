@@ -1,5 +1,7 @@
 # Declare locus ordering independently of the representation
 
+> Superseded in part by [issue #244](https://github.com/hail-is/datafusion-sandbox/issues/244). A locus ordering is now a **row ordering**: the locus expands under the representation as below, and every other component is a field that names itself, such as `alleles` or the sample `s`. A row ordering is still never empty, but it need not begin with the locus. The rest of this ADR stands.
+
 A formulation declares the ordering it requires in locus terms rather than stored field names. A
 locus ordering is a sequence of components, currently the locus and alleles. A dataset expands it
 into a stored ordering using the representation it detected: the locus becomes `contig` then

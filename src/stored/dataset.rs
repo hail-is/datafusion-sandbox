@@ -1,10 +1,10 @@
-//! Datasets: stored input tables under a declared locus ordering, each with its sample set, which
+//! Datasets: stored input tables under a declared row ordering, each with its sample set, which
 //! a multi-sample input table declares in its sample annotation table (ADR 0018).
 
 use super::{first_nonempty_file, list_files_by_extension, normalize_table_path};
 use crate::{
     format::InputFormat,
-    locus::{LocusOrdering, LocusRepresentation, StoredOrdering},
+    locus::{LocusRepresentation, RowOrdering, StoredOrdering},
     sorted_table::{AttachedScalar, SortedTable},
 };
 
@@ -48,8 +48,8 @@ pub enum InputTableKind {
     MultiSampleDirectory,
 }
 
-/// One locus-sorted table a dataset holds, named by its entry in the dataset root without the
-/// format's extension, with the samples it covers.
+/// One table a dataset holds, sorted in its row ordering, named by its entry in the dataset root
+/// without the format's extension, with the samples it covers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputTable {
     name: String,
@@ -115,12 +115,12 @@ impl InputTable {
     }
 }
 
-/// A directory of input tables, its format, and declared locus ordering.
+/// A directory of input tables, its format, and declared row ordering.
 #[derive(Clone, Debug)]
 pub struct Dataset {
     table_path: ListingTableUrl,
     input_format: InputFormat,
-    locus_ordering: LocusOrdering,
+    row_ordering: RowOrdering,
     schema: SchemaRef,
     input_tables: Vec<InputTable>,
     locus_representation: LocusRepresentation,
@@ -133,12 +133,12 @@ impl Dataset {
     /// # Errors
     ///
     /// Returns an error if the table path cannot be normalized, there are no input tables, two
-    /// input tables share a name, the locus representation cannot be detected, or the schema
-    /// lacks an ordering column.
+    /// input tables share a name, the locus representation cannot be detected, or the schema its
+    /// rows are read with, `schema` and their sample, lacks an ordering column.
     pub fn new(
         table_path: ListingTableUrl,
         input_format: InputFormat,
-        locus_ordering: LocusOrdering,
+        row_ordering: RowOrdering,
         schema: SchemaRef,
         mut input_tables: Vec<InputTable>,
     ) -> Result<Self> {
@@ -173,11 +173,11 @@ impl Dataset {
                 }
             }
         }
-        let (locus_representation, _) = locus_ordering.validate_against(&schema)?;
+        let (locus_representation, _) = row_ordering.validate_against(&with_sample(&schema))?;
         Ok(Self {
             table_path,
             input_format,
-            locus_ordering,
+            row_ordering,
             schema,
             input_tables,
             locus_representation,
@@ -204,7 +204,7 @@ impl Dataset {
         ctx: &SessionContext,
         table_path: ListingTableUrl,
         input_format: InputFormat,
-        locus_ordering: LocusOrdering,
+        row_ordering: RowOrdering,
         schema: Option<SchemaRef>,
     ) -> Result<Self> {
         let table_path = normalize_table_path(table_path)?;
@@ -235,13 +235,7 @@ impl Dataset {
             Some(schema) => schema,
             None => infer_schema(ctx, &table_path, &input_format, &input_tables).await?,
         };
-        Self::new(
-            table_path,
-            input_format,
-            locus_ordering,
-            schema,
-            input_tables,
-        )
+        Self::new(table_path, input_format, row_ordering, schema, input_tables)
     }
 
     /// The dataset's input tables, in name order.
@@ -274,14 +268,15 @@ impl Dataset {
         self.locus_representation
     }
 
-    /// Expands the required query ordering after checking it against the dataset's locus ordering.
+    /// Expands the dataset's whole row ordering after checking that it satisfies `required`, so a
+    /// plan merges under every component the dataset declares rather than only those it requires.
     ///
     /// # Errors
     ///
-    /// Returns an error if the dataset's stored ordering does not start with `required`.
-    pub fn query_ordering(&self, required: &LocusOrdering) -> Result<StoredOrdering> {
+    /// Returns an error if the dataset's row ordering does not start with `required`.
+    pub fn query_ordering(&self, required: &RowOrdering) -> Result<StoredOrdering> {
         self.check_ordering(required)?;
-        Ok(required.expand(self.locus_representation))
+        Ok(self.row_ordering.expand(self.locus_representation))
     }
 
     /// Reads the dataset's input tables into one flat frame: the union of their scans, or the
@@ -328,10 +323,7 @@ impl Dataset {
                 )));
             }
             (InputTableKind::MultiSampleFile | InputTableKind::MultiSampleDirectory, _) => {
-                let mut fields = self.schema.fields().to_vec();
-                fields.push(sample_field());
-                let schema = Schema::new_with_metadata(fields, self.schema.metadata().clone());
-                (Arc::new(schema), None)
+                (with_sample(&self.schema), None)
             }
         };
         let table = SortedTable::new(
@@ -339,7 +331,7 @@ impl Dataset {
             self.input_format.read_format(),
             files,
             file_schema,
-            self.locus_ordering
+            self.row_ordering
                 .expand(self.locus_representation)
                 .sort_expressions(),
             attached_scalar,
@@ -347,15 +339,15 @@ impl Dataset {
         ctx.read_table(Arc::new(table))
     }
 
-    /// Checks that the dataset's locus ordering starts with the required ordering.
-    fn check_ordering(&self, required: &LocusOrdering) -> Result<()> {
-        if required.is_prefix_of(&self.locus_ordering) {
+    /// Checks that the dataset's row ordering starts with the required ordering.
+    fn check_ordering(&self, required: &RowOrdering) -> Result<()> {
+        if required.is_prefix_of(&self.row_ordering) {
             return Ok(());
         }
 
         Err(DataFusionError::Plan(format!(
-            "dataset locus ordering {:?} does not satisfy required ordering {:?}",
-            self.locus_ordering, required
+            "dataset row ordering '{}' does not satisfy required ordering '{}'",
+            self.row_ordering, required
         )))
     }
 
@@ -627,6 +619,13 @@ async fn first_file_schema(
         .infer_schema(&ctx.state(), &store, std::slice::from_ref(file))
         .await?;
     Ok(Some(schema))
+}
+
+/// The schema rows of a dataset with `schema` are read with: `schema` followed by their sample.
+fn with_sample(schema: &SchemaRef) -> SchemaRef {
+    let mut fields = schema.fields().to_vec();
+    fields.push(sample_field());
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
 }
 
 /// The columns of `schema` other than `s`.

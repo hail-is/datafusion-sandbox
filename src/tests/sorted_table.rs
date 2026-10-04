@@ -5,7 +5,7 @@ mod metadata_collection;
 use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
 
 use crate::{
-    locus::{Locus, LocusOrdering, LocusRepresentation},
+    locus::{Locus, LocusRepresentation, RowOrdering},
     pipeline::{self, PipelineOptions},
     sorted_table::{AttachedScalar, SortedTable},
     tests::{plan_shape::PlanShape, support::hostile_config},
@@ -1022,7 +1022,7 @@ async fn sample_table_with_format(
         .infer_schema(&ctx.state(), fixture.store(), &metas)
         .await
         .unwrap();
-    let ordering = LocusOrdering::locus_then_alleles()
+    let ordering = RowOrdering::locus_then_alleles()
         .expand(fixture.representation())
         .sort_expressions();
     let files = metas
@@ -1039,15 +1039,48 @@ async fn sample_table_with_format(
     )
 }
 
+/// Ordering by the attached scalar after a column on which both files are constant compares the
+/// scalar's exact per-file bound, so both files plan, in either order since they tie, rather than
+/// failing for want of a bound on the scalar.
 #[tokio::test]
-async fn an_ordering_column_absent_from_the_file_schema_is_rejected() {
+async fn an_ordering_by_the_attached_scalar_bounds_every_file_by_its_constant() {
+    let store = MemoryStore::new("scalar-ordering-column");
+    let table = SortedTable::new(
+        store.url().clone(),
+        Arc::new(ParquetFormat::default()),
+        vec![
+            file("b.parquet", Some(5), Some(5)),
+            file("a.parquet", Some(5), Some(5)),
+        ],
+        schema(),
+        vec![
+            col("position").sort(true, false),
+            col("source").sort(true, false),
+        ],
+        Some(AttachedScalar {
+            field: Arc::new(Field::new("source", DataType::Utf8, false)),
+            value: ScalarValue::Utf8(Some("sample-1".to_string())),
+        }),
+    );
+
+    let paths = file_group_paths(&store, table).await;
+
+    let mut paths = paths.iter().map(Path::as_ref).collect::<Vec<&str>>();
+    paths.sort_unstable();
+    assert_eq!(paths, ["a.parquet", "b.parquet"]);
+}
+
+/// An ordering by a column that is neither a file column nor the attached scalar leaves the table
+/// with no ordering, which is a plan error rather than an unordered scan.
+#[tokio::test]
+async fn an_ordering_column_absent_from_the_table_schema_is_rejected() {
     let store = MemoryStore::new("absent-ordering-column");
     let table = SortedTable::new(
         store.url().clone(),
         Arc::new(ParquetFormat::default()),
         vec![file("only.parquet", Some(1), Some(10))],
         schema(),
-        vec![col("source").sort(true, false)],
+        vec![col("absent").sort(true, false)],
         Some(AttachedScalar {
             field: Arc::new(Field::new("source", DataType::Utf8, false)),
             value: ScalarValue::Utf8(Some("sample-1".to_string())),
@@ -1063,6 +1096,9 @@ async fn an_ordering_column_absent_from_the_file_schema_is_rejected() {
         .await
         .unwrap_err();
 
-    assert!(matches!(error, DataFusionError::Plan(_)));
-    assert!(error.to_string().contains("source"), "{error}");
+    assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
+    assert!(
+        error.to_string().contains("requires an ordering"),
+        "{error}"
+    );
 }

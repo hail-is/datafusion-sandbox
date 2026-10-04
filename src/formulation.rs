@@ -9,7 +9,7 @@ mod combine_refs_union;
 mod tests;
 
 use crate::{
-    locus::{LocusOrdering, SplitPoints},
+    locus::{RowOrdering, SplitPoints},
     ordered_frame::{OrderedFrame, OutputLayout},
     run_metrics::FormulationRecord,
     stored::dataset::Dataset,
@@ -62,8 +62,10 @@ impl From<&Formulation> for FormulationRecord {
 }
 
 impl Formulation {
+    /// The least row ordering this formulation can merge under. It plans under its dataset's
+    /// whole row ordering, which must start with this one.
     #[must_use]
-    pub fn required_ordering(&self) -> LocusOrdering {
+    pub fn required_ordering(&self) -> RowOrdering {
         match self {
             Self::CombineAllelesUnion => combine_alleles::required_ordering(),
             Self::CombineRefsUnion

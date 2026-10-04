@@ -17,17 +17,19 @@ use datafusion::{
 };
 use std::{fmt, str::FromStr, sync::Arc};
 
+/// One component of a row ordering: the locus, which expands under the locus representation, or a
+/// field that names itself.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Component {
     Locus,
-    Alleles,
+    Field(String),
 }
 
-/// A nonempty ordering declared in locus terms rather than stored field names.
+/// A nonempty ordering declared in row components rather than stored field names.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LocusOrdering(Vec<Component>);
+pub struct RowOrdering(Vec<Component>);
 
-impl LocusOrdering {
+impl RowOrdering {
     /// Orders rows by locus.
     #[must_use]
     pub fn locus() -> Self {
@@ -37,7 +39,17 @@ impl LocusOrdering {
     /// Orders rows by locus, then alleles.
     #[must_use]
     pub fn locus_then_alleles() -> Self {
-        Self(vec![Component::Locus, Component::Alleles])
+        Self(vec![
+            Component::Locus,
+            Component::Field("alleles".to_string()),
+        ])
+    }
+
+    /// Orders rows by locus, then sample: the `s` field every row read from a dataset carries,
+    /// as [`crate::stored::dataset::sample_field`] defines it.
+    #[must_use]
+    pub fn locus_then_sample() -> Self {
+        Self(vec![Component::Locus, Component::Field("s".to_string())])
     }
 
     /// Whether this ordering is a prefix of `other`.
@@ -70,7 +82,7 @@ impl LocusOrdering {
         for column in stored_ordering.column_names() {
             if schema.field_with_name(&column).is_err() {
                 return Err(DataFusionError::Plan(format!(
-                    "locus ordering column '{column}' is missing from the schema"
+                    "row ordering column '{column}' is missing from the schema"
                 )));
             }
         }
@@ -78,10 +90,10 @@ impl LocusOrdering {
     }
 }
 
-/// A locus ordering expanded into the fields used by one stored representation.
+/// A row ordering expanded into the fields used by one stored representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredOrdering {
-    ordering: LocusOrdering,
+    ordering: RowOrdering,
     representation: LocusRepresentation,
 }
 
@@ -122,7 +134,7 @@ impl StoredOrdering {
             .cloned()
             .collect();
         Self {
-            ordering: LocusOrdering(components),
+            ordering: RowOrdering(components),
             representation: self.representation,
         }
     }
@@ -136,8 +148,25 @@ impl Component {
                 .into_iter()
                 .map(|field| field.name().clone())
                 .collect(),
-            Self::Alleles => vec!["alleles".to_string()],
+            Self::Field(name) => vec![name.clone()],
         }
+    }
+}
+
+/// Writes the components joined by commas, the locus as `locus` and every other component by its
+/// field name: `locus`, `locus,s` or `locus,alleles`.
+impl fmt::Display for RowOrdering {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, component) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(",")?;
+            }
+            match component {
+                Component::Locus => formatter.write_str("locus")?,
+                Component::Field(name) => formatter.write_str(name)?,
+            }
+        }
+        Ok(())
     }
 }
 
@@ -461,7 +490,7 @@ impl fmt::Display for Locus {
     }
 }
 
-/// The `j - 1` loci that cut the locus ordering into `j` locus intervals, strictly increasing.
+/// The `j - 1` loci that cut locus order into `j` locus intervals, strictly increasing.
 ///
 /// Parses from and renders to a comma-separated list of `contig:position`, so a computed list
 /// prints in the syntax a caller pastes back.

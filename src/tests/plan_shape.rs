@@ -5,7 +5,7 @@
 //! on failure; checks within a child plan include that subtree as well.
 
 use crate::{
-    locus::{LocusOrdering, LocusRepresentation, StoredOrdering},
+    locus::{LocusRepresentation, RowOrdering, StoredOrdering},
     sink::PartitionedSinkExec,
     sorted_table,
 };
@@ -226,12 +226,12 @@ impl PlanShape {
         n_scans: usize,
         representation: LocusRepresentation,
     ) {
-        let locus_column = LocusOrdering::locus()
+        let locus_column = RowOrdering::locus()
             .expand(representation)
             .column_names()
             .into_iter()
             .next()
-            .expect("a locus ordering has a stored field");
+            .expect("a row ordering has a stored field");
         let scans = self.nodes_of::<DataSourceExec>();
         assert_eq!(
             scans.len(),

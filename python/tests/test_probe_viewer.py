@@ -16,6 +16,7 @@ RUN_RECORD_TYPES = {
     "formulation": pa.string(),
     "groups": pa.uint64(),
     "split_points": pa.string(),
+    "row_ordering": pa.string(),
     "threads": pa.uint64(),
     "action": pa.string(),
     "stop_reason": pa.string(),
@@ -90,6 +91,7 @@ def shadow(
     progress=SERIES,
     precision=0.02,
     consecutive_checks=1,
+    row_ordering="locus",
 ):
     """A shadow run over `progress`, which settles at 2.2 s on a warmup end at 1.0 s if it has a
     would-be estimate, and ends its run with a warmup end at 1.5 s and its first partition end at
@@ -102,6 +104,7 @@ def shadow(
         metrics,
         run_id,
         formulation="union",
+        row_ordering=row_ordering,
         threads=threads,
         action="shadow",
         stop_reason="completed",
@@ -138,7 +141,7 @@ def metrics(tmp_path):
         threads=8,
         progress=None,
     )
-    shadow(metrics, "shadow-union-j4", end=150.0, end_width=0.03, threads=4)
+    shadow(metrics, "shadow-union-j4", end=150.0, end_width=0.03, threads=4, row_ordering="locus,s")
     write_run_record(
         metrics,
         "probe-union-j8",
@@ -268,6 +271,16 @@ def test_page_tabulates_the_settings_of_every_shadow_run_and_only_those(metrics)
     assert re.findall(r"<tr><td>([^<]+)</td>", table) == ["shadow-union-j1", "shadow-union-j4", "shadow-union-j8"]
     assert "probe-union-j8" not in page
     assert "write-union-j8" not in page
+
+
+def test_page_tabulates_the_row_ordering_of_each_shadow_run(metrics):
+    page = probe_viewer.write_page(metrics).read_text()
+
+    [table] = re.findall(r"<table.*?</table>", page, re.S)
+    [header, *rows] = re.findall(r"<tr>(.*?)</tr>", table)
+    column = re.findall(r"<th>([^<]*)</th>", header).index("Row ordering")
+    orderings = {cells[0]: cells[column] for cells in (re.findall(r"<td>([^<]*)</td>", row) for row in rows)}
+    assert orderings == {"shadow-union-j1": "locus", "shadow-union-j4": "locus,s", "shadow-union-j8": "locus"}
 
 
 def test_page_loads_nothing_but_the_vega_scripts_so_it_opens_from_a_file(metrics):
