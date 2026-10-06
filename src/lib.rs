@@ -26,7 +26,7 @@
 //! - [`mod@write`] builds and executes file writes.
 //! - [`generated`] builds generated tables for tests and benchmarks.
 //!
-//! See the [project glossary](../CONTEXT.md) for domain vocabulary.
+//! See the [project glossary](../GLOSSARY.md) for domain vocabulary.
 
 // `debug_assertions` here is a proxy for dev builds. Optimized builds don't trigger the linker warning.
 #![cfg_attr(
