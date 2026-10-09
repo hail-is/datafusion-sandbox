@@ -566,3 +566,35 @@ def test_probe_viewer_says_why_it_writes_no_page(tmp_path):
     assert result.exit_code == 1
     assert "no run records" in result.output
     assert not (tmp_path / "probe-viewer.html").exists()
+
+
+def test_sweep_report_prints_a_row_per_cell_and_runner_shape(tmp_path):
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "runners").mkdir()
+    pq.write_table(
+        pa.table({
+            "run_id": ["b50-c4-standard-2-tpc2-r1"],
+            "threads": pa.array([1], type=pa.uint64()),
+            "input_tables": pa.array([50], type=pa.uint64()),
+            "rows_written": pa.array([1_000_000], type=pa.uint64()),
+            "run_ns": pa.array([1_000_000_000], type=pa.uint64()),
+        }),
+        tmp_path / "runs" / "b50-c4-standard-2-tpc2-r1.parquet",
+    )
+    (tmp_path / "runners" / "c4-standard-2-tpc2-r1.json").write_text(
+        '{"runner": "c4-standard-2-tpc2-r1", "machine_type": "c4-standard-2", "threads_per_core": "2", "repetition": "1", "cell_order": ["b50"],'
+        ' "cells": [{"cell": "b50", "run_id": "b50-c4-standard-2-tpc2-r1", "exit_status": 0, "seconds": 1}],'
+        ' "status": "done"}'
+    )
+
+    result = CliRunner().invoke(cli.app, ["sweep-report", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "| b50 | c4-standard-2 | 2 | 1 | 3.91 ±0.0% |" in result.output
+
+
+def test_sweep_report_says_why_it_reports_nothing(tmp_path):
+    result = CliRunner().invoke(cli.app, ["sweep-report", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "no runner records" in result.output

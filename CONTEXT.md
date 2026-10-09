@@ -163,6 +163,11 @@ presence marks the input table as complete. See
 [ADR 0018](docs/adr/0018-declare-a-multi-sample-input-tables-samples-in-a-sample-annotation-table.md).
 _Avoid_: sidecar, manifest, sample list, cols table
 
+**Single-file input table**:
+A multi-sample input table stored as one file. A multi-file input table is a directory of files,
+read as one sorted scan.
+_Avoid_: one-file table, flat table
+
 **Split point**:
 A locus at which one locus interval ends and the next begins. `j - 1` split points, strictly
 increasing in locus order, define `j` locus intervals.
@@ -309,6 +314,18 @@ _Avoid_: steady-state interval (**Locus interval** owns "interval"), sample wind
 **Steady-state throughput**:
 A throughput probe's estimate: the rows its sink received per second over its measurement window.
 _Avoid_: rate, speed, throughput (unqualified)
+
+**Whole-run throughput**:
+The rows a combiner run wrote per second, over the whole run from resolved settings to the
+completed write. Unlike steady-state throughput, it includes warmup.
+_Avoid_: end-to-end throughput, overall throughput
+
+**Normalized throughput**:
+Steady-state throughput times the natural log of the branching factor, over the thread count.
+Merging `N` rows of `S` samples through a hierarchy of combiner runs costs about `N·ln S` over it in
+thread-seconds, whatever the branching factor, so only it compares runs of different branching
+factors or thread counts. The same formula normalizes whole-run throughput.
+_Avoid_: efficiency, per-core throughput, merge throughput
 
 **Estimate interval**:
 The uncertainty a throughput probe attaches to its steady-state throughput: the range its rate
