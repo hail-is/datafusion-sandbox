@@ -3,8 +3,16 @@
 //!
 //! The pipeline runs on the CPU runtime. It reaches the IO runtime through its session, with
 //! [`io_runtime`], to spawn work that must not wait behind plan execution.
+//!
+//! The CPU runtime lives on its own thread, in `cpu_runtime`, so the runner can drop it from
+//! async code.
 
-use crate::cpu_runtime::CpuRuntime;
+mod cpu_runtime;
+
+#[cfg(test)]
+mod tests;
+
+use cpu_runtime::CpuRuntime;
 
 use datafusion::{
     common::runtime::JoinSet,
