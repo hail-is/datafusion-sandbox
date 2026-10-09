@@ -1,5 +1,8 @@
 # Test modules are siblings of the modules they test
 
+> The rules this decision sets, and the terms they use, are stated in
+> [`docs/modules-and-tests.md`](../modules-and-tests.md). This ADR records why.
+
 A module's visibility states its contract with other code at that point in the module tree. Tests
 should check that contract without forcing it wider and without reaching into implementation details.
 Cargo crate tests cannot do this for `pub(crate)`, `pub(super)`, or private child modules because they
@@ -9,13 +12,24 @@ item in the module under test.
 ## Decision
 
 Library tests are module tests. The tests of module X live in a `#[cfg(test)]` sibling module declared
-by X's parent. A `tests` subtree mirrors the parent's children, with one file per tested child. The
-test names X's items through X's path and does not name private items of the parent, even though Rust
-allows a sibling to do so.
+by X's parent. A `tests` subtree mirrors the parent's children, with one file per tested child; that
+file's suite may continue in a directory of files named for its concerns. The test names X's items
+through X's path and does not name private items of the parent, even though Rust allows a sibling to
+do so.
 
-Each `tests` subtree root states whose tests it contains and where the parent's own tests belong. The
-crate currently needs only the library root's `src/tests.rs` subtree. Nested parents add their own
-subtree when one of their children gains tests.
+This holds for private children too. A private child is a module whose callers are its parent's
+implementation, and it gets a suite like any other. Its tested interface lets a complex parent be
+understood through its children's interfaces, without reading their implementations. A sibling test
+module can see a private child, which a crate test cannot, and that is part of why tests are siblings.
+
+Each `tests` subtree root states whose tests it contains and where the parent's own tests belong.
+Nested parents add their own subtree when one of their children gains tests, as `stored` has.
+
+Tests exercise everything a module hard-wires. They substitute an adapter only at a seam, a dependency
+chosen outside the module, such as the session's object store
+([ADR 0010](0010-keep-tests-on-in-memory-object-stores.md)). Faking a hard-wired dependency would test
+past the interface just as naming a private item would, and a dependency the module hard-wires is part
+of the contract its suite checks.
 
 A `tests` subtree may also hold shared test-support modules that are the tests of no child: plan
 observation, session builders, and constructors several test modules use. They are `#[cfg(test)]` like
