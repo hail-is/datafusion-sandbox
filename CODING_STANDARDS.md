@@ -4,7 +4,7 @@ Rules reviewers enforce on changes to this repo.
 
 ## Glossary entries state what a term is
 
-An entry in `CONTEXT.md` is a definition: one or two sentences naming the concept
+An entry in `GLOSSARY.md` is a definition: one or two sentences naming the concept
 and its boundary with neighboring terms, followed by an `_Avoid_` line listing
 rejected synonyms. Links to ADRs for rationale are fine.
 
