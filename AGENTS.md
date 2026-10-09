@@ -14,9 +14,9 @@ The five canonical triage roles use their default names verbatim (`needs-triage`
 
 Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
-### Tests
+### Modules and tests
 
-Library tests are module tests in `#[cfg(test)]` sibling modules declared by the tested module's parent. The tests of module X live under X's parent and name X's items through X's path, never through private items of the parent. A crate test under `tests/` is only for behavior that needs the built binary; today that is `tests/cli.rs`. An inline child test module in the library is the wrong default: use one only when private access is unavoidable, and start it with a module doc explaining why and naming the surface the tests should move behind. Inline tests in the binary are unaffected. Shared dataset fixtures are inventoried in `src/fixture.rs`; check it before writing a new one. Only two Rust test modules read a filesystem; see `CODING_STANDARDS.md`.
+The crate is a set of modules, each with a suite of module tests that checks the contract of its interface. Tests exercise everything a module hard-wires and use adapters only at its seams. Before adding a module, a test, or a test adapter, read `docs/modules-and-tests.md`.
 
 ### Builds
 
