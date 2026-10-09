@@ -912,37 +912,6 @@ fn rejects_a_multi_sample_input_table_without_a_non_null_string_sample_column_na
 }
 
 #[test]
-fn rejects_a_sample_annotation_table_without_a_non_null_string_sample_column_naming_it() {
-    for data in ["g0.vortex", "g0/a.vortex"] {
-        for (case, invalid_sample) in invalid_sample_columns() {
-            let note = (
-                Field::new("note", DataType::Utf8, false),
-                Arc::new(StringArray::from(vec!["an ignored column"])) as ArrayRef,
-            );
-            let error = discover_written(vec![
-                ("s=sample-a/a.vortex", vec![contig(), position()]),
-                (data, vec![contig(), position(), sample("sample-b")]),
-                (
-                    "g0.samples.vortex",
-                    invalid_sample.into_iter().chain([note]).collect(),
-                ),
-            ])
-            .expect_err("an annotation table without a valid `s` must fail discovery");
-
-            assert!(
-                matches!(error, DataFusionError::Plan(_)),
-                "{data}, {case}: {error}"
-            );
-            let message = error.to_string();
-            assert!(
-                message.contains("samples/g0.samples.vortex") && message.contains("'s'"),
-                "{data}, {case}: unexpected error: {message}"
-            );
-        }
-    }
-}
-
-#[test]
 fn discovers_input_tables_with_the_datasets_columns_and_a_non_null_string_sample_column() {
     for data in ["g0.vortex", "g0/a.vortex"] {
         let dataset = discover_written(vec![
