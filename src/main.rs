@@ -22,6 +22,7 @@ use datafusion_sandbox::ordered_frame::OutputLayout;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::replay::Grid;
 use datafusion_sandbox::split_points;
+use datafusion_sandbox::stored::dataset::sample_annotation_table::annotated_stem;
 use datafusion_sandbox::throughput_probe::{ProbeKind, ProbeSettings};
 use datafusion_sandbox::write::WriteTarget;
 use std::{
@@ -675,10 +676,10 @@ fn validate_output_path(
         OutputLayout::SingleFile
             if annotated_file
                 && path
-                    .file_stem()
-                    .map(Path::new)
-                    .and_then(Path::extension)
-                    .is_some_and(|stem_extension| stem_extension == "samples") =>
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| annotated_stem(name, output_format.extension()))
+                    .is_some() =>
         {
             Err(DataFusionError::Configuration(format!(
                 "output path '{output_path}' is named as a sample annotation table, which a later \
@@ -1358,6 +1359,7 @@ mod tests {
         for (path, problem) in [
             ("out/g0", "no extension"),
             ("out/g0.samples.vortex", "sample annotation table"),
+            ("out/.samples.vortex", "sample annotation table"),
         ] {
             for formulation in ["union", "grouped-merge"] {
                 let error = resolve(parse_combiner([

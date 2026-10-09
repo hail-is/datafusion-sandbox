@@ -80,8 +80,7 @@ use crate::metrics_directory::MetricsDirectory;
 use crate::ordered_frame::OutputLayout;
 use crate::pipeline::{self, PipelineOptions};
 use crate::run_metrics;
-use crate::sample_annotation_table;
-use crate::stored::dataset::sample_field;
+use crate::stored::dataset::{sample_annotation_table::write_marked, sample_field};
 use crate::write::WriteTarget;
 use datafusion::{
     arrow::{
@@ -553,6 +552,18 @@ fn build_in_memory_fixture(
     fixture
 }
 
+/// A multi-sample input table of the mixed fixture, which it writes with its sample annotation
+/// table.
+struct MixedInputTable {
+    /// The input table's path below the dataset root: its one file, or its directory of files.
+    output_path: String,
+    layout: OutputLayout,
+    sample_set: &'static [&'static str],
+    /// Each of its files, by path below the dataset root, with the rows it holds and their
+    /// samples.
+    files: Vec<(String, Vec<(SampleRow, &'static str)>)>,
+}
+
 fn build_in_memory_mixed_fixture(
     name: &'static str,
     format: FixtureFormat,
@@ -570,43 +581,60 @@ fn build_in_memory_mixed_fixture(
         .collect::<Vec<_>>();
     // Stable, so each sample's rows at a locus stay in alleles order.
     g0_rows.sort_by_key(|&((locus, _), sample)| (locus, sample));
-    let mut writes = vec![(format!("g0.{extension}"), g0_rows)];
-    for (filename, rows) in SAMPLE_FILES.iter() {
-        let rows = rows
-            .iter()
-            .map(|&row| (row, *g1_sample))
-            .collect::<Vec<_>>();
-        writes.push((format!("g1/{filename}.{extension}"), rows));
-    }
-    let annotated = [
-        ("g0", OutputLayout::SingleFile, *g0_samples),
-        ("g1", OutputLayout::FilePerPartition, *g1_samples),
+    let g1_files = SAMPLE_FILES
+        .iter()
+        .map(|(filename, rows)| {
+            let rows = rows
+                .iter()
+                .map(|&row| (row, *g1_sample))
+                .collect::<Vec<_>>();
+            (format!("g1/{filename}.{extension}"), rows)
+        })
+        .collect();
+    let input_tables = [
+        MixedInputTable {
+            output_path: format!("g0.{extension}"),
+            layout: OutputLayout::SingleFile,
+            sample_set: g0_samples,
+            files: vec![(format!("g0.{extension}"), g0_rows)],
+        },
+        MixedInputTable {
+            output_path: "g1".to_string(),
+            layout: OutputLayout::FilePerPartition,
+            sample_set: g1_samples,
+            files: g1_files,
+        },
     ];
     pipeline::run(
         move |ctx: SessionContext| async move {
             let root = target.register(&ctx);
-            for (path, rows) in writes {
-                WriteTarget {
-                    output_path: format!("{root}/{path}"),
+            for input_table in input_tables {
+                let target = WriteTarget {
+                    output_path: format!("{root}/{}", input_table.output_path),
                     output_format: output_format.clone(),
-                }
-                .write_unordered(ctx.read_batch(multi_sample_batch(&rows, representation))?)
-                .await?;
-            }
-            for (stem, layout, samples) in annotated {
-                let output_path = match layout {
-                    OutputLayout::SingleFile => format!("{root}/{stem}.{extension}"),
-                    OutputLayout::FilePerPartition => format!("{root}/{stem}"),
                 };
-                let samples = samples.iter().map(ToString::to_string).collect::<Vec<_>>();
-                sample_annotation_table::write(
+                let sample_set = input_table
+                    .sample_set
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                let data_write = async {
+                    for (path, rows) in input_table.files {
+                        WriteTarget {
+                            output_path: format!("{root}/{path}"),
+                            output_format: output_format.clone(),
+                        }
+                        .write_unordered(ctx.read_batch(multi_sample_batch(&rows, representation))?)
+                        .await?;
+                    }
+                    Ok(())
+                };
+                write_marked(
                     &ctx,
-                    &WriteTarget {
-                        output_path,
-                        output_format: output_format.clone(),
-                    },
-                    layout,
-                    &samples,
+                    &target,
+                    input_table.layout,
+                    Some(&sample_set),
+                    data_write,
                 )
                 .await?;
             }

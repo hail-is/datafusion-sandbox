@@ -1,6 +1,12 @@
 //! Stored tables read under a declared row ordering, validated against their files at
 //! construction.
 //!
+//! The one table this module writes is a sample annotation table, around a data write that
+//! [`crate::write`] performs, since the table's write and its read share one contract. Writing
+//! the stored tables themselves stays with [`crate::write`] until an input table's data and its
+//! annotation table share one directory, as ADR 0018 expects, and their layout becomes this
+//! module's.
+//!
 //! - [`dataset`] reads a dataset's input tables, each with its sample set.
 //! - [`locus_sorted_table`] reads one file or one directory of files as a single locus-sorted
 //!   table.
