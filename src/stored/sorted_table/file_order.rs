@@ -15,21 +15,21 @@ use std::{cmp::Ordering, error::Error, fmt};
 
 /// One file's minimum and maximum on one ordering column.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Bounds {
-    pub min: Precision<ScalarValue>,
-    pub max: Precision<ScalarValue>,
+pub(super) struct Bounds {
+    pub(super) min: Precision<ScalarValue>,
+    pub(super) max: Precision<ScalarValue>,
 }
 
 /// The direction of one ordering column. The nulls-first flag plays no role.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Direction {
+pub(super) enum Direction {
     Ascending,
     Descending,
 }
 
 /// Why the files' statistics did not yield an order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FileOrderError {
+pub(super) enum FileOrderError {
     /// A bound the algorithm had to compare was absent, inexact, or null, the file's minimum lay
     /// above its maximum, or its bounds had no order against another file's because their types
     /// disagree.
@@ -69,7 +69,7 @@ impl Error for FileOrderError {}
 ///
 /// Returns [`FileOrderError::UnusableStatistics`] when a compared bound is absent, inexact, or
 /// null, and [`FileOrderError::Refuted`] when two files cannot both be placed before the other.
-pub fn recover_file_order(
+pub(super) fn recover_file_order(
     files: &[Vec<Bounds>],
     directions: &[Direction],
 ) -> Result<Vec<usize>, FileOrderError> {

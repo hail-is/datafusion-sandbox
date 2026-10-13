@@ -7,7 +7,7 @@ use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on}
 use crate::{
     locus::{Locus, LocusRepresentation, RowOrdering},
     pipeline::{self, PipelineOptions},
-    sorted_table::{AttachedScalar, SortedTable},
+    stored::sorted_table::{AttachedScalar, SortedTable},
     tests::{plan_shape::PlanShape, support::hostile_config},
 };
 use datafusion::{

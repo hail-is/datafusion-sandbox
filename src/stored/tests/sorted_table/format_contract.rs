@@ -1,7 +1,7 @@
 use super::{column_statistics, file_with_statistics};
 use crate::fixture::MemoryStore;
 
-use crate::sorted_table::SortedTable;
+use crate::stored::sorted_table::SortedTable;
 use async_trait::async_trait;
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema, SchemaRef},

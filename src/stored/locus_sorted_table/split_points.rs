@@ -1,19 +1,15 @@
 //! Exact row-balanced split points from a stored locus-sorted table.
 //!
-//! The path-taking entry runs two plans over the table: the first obtains the row count, the second
+//! The entry runs two plans over the table: the first obtains the row count, the second
 //! reads only the stored ordering's columns, numbers rows in the table's recovered order, and
 //! filters to the requested interval boundaries. Results are keyed by row number, so the entry
 //! does not depend on the order in which the filtered rows arrive.
 
-use crate::{
-    format::InputFormat,
-    locus::{Locus, SplitPoints},
-    stored::locus_sorted_table::LocusSortedTable,
-};
+use super::LocusSortedTable;
+use crate::locus::{Locus, SplitPoints};
 
 use datafusion::{
     common::{DataFusionError, Result, cast::as_uint64_array},
-    datasource::listing::ListingTableUrl,
     functions_window::row_number::row_number,
     logical_expr::ExprFunctionExt,
     prelude::{DataFrame, SessionContext, col, lit},
@@ -22,22 +18,20 @@ use std::{collections::BTreeMap, num::NonZeroUsize};
 
 const ROW_NUMBER_COLUMN: &str = "__row_number";
 
-/// Computes the row-balanced split points of the locus-sorted table at `table_path`.
+/// Computes the row-balanced split points of `table`.
 ///
 /// # Errors
 ///
-/// Returns an error if `intervals` is less than 2, the path cannot be opened as one locus-sorted
-/// table, the table has no rows, the requested intervals select fewer than one distinct row apiece,
-/// a selected row does not hold a valid locus, or the selected loci are not strictly increasing.
+/// Returns an error if `intervals` is less than 2, the table has no rows, the requested intervals
+/// select fewer than one distinct row apiece, a selected row does not hold a valid locus, or the
+/// selected loci are not strictly increasing.
 pub async fn row_balanced(
     ctx: &SessionContext,
-    table_path: ListingTableUrl,
-    input_format: InputFormat,
+    table: &LocusSortedTable,
     intervals: NonZeroUsize,
 ) -> Result<SplitPoints> {
     validate_interval_count(intervals)?;
-    let table = LocusSortedTable::open(ctx, table_path, input_format).await?;
-    let (targets, selected) = selected_rows(ctx, &table, intervals).await?;
+    let (targets, selected) = selected_rows(ctx, table, intervals).await?;
     let batches = selected.collect().await?;
     let representation = table.locus_representation();
     let mut loci_by_row_number = BTreeMap::new();

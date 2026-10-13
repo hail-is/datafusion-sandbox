@@ -35,15 +35,19 @@
 //! - Schema drift adapters would hide mismatched files; a dataset declares one schema
 //!   and mismatches should fail rather than be adapted.
 
+mod file_order;
 mod file_pruning;
 mod ordered_source;
 mod statistics_source;
+
+#[cfg(test)]
+mod tests;
 
 use file_pruning::FilePruning;
 use ordered_source::OrderedSource;
 use statistics_source::StatisticsSource;
 
-use crate::file_order::{Bounds, Direction, FileOrderError, recover_file_order};
+use file_order::{Bounds, Direction, FileOrderError, recover_file_order};
 
 use async_trait::async_trait;
 use datafusion::{
@@ -76,27 +80,17 @@ use datafusion::{
 use datafusion_datasource::compute_all_files_statistics;
 use std::sync::Arc;
 
-/// The file-scan configuration hidden by this table's ordering-preserving source wrapper.
-#[cfg(test)]
-pub(crate) fn file_scan_config(
-    source: &dyn datafusion::datasource::source::DataSource,
-) -> Option<&FileScanConfig> {
-    source
-        .downcast_ref::<OrderedSource>()
-        .and_then(OrderedSource::file_scan_config)
-}
-
 /// A scalar column appended to every row in a sorted table.
 #[derive(Clone, Debug)]
-pub struct AttachedScalar {
-    pub field: FieldRef,
-    pub value: ScalarValue,
+pub(super) struct AttachedScalar {
+    pub(super) field: FieldRef,
+    pub(super) value: ScalarValue,
 }
 
 /// A table whose files are assumed to hold one sorted table, scanned in the order their
 /// statistics recover. Files whose statistics refute every sorted order are a plan error.
 #[derive(Debug)]
-pub struct SortedTable {
+pub(super) struct SortedTable {
     object_store_url: ObjectStoreUrl,
     format: Arc<dyn FileFormat>,
     files: Vec<PartitionedFile>,
@@ -107,7 +101,7 @@ pub struct SortedTable {
 }
 
 impl SortedTable {
-    pub fn new(
+    pub(super) fn new(
         object_store_url: ObjectStoreUrl,
         format: Arc<dyn FileFormat>,
         files: Vec<PartitionedFile>,

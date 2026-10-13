@@ -68,11 +68,6 @@ impl OrderedSource {
             declared: self.declared.clone(),
         })
     }
-
-    #[cfg(test)]
-    pub(super) fn file_scan_config(&self) -> Option<&FileScanConfig> {
-        self.inner.downcast_ref::<FileScanConfig>()
-    }
 }
 
 impl DataSource for OrderedSource {

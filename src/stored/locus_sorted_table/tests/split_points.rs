@@ -3,7 +3,7 @@ use crate::{
     format::InputFormat,
     locus::{Locus, LocusRepresentation, SplitPoints},
     pipeline::{self, PipelineOptions},
-    split_points,
+    stored::locus_sorted_table::{LocusSortedTable, split_points},
 };
 
 use datafusion::{
@@ -160,27 +160,6 @@ fn row_balanced_rejects_when_two_targets_name_the_same_row() {
 }
 
 #[test]
-fn row_balanced_rejects_a_vortex_path_read_as_parquet_before_computing() {
-    let fixture = fixture::sorted_table_fixture(
-        "row-balanced-format-mismatch",
-        FixtureFormat::Vortex,
-        LocusRepresentation::Packed,
-        vec![vec![Locus::new(1, 1).unwrap(), Locus::new(1, 2).unwrap()]],
-    );
-    let path = fixture.file_path(0).clone();
-    assert!(path.as_str().ends_with(".vortex"), "{}", path.as_str());
-
-    let error = row_balanced(fixture, path, InputFormat::PARQUET, 2)
-        .expect_err("a Vortex file is not a Parquet table");
-
-    assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
-    assert!(
-        error.to_string().contains("no input files found"),
-        "{error}"
-    );
-}
-
-#[test]
 fn row_balanced_rejects_fewer_than_two_intervals() {
     let fixture = fixture::sorted_table_fixture(
         "row-balanced-one-interval",
@@ -213,8 +192,9 @@ fn row_balanced_rejects_a_contig_name_without_an_ordinal() {
                 .put(&Path::from("foreign-contig.parquet"), bytes.into())
                 .await?;
             let table_path = ListingTableUrl::parse("memory:///foreign-contig.parquet")?;
+            let table = LocusSortedTable::open(&ctx, table_path, InputFormat::PARQUET).await?;
             let intervals = NonZeroUsize::new(2).unwrap();
-            split_points::row_balanced(&ctx, table_path, InputFormat::PARQUET, intervals).await
+            split_points::row_balanced(&ctx, &table, intervals).await
         },
         PipelineOptions::single_threaded(),
     )
@@ -244,7 +224,10 @@ fn row_balanced(
     pipeline::run(
         move |ctx| {
             fixture.register(&ctx);
-            async move { split_points::row_balanced(&ctx, path, input_format, intervals).await }
+            async move {
+                let table = LocusSortedTable::open(&ctx, path, input_format).await?;
+                split_points::row_balanced(&ctx, &table, intervals).await
+            }
         },
         PipelineOptions::single_threaded(),
     )

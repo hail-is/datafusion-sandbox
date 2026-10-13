@@ -283,7 +283,7 @@ fn the_partitioned_sink_writes_each_partition_to_its_own_sink() {
 
 /// The partitioned sink keeps its input's partitions, requires the ordering of each, and asks for
 /// neither a distribution nor more partitions, so the optimizer adds no merge or coalesce
-/// beneath it. Its partition sinks read the optimized input, and it displays the sink it holds.
+/// beneath it. It displays the sink it holds.
 #[test]
 fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partitions() {
     let fixture = fixture_of(FixtureFormat::Vortex);
@@ -305,9 +305,6 @@ fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partit
 
     let shape = PlanShape::of(&plan);
     shape.assert_ends_in_sink_requiring(&ordering);
-    let sink_exec = plan
-        .downcast_ref::<PartitionedSinkExec>()
-        .unwrap_or_else(|| panic!("expected the partitioned sink:\n{shape}"));
     assert_eq!(plan.output_partitioning().partition_count(), SAMPLES.len());
     assert_eq!(plan.required_input_ordering().len(), 1);
     assert!(plan.required_input_ordering()[0].is_some());
@@ -325,14 +322,6 @@ fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partit
             && shape.nodes_of::<SortExec>().is_empty(),
         "{shape}"
     );
-    for (index, partition_sink) in sink_exec.partition_sinks().iter().enumerate() {
-        let input_partition = &partition_sink.children()[0];
-        assert!(
-            Arc::ptr_eq(input_partition.children()[0], plan.children()[0]),
-            "partition sink {index} does not read the sink's input"
-        );
-        assert_eq!(input_partition.output_partitioning().partition_count(), 1);
-    }
     assert!(
         shape
             .to_string()

@@ -10,9 +10,11 @@
 //! - [`dataset`] reads a dataset's input tables, each with its sample set.
 //! - [`locus_sorted_table`] reads one file or one directory of files as a single locus-sorted
 //!   table.
+//! - `sorted_table` scans files as one ordered partition.
 
 pub mod dataset;
 pub mod locus_sorted_table;
+mod sorted_table;
 
 #[cfg(test)]
 mod tests;

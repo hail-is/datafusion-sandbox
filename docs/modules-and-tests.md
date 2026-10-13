@@ -32,7 +32,7 @@ what a test claims.
 
 | Suite of | Lives in |
 | --- | --- |
-| Module X | `tests/X.rs` in the `tests` subtree of X's parent, plus files under `tests/X/`, each named for a concern of the suite: `src/tests/sorted_table.rs` and `src/tests/sorted_table/filtered_scans.rs` |
+| Module X | `tests/X.rs` in the `tests` subtree of X's parent, plus files under `tests/X/`, each named for a concern of the suite: `src/stored/tests/sorted_table.rs` and `src/stored/tests/sorted_table/filtered_scans.rs` |
 | X's children | X's own `tests` subtree, one file per child, each continuing in a concern directory the same way: `src/stored/tests/dataset.rs` |
 
 A `tests` subtree root, such as `src/stored/tests.rs`, starts with a module doc stating whose tests it
