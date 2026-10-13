@@ -1,5 +1,13 @@
 //! Datasets: stored input tables under a declared row ordering, each with its sample set, which
 //! a multi-sample input table declares in its sample annotation table (ADR 0018).
+//!
+//! - [`sample_annotation_table`] names, reads, and writes the table that declares a multi-sample
+//!   input table's sample set.
+
+pub mod sample_annotation_table;
+
+#[cfg(test)]
+mod tests;
 
 use super::{first_nonempty_file, list_files_by_extension, normalize_table_path};
 use crate::{
@@ -9,15 +17,9 @@ use crate::{
 };
 
 use datafusion::{
-    arrow::{
-        array::{Array, AsArray},
-        compute::cast,
-        datatypes::{DataType, Field, FieldRef, Schema, SchemaRef},
-    },
+    arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef},
     common::{DataFusionError, ScalarValue},
-    datasource::listing::{
-        ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl, PartitionedFile,
-    },
+    datasource::listing::{ListingTableUrl, PartitionedFile},
     error::Result,
     logical_expr::{LogicalPlan, logical_plan::Union},
     prelude::*,
@@ -217,12 +219,8 @@ impl Dataset {
             .map(|sample| InputTable::single_sample(sample))
             .collect::<Vec<_>>();
         for (name, kind) in entries.multi_samples {
-            let annotation_table = format!(
-                "{}{name}.samples.{}",
-                table_path.as_str(),
-                input_format.name()
-            );
-            let sample_set = read_sample_set(ctx, &annotation_table, &input_format).await?;
+            let sample_set =
+                sample_annotation_table::read(ctx, &table_path, &name, &input_format).await?;
             input_tables.push(InputTable::multi_sample(&name, kind, sample_set));
         }
         if input_tables.is_empty() {
@@ -425,7 +423,6 @@ impl RootEntries {
         root: &ListResult,
     ) -> Result<Self> {
         let extension = format!(".{}", input_format.name());
-        let annotation_suffix = format!(".samples{extension}");
         let entry_url = |entry: &str| format!("{}{entry}", table_path.as_str());
         let mut single_samples = Vec::new();
         let mut data = BTreeMap::new();
@@ -459,7 +456,8 @@ impl RootEntries {
             .collect::<Vec<_>>();
         objects.sort_unstable();
         for object in objects {
-            if let Some(stem) = object.strip_suffix(&annotation_suffix) {
+            if let Some(stem) = sample_annotation_table::annotated_stem(object, input_format.name())
+            {
                 annotated.insert(stem);
             } else if let Some(stem) = object.strip_suffix(&extension) {
                 if data
@@ -497,7 +495,7 @@ impl RootEntries {
         if let Some(stem) = annotated.iter().find(|stem| !data.contains_key(**stem)) {
             return Err(DataFusionError::Plan(format!(
                 "sample annotation table '{}' has no data beside it",
-                entry_url(&format!("{stem}{annotation_suffix}"))
+                sample_annotation_table::path(table_path, stem, input_format)
             )));
         }
         Ok(Self {
@@ -682,57 +680,4 @@ fn check_sample_column(schema: &Schema) -> std::result::Result<(), String> {
         "{problem}; it needs a non-null string column '{}'",
         sample.name()
     ))
-}
-
-/// The sample set declared by the sample annotation table at `path`: its non-null string `s`
-/// column, sorted. Other columns are ignored, and the rows of the table it declares are not read.
-async fn read_sample_set(
-    ctx: &SessionContext,
-    path: &str,
-    input_format: &InputFormat,
-) -> Result<Vec<String>> {
-    let config = ListingTableConfig::new(ListingTableUrl::parse(path)?)
-        .with_listing_options(ListingOptions::new(input_format.read_format()))
-        .infer_schema(&ctx.state())
-        .await?;
-    let sample = sample_field();
-    let invalid = |problem: &str| {
-        DataFusionError::Plan(format!(
-            "sample annotation table '{path}' {problem}; it needs a non-null string column '{}'",
-            sample.name()
-        ))
-    };
-    let schema = config
-        .file_schema
-        .as_ref()
-        .ok_or_else(|| invalid("has no schema"))?;
-    check_sample_column(schema).map_err(|problem| {
-        DataFusionError::Plan(format!("sample annotation table '{path}' {problem}"))
-    })?;
-    let batches = ctx
-        .read_table(Arc::new(ListingTable::try_new(config)?))?
-        .select_columns(&[sample.name()])?
-        .collect()
-        .await?;
-    let mut sample_set = Vec::new();
-    for batch in &batches {
-        let column = cast(batch.column(0), &DataType::Utf8)?;
-        if column.null_count() > 0 {
-            return Err(invalid("has a null sample"));
-        }
-        sample_set.extend(column.as_string::<i32>().iter().flatten().map(String::from));
-    }
-    sample_set.sort();
-    if let Some([duplicate, _]) = sample_set
-        .array_windows()
-        .find(|[left, right]| left == right)
-    {
-        return Err(DataFusionError::Plan(format!(
-            "sample annotation table '{path}' declares sample '{duplicate}' more than once"
-        )));
-    }
-    if sample_set.is_empty() {
-        return Err(invalid("declares no samples"));
-    }
-    Ok(sample_set)
 }

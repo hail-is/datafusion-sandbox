@@ -9,9 +9,8 @@ use crate::{
     pipeline::{self, PipelineOptions},
     process,
     run_metrics::{FormulationRecord, ProbeRecord, RunRecord, WriteRecord},
-    sample_annotation_table,
     sink::{self, ExecutedSink},
-    stored::dataset::Dataset,
+    stored::dataset::{Dataset, sample_annotation_table::write_marked},
     throughput_probe::{ProbeKind, ProbeSettings, StopReason},
     write::{VacantTarget, WriteTarget},
 };
@@ -22,6 +21,7 @@ use datafusion::{
     error::{DataFusionError, Result},
     prelude::{DataFrame, SessionContext},
 };
+use futures::{FutureExt, future::BoxFuture};
 use std::{
     num::NonZeroUsize,
     time::{Instant, SystemTime},
@@ -233,10 +233,9 @@ enum CheckedAction {
 impl CheckedAction {
     /// Plans the rows `inputs` describe and runs them through this action.
     ///
-    /// An action that writes to an output path first removes any sample annotation table an
-    /// earlier write left beside it, whether or not it writes one itself, so a table only ever
-    /// marks the data the last write left there, and only once that write is complete. See
-    /// ADR 0018.
+    /// An action that writes to an output path writes its rows with [`PlannedRows::write_with`],
+    /// whether or not it writes a sample annotation table, so the table an earlier write left
+    /// there is gone first. See ADR 0018.
     async fn execute(
         self,
         ctx: &SessionContext,
@@ -244,9 +243,6 @@ impl CheckedAction {
         facts: RunFacts,
     ) -> Result<Outcome> {
         let rows = inputs.plan(ctx).await?;
-        if let Some(target) = self.written_target() {
-            sample_annotation_table::remove(ctx, target, rows.ordered.layout).await?;
-        }
         match self {
             Self::Write(target) => Ok(Outcome::RowsWritten(
                 rows.write(ctx, &target).await?.rows_written,
@@ -254,24 +250,19 @@ impl CheckedAction {
             Self::MeasuredWrite(measured) => measured.execute(ctx, rows, facts).await,
             Self::Probe(probe) => probe.execute(ctx, rows, facts).await,
             Self::Collect => collect_rows(rows.ordered).await,
+            Self::Explain {
+                write: Some(target),
+                analyze: true,
+            } => {
+                let target = &target;
+                rows.write_with(ctx, target, false, |ordered| async move {
+                    explain(target.sink_frame(ordered)?, true).await
+                })
+                .await
+            }
             Self::Explain { write, analyze } => {
                 explain(sink_frame(rows.ordered, write)?, analyze).await
             }
-        }
-    }
-
-    /// The target this action writes rows to when executed, if any. An explain writes only when
-    /// it is analyzed.
-    fn written_target(&self) -> Option<&WriteTarget> {
-        match self {
-            Self::Write(target)
-            | Self::Explain {
-                write: Some(target),
-                analyze: true,
-            } => Some(target),
-            Self::MeasuredWrite(measured) => Some(&measured.write),
-            Self::Probe(probe) => probe.write.as_ref().map(VacantTarget::target),
-            Self::Collect | Self::Explain { .. } => None,
         }
     }
 }
@@ -344,13 +335,19 @@ impl CheckedProbe {
             settings,
             kind,
         } = self;
+        let coverage = rows.coverage;
         let probed = match &write {
-            Some(target) => target.probe(rows.ordered, &settings, kind).await?,
+            Some(target) => {
+                rows.write_with(ctx, target.target(), false, |ordered| {
+                    target.probe(ordered, &settings, kind)
+                })
+                .await?
+            }
             None => sink::probe(sink::drain(rows.ordered)?, &settings, kind).await?,
         };
         let record = facts.record(
             run.run_id().to_string(),
-            rows.coverage,
+            coverage,
             write.as_ref().map(|target| target.target().into()),
             probed.rows_received,
             probed.execute_ns,
@@ -521,12 +518,33 @@ impl PlannedRows {
     /// sample set beside them, and returns the data write's execution. A failed data write writes
     /// no table, so the table's presence marks the data complete. See ADR 0018.
     async fn write(self, ctx: &SessionContext, target: &WriteTarget) -> Result<ExecutedSink> {
-        let layout = self.ordered.layout;
-        let executed = target.write(self.ordered).await?;
-        if self.annotated {
-            sample_annotation_table::write(ctx, target, layout, &self.sample_set).await?;
+        self.write_with(ctx, target, true, |ordered| target.write(ordered))
+            .await
+    }
+
+    /// Runs `data_write` on the rows as a write to `target`, through [`write_marked`], and returns
+    /// what it returned. Every action that writes the rows to an output path writes them here, so
+    /// an earlier write's sample annotation table is gone first. The write leaves a table of the
+    /// sample set only when it `annotates` and the rows are annotated.
+    ///
+    /// Boxed, so a run's future stays shallow enough for the compiler to prove it `Send`.
+    fn write_with<'a, T, Fut>(
+        self,
+        ctx: &'a SessionContext,
+        target: &'a WriteTarget,
+        annotates: bool,
+        data_write: impl FnOnce(OrderedFrame) -> Fut + Send + 'a,
+    ) -> BoxFuture<'a, Result<T>>
+    where
+        T: Send + 'a,
+        Fut: Future<Output = Result<T>> + Send + 'a,
+    {
+        async move {
+            let layout = self.ordered.layout;
+            let sample_set = (annotates && self.annotated).then_some(self.sample_set.as_slice());
+            write_marked(ctx, target, layout, sample_set, data_write(self.ordered)).await
         }
-        Ok(executed)
+        .boxed()
     }
 }
 
