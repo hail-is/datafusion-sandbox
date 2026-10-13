@@ -650,18 +650,6 @@ impl PartitionedSinkExec {
         .with_scheduling_type(SchedulingType::Cooperative)
         .with_evaluation_type(EvaluationType::Eager)
     }
-
-    /// The ordering required of every input partition.
-    #[must_use]
-    pub const fn ordering(&self) -> Option<&LexRequirement> {
-        self.ordering.as_ref()
-    }
-
-    /// The plans writing each input partition, in partition order.
-    #[must_use]
-    pub fn partition_sinks(&self) -> &[Arc<dyn ExecutionPlan>] {
-        &self.partition_sinks
-    }
 }
 
 impl DisplayAs for PartitionedSinkExec {

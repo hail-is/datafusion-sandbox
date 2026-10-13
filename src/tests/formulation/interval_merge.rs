@@ -93,15 +93,11 @@ fn writes_through_a_partitioned_sink_over_one_merge_per_interval() {
                     shape.assert_ends_in_sink_requiring(&ordering);
                     let sink_nodes = shape.nodes_of::<PartitionedSinkExec>();
                     assert_eq!(sink_nodes.len(), 1, "{context}:\n{shape}");
-                    let sink_exec = sink_nodes[0]
-                        .downcast_ref::<PartitionedSinkExec>()
-                        .expect("nodes_of returned a node of another type");
                     assert_eq!(
                         plan.output_partitioning().partition_count(),
                         3,
                         "{context}:\n{shape}"
                     );
-                    assert_eq!(sink_exec.partition_sinks().len(), 3, "{context}:\n{shape}");
                     shape.assert_one_merge_per_interval(
                         3,
                         dataset.input_tables.len(),
@@ -263,15 +259,11 @@ fn a_row_limit_collapses_the_write_to_one_file() {
                 Arc::ptr_eq(&sink_nodes[0], &plan),
                 "{format:?} {representation:?}: expected the partitioned sink at the plan root:\n{shape}"
             );
-            let sink_exec = sink_nodes[0]
-                .downcast_ref::<PartitionedSinkExec>()
-                .expect("nodes_of returned a node of another type");
             assert_eq!(
                 plan.output_partitioning().partition_count(),
                 1,
                 "{format:?} {representation:?}:\n{shape}"
             );
-            assert_eq!(sink_exec.partition_sinks().len(), 1);
         }
     }
 }

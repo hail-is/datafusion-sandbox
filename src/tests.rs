@@ -7,7 +7,7 @@ mod formulation;
 mod locus;
 mod metrics_directory;
 mod pipeline;
-pub mod plan_shape;
+pub(crate) mod plan_shape;
 mod process;
 mod replay;
 mod run_metrics;

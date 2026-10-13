@@ -7,11 +7,10 @@
 use crate::{
     locus::{LocusRepresentation, RowOrdering, StoredOrdering},
     sink::PartitionedSinkExec,
-    sorted_table,
 };
 
 use datafusion::{
-    datasource::{physical_plan::FileScanConfig, sink::DataSinkExec, source::DataSourceExec},
+    datasource::{sink::DataSinkExec, source::DataSourceExec},
     physical_expr::expressions::Column,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties, displayable,
@@ -61,33 +60,22 @@ impl PlanShape {
 
     /// The object-store paths read by each scan, with scans and files in plan order.
     ///
-    /// This reads each scan's typed [`FileScanConfig`]. Sorted-table scans wrap that config in an
-    /// `OrderedSource`, so the test-only bridge in `sorted_table` unwraps it without making the
-    /// production source type part of the crate API.
+    /// This reads each scan's verbose rendering, which lists every file of every group.
+    /// Sorted-table scans wrap their file-scan configuration in a source whose type is private to
+    /// the sorted table, and `docs/modules-and-tests.md` forbids accessors kept only for tests, so
+    /// the rendering is the interface that reaches both kinds of scan alike.
     #[must_use]
     pub fn scanned_files(&self) -> Vec<Vec<Path>> {
         self.nodes_of::<DataSourceExec>()
             .into_iter()
             .map(|node| {
-                let scan = node
-                    .downcast_ref::<DataSourceExec>()
-                    .expect("nodes_of returned a node of another type");
-                let config = scan
-                    .data_source()
-                    .downcast_ref::<FileScanConfig>()
-                    .or_else(|| sorted_table::file_scan_config(scan.data_source().as_ref()))
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "expected DataSourceExec to contain a FileScanConfig:\n{}",
-                            self.context(&node)
-                        )
-                    });
-                config
-                    .file_groups
-                    .iter()
-                    .flat_map(datafusion_datasource::file_groups::FileGroup::files)
-                    .map(|file| file.object_meta.location.clone())
-                    .collect()
+                let rendered = displayable(node.as_ref()).indent(true).to_string();
+                rendered_files(&rendered).unwrap_or_else(|| {
+                    panic!(
+                        "expected DataSourceExec to render its file groups:\n{}",
+                        self.context(&node)
+                    )
+                })
             })
             .collect()
     }
@@ -373,18 +361,18 @@ impl PlanShape {
     /// Only column names are compared. Every stored ordering in these tests uses the same direction
     /// and null placement.
     pub fn assert_ends_in_sink_requiring(&self, ordering: &StoredOrdering) {
-        let required = match (
-            self.plan.downcast_ref::<DataSinkExec>(),
-            self.plan.downcast_ref::<PartitionedSinkExec>(),
-        ) {
-            (Some(sink), _) => sink.sort_order().as_ref(),
-            (_, Some(sink)) => sink.ordering(),
-            (None, None) => {
-                panic!("expected the plan to end in DataSinkExec or PartitionedSinkExec:\n{self}")
-            }
-        };
-        let required =
-            required.unwrap_or_else(|| panic!("expected the sink to require an ordering:\n{self}"));
+        assert!(
+            self.plan.is::<DataSinkExec>() || self.plan.is::<PartitionedSinkExec>(),
+            "expected the plan to end in DataSinkExec or PartitionedSinkExec:\n{self}"
+        );
+        let required = self
+            .plan
+            .required_input_ordering()
+            .into_iter()
+            .next()
+            .flatten()
+            .unwrap_or_else(|| panic!("expected the sink to require an ordering:\n{self}"))
+            .into_single();
         let required: Vec<String> = required
             .iter()
             .map(|sort| {
@@ -470,6 +458,37 @@ impl fmt::Display for PlanShape {
             displayable(self.plan.as_ref()).indent(true)
         )
     }
+}
+
+/// The files listed in a scan's verbose rendering, `file_groups={N groups: [[a, b], [c]]}`, in
+/// group order and without byte ranges. `None` if the rendering lists no file groups.
+fn rendered_files(rendered: &str) -> Option<Vec<Path>> {
+    let (_, groups) = rendered.split_once("file_groups={")?;
+    let (_, groups) = groups.split_once(": [")?;
+    let (groups, _) = groups.split_once("]}")?;
+    Some(
+        groups
+            .split(", ")
+            .map(|file| file.trim_matches(['[', ']']))
+            .filter(|file| !file.is_empty())
+            .map(|file| {
+                let location = file
+                    .rsplit_once(':')
+                    .filter(|(_, range)| is_byte_range(range))
+                    .map_or(file, |(location, _)| location);
+                Path::parse(location)
+                    .unwrap_or_else(|error| panic!("rendered an invalid path {location}: {error}"))
+            })
+            .collect(),
+    )
+}
+
+/// Whether `text` is a rendered byte range, `start..end`.
+fn is_byte_range(text: &str) -> bool {
+    let is_offset =
+        |bound: &str| !bound.is_empty() && bound.bytes().all(|byte| byte.is_ascii_digit());
+    text.split_once("..")
+        .is_some_and(|(start, end)| is_offset(start) && is_offset(end))
 }
 
 /// Operator names from rendered explain text, in display order.

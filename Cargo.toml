@@ -66,6 +66,8 @@ harness = false
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+# `pub(crate)` states a cross-subtree item's reach even inside a private module.
+redundant_pub_crate = "allow"
 
 large_futures = "warn"
 dbg_macro = "warn"
