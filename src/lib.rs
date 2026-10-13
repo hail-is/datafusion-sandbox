@@ -1,7 +1,6 @@
 //! Prototypes and benchmarks for comparing `DataFusion` formulations of Hail-style genomics pipelines.
 //!
 //! - [`combiner_run`] resolves and executes one combiner run.
-//! - [`cpu_runtime`] builds the runtime used for plan execution.
 //! - [`file_order`] recovers the order of a sorted table's files from their statistics.
 //! - [`fixture`] builds small stored datasets for tests.
 //! - [`mod@format`] describes supported input and output file formats.
@@ -47,7 +46,6 @@
 static ALLOCATOR: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
 pub mod combiner_run;
-pub mod cpu_runtime;
 pub mod file_order;
 pub mod fixture;
 pub mod format;

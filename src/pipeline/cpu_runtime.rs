@@ -1,27 +1,28 @@
+//! The CPU runtime: a Tokio runtime for plan execution that runs on, and is dropped on, a thread
+//! of its own.
+
 use std::sync::Arc;
 
 use datafusion::error::Result;
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 
-/// Creates a Tokio [`Runtime`] for use with CPU bound tasks
+/// A Tokio runtime for CPU-bound tasks, on a thread of its own.
 ///
-/// Tokio forbids dropping `Runtime`s in async contexts, so creating a separate
-/// `Runtime` correctly is somewhat tricky. This structure manages the creation
-/// and shutdown of a separate thread.
+/// Tokio forbids dropping a `Runtime` in an async context, so this keeps the runtime on a separate
+/// thread, and dropping this structure stops that thread. It has timers but no IO driver.
 ///
 /// # Notes
-/// On drop, the thread will wait for all remaining tasks to complete.
-///
-/// Depending on your application, more sophisticated shutdown logic may be
-/// required, such as ensuring that no new tasks are added to the runtime.
+/// Dropping stops the runtime as dropping a Tokio `Runtime` does: a task still pending is dropped
+/// at its next yield and does not run to completion. Wait for the tasks whose results matter
+/// before dropping, as the pipeline runner does.
 ///
 /// # Credits
 /// This code is derived from code originally written for [InfluxDB 3.0],
 /// by way of <https://github.com/apache/datafusion/blob/main/datafusion-examples/examples/query_planning/thread_pools.rs>
 ///
 /// [InfluxDB 3.0]: https://github.com/influxdata/influxdb3_core/tree/6fcbb004232738d55655f32f4ad2385523d10696/executor
-pub struct CpuRuntime {
+pub(super) struct CpuRuntime {
     /// Handle is the tokio structure for interacting with a Runtime.
     handle: Handle,
     /// Signal to start shutting down
@@ -34,9 +35,6 @@ impl Drop for CpuRuntime {
     fn drop(&mut self) {
         // Notify the thread to shutdown.
         self.notify_shutdown.notify_one();
-        // In a production system you also need to ensure your code stops adding
-        // new tasks to the underlying runtime after this point to allow the
-        // thread to complete its work and exit cleanly.
         if let Some(thread_join_handle) = self.thread_join_handle.take() {
             // If the thread is still running, we wait for it to finish. Report a panicked thread
             // on stderr: Drop cannot propagate it, and panicking here would be worse.
@@ -53,7 +51,7 @@ impl CpuRuntime {
     /// # Errors
     ///
     /// Returns an error if Tokio cannot build the runtime.
-    pub fn try_new(worker_threads: usize) -> Result<Self> {
+    pub(super) fn try_new(worker_threads: usize) -> Result<Self> {
         // Multi-thread even at one worker: DataFusion's `spawn_buffered` keys off the runtime
         // flavor, not the thread count. See
         // docs/adr/0001-always-use-multi-thread-tokio-runtimes.md.
@@ -70,8 +68,7 @@ impl CpuRuntime {
             cpu_runtime.block_on(async move {
                 notify_shutdown_captured.notified().await;
             });
-            // Note: cpu_runtime is dropped here, which will wait for all tasks
-            // to complete
+            // cpu_runtime is dropped here, which drops any task still pending at its next yield.
         });
 
         Ok(Self {
@@ -85,14 +82,14 @@ impl CpuRuntime {
     ///
     /// # Notes
     ///
-    /// If a task spawned on this handle attempts to do IO, it will error with a
+    /// If a task spawned on this handle attempts to do IO, it will panic with a
     /// message such as:
     ///
     /// ```text
     /// A Tokio 1.x context was found, but IO is disabled.
     /// ```
     #[must_use]
-    pub const fn handle(&self) -> &Handle {
+    pub(super) const fn handle(&self) -> &Handle {
         &self.handle
     }
 }
