@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Links issues of this repo on GitHub, taking issue numbers:
+#
+#   scripts/gh-link sub <parent> <child>...          makes each child a sub-issue of the parent
+#   scripts/gh-link blocked-by <issue> <blocker>...  records each blocker as blocking the issue
+#
+# Prints one line per link. A link that already exists is reported as such and not made again.
+# Every link is attempted; the script exits 1 if any failed, after naming each failure. An
+# argument that is not an issue number fails the whole call before any link is made.
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 sub <parent> <child>..." >&2
+  echo "       $0 blocked-by <issue> <blocker>..." >&2
+  exit 2
+}
+
+# gh resolves {owner}/{repo}, and the sandbox's gh wrapper its token, from the current directory's
+# remote, so run from the repo.
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+err=$(mktemp)
+trap 'rm -f "$err"' EXIT
+
+# Runs `gh api` with the given arguments, keeping its error message for `api_error`.
+api() {
+  gh api "$@" 2>"$err"
+}
+
+# The error message of the last failed `api` call, on one line.
+api_error() {
+  tr '\n' ' ' <"$err" | sed 's/ *$//'
+}
+
+main() {
+  [ $# -ge 3 ] || usage
+  local cmd=$1
+  shift
+  local issues=() arg
+  for arg in "$@"; do
+    arg=${arg#\#}
+    if ! [[ $arg =~ ^[1-9][0-9]*$ ]]; then
+      echo "gh-link: '$arg' is not an issue number" >&2
+      usage
+    fi
+    issues+=("$arg")
+  done
+  local target=${issues[0]}
+  local others=("${issues[@]:1}")
+
+  # describe phrases the link between the target and issue $1.
+  local endpoint field
+  case $cmd in
+    sub)
+      endpoint=sub_issues field=sub_issue_id
+      describe() { echo "#$1 sub-issue of #$target"; }
+      ;;
+    blocked-by)
+      endpoint=dependencies/blocked_by field=issue_id
+      describe() { echo "#$target blocked by #$1"; }
+      ;;
+    *) usage ;;
+  esac
+
+  local existing unreadable=""
+  if ! existing=$(api --paginate "repos/{owner}/{repo}/issues/$target/$endpoint" --jq '.[].number'); then
+    unreadable="cannot read the links of #$target: $(api_error)"
+  fi
+
+  local failed=0 n id
+  for n in "${others[@]}"; do
+    if [ -n "$unreadable" ]; then
+      echo "gh-link: failed: $(describe "$n"): $unreadable" >&2
+      failed=1
+    elif grep -qx "$n" <<<"$existing"; then
+      echo "$(describe "$n") (already linked)"
+    elif id=$(api "repos/{owner}/{repo}/issues/$n" --jq .id) &&
+      api -X POST "repos/{owner}/{repo}/issues/$target/$endpoint" -F "$field=$id" --silent; then
+      describe "$n"
+      existing+=$'\n'"$n"
+    else
+      echo "gh-link: failed: $(describe "$n"): $(api_error)" >&2
+      failed=1
+    fi
+  done
+  return $failed
+}
+
+main "$@"
