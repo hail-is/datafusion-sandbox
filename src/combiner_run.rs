@@ -1,14 +1,21 @@
 //! A resolved combiner run, the action it performs, and its outcome.
+//!
+//! - `process` measures the running process for the run record.
+
+mod process;
+
+#[cfg(test)]
+mod tests;
 
 use crate::{
     format::InputFormat,
     formulation::Formulation,
     locus::RowOrdering,
-    metrics_directory::{MetricsDirectory, UnrecordedRun},
+    metrics_directory::{
+        FormulationRecord, MetricsDirectory, ProbeRecord, RunRecord, UnrecordedRun, WriteRecord,
+    },
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
-    process,
-    run_metrics::{FormulationRecord, ProbeRecord, RunRecord, WriteRecord},
     sink::{self, ExecutedSink},
     stored::dataset::{Dataset, sample_annotation_table::write_marked},
     throughput_probe::{ProbeKind, ProbeSettings, StopReason},

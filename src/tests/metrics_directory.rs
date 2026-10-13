@@ -5,18 +5,18 @@ use crate::{
     fixture::{self, MemoryStore, RecordedRun},
     format::InputFormat,
     generated::make_range_table,
-    metrics_directory::{MetricsDirectory, ReplayCount},
+    metrics_directory::{Grid, MetricsDirectory, ProbeRecord, ReplayCount, RunRecord},
     pipeline::{self, PipelineOptions},
-    replay::Grid,
-    run_metrics::{self, ProbeRecord, RunRecord},
     sink::{self, CollectingSink, DataSinkTarget},
     tests::support::{
-        f64_values, noisy_series, recorded_would_stop, run_record, string_values, u64_values,
+        f64_values, noisy_series, recorded_would_stop, run_record, string_values, timestamp_values,
+        u64_values,
     },
     throughput_probe::{self, ProbeSettings, ProbedKind, ProgressSample},
 };
 
 use datafusion::{
+    arrow::record_batch::RecordBatch,
     datasource::listing::ListingTableUrl,
     error::{DataFusionError, Result},
     physical_plan::ExecutionPlan,
@@ -139,32 +139,34 @@ fn orphaned_run_metrics_do_not_make_a_run_id_recorded_and_recording_replaces_the
 }
 
 /// Recording writes the run record and the run metrics of the plan under the run's id, and hands
-/// back the unrecorded metric names the run metrics module reports for the plan. Once recorded,
-/// the id is refused.
+/// back the names of the metrics the plan reported that the run metrics table has no column for.
+/// Once recorded, the id is refused.
 #[test]
 fn recording_a_run_writes_both_tables_and_hands_back_its_unrecorded_metrics() {
     let store = MemoryStore::new("recorded");
     let directory = directory(&store);
     let record = run_record("run-a");
-    let expected_record = run_metrics::run_record_batch(&record).unwrap();
 
-    let (unrecorded, expected_unrecorded, recorded, refused) = on(&store, move |ctx| async move {
+    let (unrecorded, recorded, refused) = on(&store, move |ctx| async move {
         // A hash join reports metrics no run metrics column takes.
         let plan = executed_plan(&ctx, true).await?;
         let run = directory.unrecorded(&ctx, "run-a").await?;
         let unrecorded = run.record(&ctx, &record, &plan).await?;
         Ok((
             unrecorded,
-            run_metrics::run_metrics_batch("run-a", &plan)?.unrecorded,
             fixture::read_recorded_run(&ctx, &directory, "run-a").await?,
             directory.unrecorded(&ctx, "run-a").await.is_err(),
         ))
     });
 
-    assert_ne!(unrecorded, Vec::<String>::new());
-    assert_eq!(unrecorded, expected_unrecorded);
-    assert_eq!(recorded.record.unwrap(), expected_record);
+    for name in ["build_time", "join_time"] {
+        assert!(unrecorded.contains(&name.to_string()), "{unrecorded:?}");
+    }
+    assert_holds_run_record_of_run_a(&recorded.record.unwrap());
     let metrics = recorded.metrics.unwrap();
+    for name in &unrecorded {
+        assert!(metrics.column_by_name(name).is_none(), "{name}");
+    }
     assert!(
         string_values(&metrics, "operator").contains(&"HashJoinExec".to_string()),
         "{metrics:?}"
@@ -208,8 +210,6 @@ fn recording_a_probe_writes_its_progress_samples_as_a_third_table() {
     let directory = directory(&store);
     let samples = [(1_000, 0), (100_002_000, 640)]
         .map(|(elapsed_ns, rows)| ProgressSample { elapsed_ns, rows });
-    let expected_samples = run_metrics::progress_samples_batch("run-a", &samples).unwrap();
-    let expected_record = run_metrics::run_record_batch(&run_record("run-a")).unwrap();
 
     let (probe, measured) = on(&store, move |ctx| async move {
         let plan = executed_plan(&ctx, false).await?;
@@ -224,8 +224,18 @@ fn recording_a_probe_writes_its_progress_samples_as_a_third_table() {
         ))
     });
 
-    assert_eq!(probe.progress_samples.unwrap(), expected_samples);
-    assert_eq!(probe.record.unwrap(), expected_record);
+    let progress_samples = probe.progress_samples.unwrap();
+    assert_eq!(string_values(&progress_samples, "run_id"), ["run-a"; 2]);
+    assert_eq!(
+        u64_values(&progress_samples, "sample_index"),
+        [Some(0), Some(1)]
+    );
+    assert_eq!(
+        u64_values(&progress_samples, "elapsed_ns"),
+        [Some(1_000), Some(100_002_000)]
+    );
+    assert_eq!(u64_values(&progress_samples, "rows"), [Some(0), Some(640)]);
+    assert_holds_run_record_of_run_a(&probe.record.unwrap());
     assert!(probe.metrics.is_some());
     assert!(measured.record.is_some());
     assert!(measured.progress_samples.is_none());
@@ -522,6 +532,41 @@ where
 }
 
 /// Puts a few bytes that are not a Parquet file at `path` on `store`.
+/// Asserts that `record`, a run record read back, holds what [`run_record`] gives for `run-a`:
+/// every fact of a measured write, and no probe.
+fn assert_holds_run_record_of_run_a(record: &RecordBatch) {
+    for (column, value) in [
+        ("run_id", "run-a"),
+        ("formulation", "grouped-merge"),
+        ("split_points", ""),
+        ("row_ordering", "locus"),
+        ("dataset_path", "gs://bucket/refs"),
+        ("input_format", "vortex"),
+        ("output_format", "parquet"),
+        ("compression", "snappy"),
+        ("output_path", "gs://bucket/combined.parquet"),
+        ("action", ""),
+    ] {
+        assert_eq!(string_values(record, column), [value], "{column}");
+    }
+    for (column, value) in [
+        ("groups", 2),
+        ("threads", 1),
+        ("input_tables", 4),
+        ("samples", 4),
+        ("rows_written", 32),
+        ("run_ns", 2_000),
+        ("execute_ns", 1_000),
+        ("peak_rss_bytes", 1 << 20),
+    ] {
+        assert_eq!(u64_values(record, column), [Some(value)], "{column}");
+    }
+    assert_eq!(
+        timestamp_values(record, "started_at"),
+        [Some(1_700_000_000_000_000_000)]
+    );
+}
+
 async fn put(store: &MemoryStore, path: &str) -> Result<()> {
     store
         .store()

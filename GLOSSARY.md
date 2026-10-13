@@ -58,8 +58,10 @@ as one table. Distinct from the run record, which describes the run rather than 
 _Avoid_: profile, trace, stats, analyze output
 
 **Metrics directory**:
-The directory a measured write records runs under: a run record table and a run metrics table,
-one file per run in each.
+The directory measured writes and throughput probes record runs under: a run record table, a run
+metrics table, and a probe's progress samples table, beside the checks, replay baselines and
+replays tables that a replay of its shadow probes writes and rewrites. Each table holds one file
+per run.
 _Avoid_: metrics path, output metrics, results directory
 
 **Sink**:

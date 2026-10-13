@@ -1,6 +1,6 @@
 # What the run metrics measure
 
-This note says what each metric in `METRICS` (`src/run_metrics.rs`) measures, read from the pinned sources: DataFusion 55.0.0, parquet 59.2.0, and the `vortex-datafusion` fork in `Cargo.lock`. Nothing here was measured by running queries. References name functions and types, not lines, so they should survive small upstream changes. Recheck the caveats after a DataFusion upgrade, since several describe upstream bugs.
+This note says what each metric in `METRICS` (`src/metrics_directory/run_metrics.rs`) measures, read from the pinned sources: DataFusion 55.0.0, parquet 59.2.0, and the `vortex-datafusion` fork in `Cargo.lock`. Nothing here was measured by running queries. References name functions and types, not lines, so they should survive small upstream changes. Recheck the caveats after a DataFusion upgrade, since several describe upstream bugs.
 
 Crate abbreviations used below:
 

@@ -2,8 +2,8 @@
 //!
 //! A metrics directory holds three tables, each a directory of one Parquet file per run: the run
 //! record at `runs/<run_id>.parquet`, the run metrics at `metrics/<run_id>.parquet`, and a
-//! throughput probe's progress samples at `progress/<run_id>.parquet`. A [replay](crate::replay)
-//! of its shadow probes adds three more, again one file per run, which each replay replaces: the
+//! throughput probe's progress samples at `progress/<run_id>.parquet`. A replay of its shadow
+//! probes adds three more, again one file per run, which each replay replaces: the
 //! tightness checks at `checks/<run_id>.parquet`, the end-of-run decisions at
 //! `replay-baselines/<run_id>.parquet`, and each combination's stop at
 //! `replays/<run_id>.parquet`. This module owns that layout and the two guarantees
@@ -15,24 +15,52 @@
 //!
 //! The check is not a lock. Two runs sharing an id that check before either records both pass,
 //! and the later one's files replace the earlier one's.
+//!
+//! - `run_record` holds the record types and fills and reads the run record table.
+//! - `progress_samples` fills and reads a throughput probe's progress samples table.
+//! - `run_metrics` fills the run metrics table from an executed plan.
+//! - `replay` judges a shadow probe again under a [`Grid`], in memory, and fills the replay
+//!   tables.
+//!
+//! The tables share one way of storing values: counts and durations as saturating `UInt64`
+//! nanoseconds, timestamps as nanoseconds in UTC. The helpers at the end of this module state it.
+
+mod progress_samples;
+mod replay;
+mod run_metrics;
+mod run_record;
+
+#[cfg(test)]
+mod tests;
+
+pub use replay::Grid;
+pub use run_record::{FormulationRecord, ProbeRecord, RunRecord, WriteRecord};
+
+pub(crate) use progress_samples::progress_samples_schema;
+pub(crate) use run_metrics::run_metrics_schema;
+pub(crate) use run_record::run_record_schema;
 
 use crate::{
     format::OutputFormat,
-    replay::{self, Grid, ShadowRun},
-    run_metrics::{self, RunRecord},
     throughput_probe::{ProbeKind, ProgressSample},
     write::WriteTarget,
 };
+use replay::ShadowRun;
 
 use datafusion::{
-    arrow::record_batch::RecordBatch,
+    arrow::{
+        array::{ArrayRef, TimestampNanosecondArray},
+        compute::cast,
+        datatypes::{DataType, TimeUnit},
+        record_batch::RecordBatch,
+    },
     datasource::listing::ListingTableUrl,
     error::{DataFusionError, Result},
     object_store::{self, ObjectStoreExt},
     physical_plan::ExecutionPlan,
     prelude::{ParquetReadOptions, SessionContext, col},
 };
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 /// The subdirectory of a metrics directory holding the run record table.
 const RUNS_TABLE: &str = "runs";
@@ -149,7 +177,7 @@ impl MetricsDirectory {
         let records = ctx
             .read_parquet(
                 format!("{}/{RUNS_TABLE}/", self.path),
-                ParquetReadOptions::default().schema(&run_metrics::run_record_schema()),
+                ParquetReadOptions::default().schema(&run_record_schema()),
             )
             .await?
             .collect()
@@ -158,7 +186,7 @@ impl MetricsDirectory {
         let mut replayed_runs = BTreeSet::new();
         for record in &records {
             for row in 0..record.num_rows() {
-                let Some(probe) = run_metrics::recorded_probe(record, row)?
+                let Some(probe) = run_record::recorded_probe(record, row)?
                     .filter(|probe| probe.kind == ProbeKind::Shadow)
                 else {
                     count.skipped = count.skipped.saturating_add(1);
@@ -236,13 +264,13 @@ impl MetricsDirectory {
         let batches = ctx
             .read_parquet(
                 self.progress_samples_path(run_id),
-                ParquetReadOptions::default().schema(&run_metrics::progress_samples_schema()),
+                ParquetReadOptions::default().schema(&progress_samples_schema()),
             )
             .await?
             .sort(vec![col("sample_index").sort(true, false)])?
             .collect()
             .await?;
-        run_metrics::progress_samples(&batches)
+        progress_samples::read_progress_samples(&batches)
     }
 }
 
@@ -295,7 +323,7 @@ impl UnrecordedRun {
         .await?;
         write_table(
             ctx,
-            run_metrics::run_record_batch(record)?,
+            run_record::run_record_batch(record)?,
             self.directory.run_record_path(&self.run_id),
         )
         .await?;
@@ -319,7 +347,7 @@ impl UnrecordedRun {
         self.check(record)?;
         write_table(
             ctx,
-            run_metrics::progress_samples_batch(&self.run_id, samples)?,
+            progress_samples::progress_samples_batch(&self.run_id, samples)?,
             self.directory.progress_samples_path(&self.run_id),
         )
         .await?;
@@ -348,4 +376,34 @@ async fn write_table(ctx: &SessionContext, batch: RecordBatch, path: String) -> 
     .write_unordered(ctx.read_batch(batch)?)
     .await?;
     Ok(())
+}
+
+/// The type every timestamp column has: nanoseconds, UTC.
+fn timestamp_type() -> DataType {
+    DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+}
+
+/// `values` as a nanosecond timestamp column in UTC.
+fn timestamp_array(values: Vec<Option<i64>>) -> TimestampNanosecondArray {
+    TimestampNanosecondArray::from(values).with_timezone("UTC")
+}
+
+/// The column `name` of `batch`, cast to `data_type`, as a table read back may hold it as
+/// another type: Parquet reads strings back as views.
+fn column_as(batch: &RecordBatch, name: &str, data_type: &DataType) -> Result<ArrayRef> {
+    let column = batch.column_by_name(name).ok_or_else(|| {
+        DataFusionError::Execution(format!("the table read back has no column {name}"))
+    })?;
+    Ok(cast(column, data_type)?)
+}
+
+/// A count as the table stores it. Saturates rather than failing on a platform whose `usize` is
+/// wider than 64 bits.
+fn to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+/// `duration` in nanoseconds as the table stores it, saturating at `u64::MAX`.
+fn duration_ns(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }

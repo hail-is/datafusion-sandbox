@@ -7,11 +7,10 @@
 //! - [`locus`] describes the supported stored locus representations, split points, and locus
 //!   intervals.
 //! - [`ordered_frame`] carries a formulation's deferred rows, ordering, and output layout.
-//! - [`metrics_directory`] lays out the run tables under a metrics directory, records a run
-//!   there, and replays the shadow probes it holds.
+//! - [`metrics_directory`] lays out the run tables under a metrics directory, fills and records
+//!   a run's run record, run metrics and progress samples there, and replays the shadow probes it
+//!   holds.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
-//! - [`replay`] judges recorded shadow probes again under a grid of stopping rule settings.
-//! - [`run_metrics`] fills the run record and run metrics tables of a measured write.
 //! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of
 //!   every partition.
 //! - [`stored`] reads stored tables under a row ordering: datasets and locus-sorted tables.
@@ -49,9 +48,6 @@ pub mod locus;
 pub mod metrics_directory;
 pub mod ordered_frame;
 pub mod pipeline;
-pub mod process;
-pub mod replay;
-pub mod run_metrics;
 pub mod sink;
 pub mod stored;
 pub mod throughput_probe;
