@@ -1,4 +1,6 @@
-use crate::file_order::{Bounds, Direction, FileOrderError, recover_file_order};
+use crate::stored::sorted_table::file_order::{
+    Bounds, Direction, FileOrderError, recover_file_order,
+};
 use datafusion::common::{ScalarValue, stats::Precision};
 
 fn exact(min: i32, max: i32) -> Bounds {

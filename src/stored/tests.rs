@@ -3,3 +3,4 @@
 
 mod dataset;
 mod locus_sorted_table;
+mod sorted_table;

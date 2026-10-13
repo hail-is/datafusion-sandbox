@@ -3,12 +3,20 @@
 //!
 //! Construction classifies the path against its object store, infers the schema from the first
 //! nonempty file of the input format, and detects the locus representation from that schema.
+//!
+//! - [`split_points`] computes exact row-balanced split points from a locus-sorted table.
 
-use super::{first_nonempty_file, list_files_by_extension, normalize_table_path};
+pub mod split_points;
+
+#[cfg(test)]
+mod tests;
+
+use super::{
+    first_nonempty_file, list_files_by_extension, normalize_table_path, sorted_table::SortedTable,
+};
 use crate::{
     format::InputFormat,
     locus::{LocusRepresentation, RowOrdering, StoredOrdering},
-    sorted_table::SortedTable,
 };
 
 use datafusion::{
@@ -26,7 +34,7 @@ use std::sync::Arc;
 /// One file or one directory of files, its locus representation, and its stored ordering.
 ///
 /// Unlike a dataset, it has no sample set and attaches no sample column. It trusts its files to
-/// form one sorted table and lets [`SortedTable`] recover their order from statistics.
+/// form one sorted table and lets `SortedTable` recover their order from statistics.
 #[derive(Debug)]
 pub struct LocusSortedTable {
     table: Arc<dyn TableProvider>,

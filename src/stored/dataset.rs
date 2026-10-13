@@ -9,11 +9,13 @@ pub mod sample_annotation_table;
 #[cfg(test)]
 mod tests;
 
-use super::{first_nonempty_file, list_files_by_extension, normalize_table_path};
+use super::{
+    first_nonempty_file, list_files_by_extension, normalize_table_path,
+    sorted_table::{AttachedScalar, SortedTable},
+};
 use crate::{
     format::InputFormat,
     locus::{LocusRepresentation, RowOrdering, StoredOrdering},
-    sorted_table::{AttachedScalar, SortedTable},
 };
 
 use datafusion::{

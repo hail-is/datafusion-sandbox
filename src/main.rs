@@ -21,8 +21,8 @@ use datafusion_sandbox::metrics_directory::MetricsDirectory;
 use datafusion_sandbox::ordered_frame::OutputLayout;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::replay::Grid;
-use datafusion_sandbox::split_points;
 use datafusion_sandbox::stored::dataset::sample_annotation_table::annotated_stem;
+use datafusion_sandbox::stored::locus_sorted_table::{LocusSortedTable, split_points};
 use datafusion_sandbox::throughput_probe::{ProbeKind, ProbeSettings};
 use datafusion_sandbox::write::WriteTarget;
 use std::{
@@ -596,7 +596,8 @@ fn main() -> Result<()> {
             let points = pipeline::run(
                 move |ctx| async move {
                     let table_path = ListingTableUrl::parse(path)?;
-                    split_points::row_balanced(&ctx, table_path, input_format, intervals).await
+                    let table = LocusSortedTable::open(&ctx, table_path, input_format).await?;
+                    split_points::row_balanced(&ctx, &table, intervals).await
                 },
                 options,
             )?;

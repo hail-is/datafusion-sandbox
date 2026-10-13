@@ -1,7 +1,6 @@
 //! Prototypes and benchmarks for comparing `DataFusion` formulations of Hail-style genomics pipelines.
 //!
 //! - [`combiner_run`] resolves and executes one combiner run.
-//! - [`file_order`] recovers the order of a sorted table's files from their statistics.
 //! - [`fixture`] builds small stored datasets for tests.
 //! - [`mod@format`] describes supported input and output file formats.
 //! - [`formulation`] builds the alternative combiner plans under comparison.
@@ -15,8 +14,6 @@
 //! - [`run_metrics`] fills the run record and run metrics tables of a measured write.
 //! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of
 //!   every partition.
-//! - [`sorted_table`] scans files as one ordered partition.
-//! - [`split_points`] computes exact row-balanced split points from a locus-sorted table.
 //! - [`stored`] reads stored tables under a row ordering: datasets and locus-sorted tables.
 //! - [`throughput_probe`] holds a throughput probe's settings and progress samples, and decides
 //!   when it stops.
@@ -44,7 +41,6 @@
 static ALLOCATOR: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
 pub mod combiner_run;
-pub mod file_order;
 pub mod fixture;
 pub mod format;
 pub mod formulation;
@@ -57,8 +53,6 @@ pub mod process;
 pub mod replay;
 pub mod run_metrics;
 pub mod sink;
-pub mod sorted_table;
-pub mod split_points;
 pub mod stored;
 pub mod throughput_probe;
 pub mod write;

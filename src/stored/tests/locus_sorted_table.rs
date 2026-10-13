@@ -156,6 +156,27 @@ fn rejects_a_path_with_no_nonempty_file_of_the_format() {
     );
 }
 
+#[test]
+fn rejects_a_file_of_another_format() {
+    let fixture = fixture::sorted_table_fixture(
+        "locus-sorted-table-format-mismatch",
+        FixtureFormat::Vortex,
+        LocusRepresentation::Packed,
+        vec![vec![Locus::new(1, 1).unwrap(), Locus::new(1, 2).unwrap()]],
+    );
+    let path = fixture.file_path(0).clone();
+    assert!(path.as_str().ends_with(".vortex"), "{}", path.as_str());
+
+    let error = open(&fixture, &path, InputFormat::PARQUET)
+        .expect_err("a Vortex file is not a Parquet table");
+
+    assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
+    assert!(
+        error.to_string().contains("no input files found"),
+        "{error}"
+    );
+}
+
 fn open(
     fixture: &fixture::SortedTableFixture,
     path: &ListingTableUrl,

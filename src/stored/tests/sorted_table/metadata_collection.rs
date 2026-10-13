@@ -4,7 +4,7 @@
 use super::{column_statistics, file, ordering, sample_table_with_format, schema, statistics};
 use crate::fixture::{self, FixtureFormat, MemoryStore, block_on};
 use crate::locus::LocusRepresentation;
-use crate::sorted_table::SortedTable;
+use crate::stored::sorted_table::SortedTable;
 use crate::tests::plan_shape::PlanShape;
 
 use async_trait::async_trait;
