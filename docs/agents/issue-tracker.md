@@ -38,9 +38,9 @@ Run `gh issue view <number> --json title,body,labels,comments`.
 Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets.
 
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
-- **Child ticket**: an issue linked to the map as a GitHub sub-issue (`gh api` on the sub-issues endpoint). Where sub-issues aren't enabled, add the child to a task list in the map body and put `Part of #<map>` at the top of the child body. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`), plus `wayfinder:claimed` once claimed.
-- **Blocking**: native issue relationships where available; otherwise a `Blocked by: #<n>, #<n>` line at the top of the child body. A ticket is unblocked when every issue it lists is closed.
-- **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open `Blocked by` issue or the `wayfinder:claimed` label; first in map order wins.
+- **Child ticket**: an issue linked to the map as a GitHub sub-issue with `scripts/gh-link sub <map> <child>...`. Where sub-issues aren't enabled, add the child to a task list in the map body and put `Part of #<map>` at the top of the child body. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`), plus `wayfinder:claimed` once claimed.
+- **Blocking**: native issue relationships where available, recorded with `scripts/gh-link blocked-by <issue> <blocker>...`; otherwise a `Blocked by: #<n>, #<n>` line at the top of the child body. A ticket is unblocked when every issue it lists is closed.
+- **Frontier query**: with native relationships, `gh api --paginate "repos/{owner}/{repo}/issues/<map>/sub_issues" --jq '.[] | select(.state == "open" and .issue_dependencies_summary.blocked_by == 0 and all(.labels[]; .name != "wayfinder:claimed")) | .number'` prints the frontier in map order (`blocked_by` counts only open blockers); the first wins. Otherwise, read the child numbers and their order from the map's task list, check each with `gh issue view <n> --json state,labels,body`, and drop any that is closed, has an open `Blocked by` issue, or has the `wayfinder:claimed` label; the first remaining child in task-list order wins.
 - **Claim**: `gh issue edit <n> --add-label wayfinder:claimed` — the session's first write.
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
 
