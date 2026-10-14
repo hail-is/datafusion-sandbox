@@ -1,5 +1,5 @@
 use super::combine_refs_union::required_ordering;
-use crate::locus::StoredOrdering;
+use crate::ordered_frame::{OrderedFrame, OutputLayout};
 use crate::stored::dataset::{Dataset, InputTable, union_or_single};
 
 use datafusion::{error::Result, prelude::*};
@@ -9,7 +9,10 @@ use std::num::NonZeroUsize;
 /// larger groups first. A group count above the input table count clamps to one input table per
 /// group.
 #[must_use]
-pub fn input_groups(input_tables: &[InputTable], groups: NonZeroUsize) -> Vec<&[InputTable]> {
+pub(super) fn input_groups(
+    input_tables: &[InputTable],
+    groups: NonZeroUsize,
+) -> Vec<&[InputTable]> {
     // Datasets hold at least one input table, so the clamped count keeps both divisions defined.
     let groups = groups.get().min(input_tables.len());
     let quotient = input_tables.len().checked_div(groups).unwrap_or(0);
@@ -23,6 +26,11 @@ pub fn input_groups(input_tables: &[InputTable], groups: NonZeroUsize) -> Vec<&[
             group
         })
         .collect()
+}
+
+/// How a write of the grouped-merge formulation's rows lays them out: one file.
+pub(super) const fn output_layout() -> OutputLayout {
+    OutputLayout::SingleFile
 }
 
 /// Builds the grouped-merge formulation: merge each input group, then merge the groups.
@@ -44,11 +52,11 @@ pub fn input_groups(input_tables: &[InputTable], groups: NonZeroUsize) -> Vec<&[
 ///
 /// Returns an error if the dataset cannot satisfy the reference combiner's ordering, an input
 /// group cannot be read, or `DataFusion` cannot build the plan.
-pub async fn plan(
+pub(super) async fn plan(
     ctx: &SessionContext,
     dataset: &Dataset,
     groups: NonZeroUsize,
-) -> Result<(DataFrame, StoredOrdering)> {
+) -> Result<OrderedFrame> {
     let ordering = dataset.query_ordering(&required_ordering())?;
     let groups = input_groups(dataset.input_tables(), groups);
     let mut plans = Vec::with_capacity(groups.len());
@@ -64,5 +72,9 @@ pub async fn plan(
             .sort(ordering.sort_expressions())?;
         plans.push(frame.into_unoptimized_plan());
     }
-    Ok((union_or_single(ctx, plans)?, ordering))
+    Ok(OrderedFrame {
+        frame: union_or_single(ctx, plans)?,
+        ordering,
+        layout: output_layout(),
+    })
 }

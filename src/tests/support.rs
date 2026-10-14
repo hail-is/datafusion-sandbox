@@ -142,13 +142,24 @@ pub(crate) fn grouped_merge(groups: usize) -> Formulation {
 /// Panics if `split_points` is not empty and is not a valid, strictly increasing list.
 #[must_use]
 pub(crate) fn interval_merge(split_points: &str) -> Formulation {
-    let split_points = if split_points.is_empty() {
+    Formulation::CombineRefsIntervalMerge {
+        split_points: self::split_points(split_points),
+    }
+}
+
+/// The comma-separated `split_points`. An empty string means no split points.
+///
+/// # Panics
+///
+/// Panics if `split_points` is not empty and is not a valid, strictly increasing list.
+#[must_use]
+pub(crate) fn split_points(split_points: &str) -> SplitPoints {
+    if split_points.is_empty() {
         SplitPoints::new(Vec::new())
     } else {
         split_points.parse()
     }
-    .expect("test split points are valid");
-    Formulation::CombineRefsIntervalMerge { split_points }
+    .expect("test split points are valid")
 }
 
 /// A run record of `run_id` whose other fields hold plausible settings and measurements of a

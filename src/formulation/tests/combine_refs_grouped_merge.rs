@@ -1,28 +1,66 @@
-//! What is particular to the reference combiner's grouped-merge formulation: how the group count
-//! shapes the merge tree, and that merging by input group returns the union formulation's rows.
+//! How the group count shapes the merge tree, and that merging by input group returns the union
+//! formulation's rows.
 //!
-//! The shared loops in the parent module already hold grouped-merge to the merge tree over two
+//! The formulation suite's shared loops already hold grouped-merge to the merge tree over two
 //! groups under a hostile session, with and without a filter.
 
-use super::{FORMATS, REPRESENTATIONS, collected_batches, dataset, drained_plan, file_sink_plan};
-use crate::fixture::{self, Row, SAMPLES};
-use crate::formulation::Formulation;
+use crate::fixture::{self, SAMPLES};
+use crate::formulation::{Formulation, combine_refs_grouped_merge};
+use crate::ordered_frame::OrderedFrame;
+use crate::stored::dataset::{Dataset, InputTable};
 use crate::tests::{
+    formulation_plans::{
+        FORMATS, PlanBuilder, REPRESENTATIONS, collected_rows, dataset, drained_plan,
+        file_sink_plan, loci, physical_plan,
+    },
     plan_shape::PlanShape,
-    support::{grouped_merge, hostile_config},
+    support::hostile_config,
 };
-use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 
-#[test]
-fn displays_as_grouped_merge() {
-    assert_eq!(grouped_merge(3).to_string(), "grouped-merge");
+use datafusion::{
+    error::Result, physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec,
+    prelude::SessionContext,
+};
+use futures::{FutureExt, future::BoxFuture};
+
+use std::num::NonZeroUsize;
+
+/// The grouped-merge formulation's plan builder over this many input groups.
+#[derive(Clone)]
+struct GroupedMerge(usize);
+
+impl PlanBuilder for GroupedMerge {
+    fn plan<'a>(
+        &'a self,
+        ctx: &'a SessionContext,
+        dataset: &'a Dataset,
+    ) -> BoxFuture<'a, Result<OrderedFrame>> {
+        combine_refs_grouped_merge::plan(ctx, dataset, groups(self.0)).boxed()
+    }
 }
 
 #[test]
-fn requires_the_reference_combiners_ordering() {
+fn splits_the_input_tables_into_contiguous_count_balanced_input_groups() {
+    let input_tables = ["a", "b", "c", "d", "e"].map(InputTable::single_sample);
+
     assert_eq!(
-        grouped_merge(3).required_ordering(),
-        Formulation::CombineRefsUnion.required_ordering()
+        combine_refs_grouped_merge::input_groups(&input_tables, groups(1)),
+        [&input_tables[..]]
+    );
+    assert_eq!(
+        combine_refs_grouped_merge::input_groups(&input_tables, groups(2)),
+        [&input_tables[..3], &input_tables[3..]]
+    );
+    assert_eq!(
+        combine_refs_grouped_merge::input_groups(&input_tables, groups(3)),
+        [&input_tables[..2], &input_tables[2..4], &input_tables[4..]]
+    );
+    assert_eq!(
+        combine_refs_grouped_merge::input_groups(&input_tables, groups(8)),
+        input_tables
+            .iter()
+            .map(std::slice::from_ref)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -32,7 +70,7 @@ fn requires_the_reference_combiners_ordering() {
 fn a_group_of_one_sample_feeds_the_final_merge_directly() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let plan = super::physical_plan(&grouped_merge(3), &dataset(format, representation));
+            let plan = physical_plan(&GroupedMerge(3), &dataset(format, representation));
             PlanShape::of(&plan).assert_merge_tree(&[2, 1, 1]);
         }
     }
@@ -44,9 +82,9 @@ fn one_group_or_one_sample_per_group_plans_as_the_union_formulation() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
-            let union = super::physical_plan(&Formulation::CombineRefsUnion, &dataset);
+            let union = physical_plan(&Formulation::CombineRefsUnion, &dataset);
             for groups in [1, SAMPLES.len(), 8] {
-                let grouped = super::physical_plan(&grouped_merge(groups), &dataset);
+                let grouped = physical_plan(&GroupedMerge(groups), &dataset);
                 let grouped_shape = PlanShape::of(&grouped);
                 let union_shape = PlanShape::of(&union);
                 assert_eq!(
@@ -71,9 +109,9 @@ fn a_row_limit_becomes_a_fetch_on_every_merge() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
             let dataset = dataset(format, representation);
-            let drained = drained_plan(&grouped_merge(2), &dataset, hostile_config(8), Some(LIMIT));
+            let drained = drained_plan(&GroupedMerge(2), &dataset, hostile_config(8), Some(LIMIT));
             let (written, _) =
-                file_sink_plan(&grouped_merge(2), &dataset, hostile_config(8), Some(LIMIT));
+                file_sink_plan(&GroupedMerge(2), &dataset, hostile_config(8), Some(LIMIT));
 
             for (sink, plan) in [("draining", drained), ("file", written)] {
                 let shape = PlanShape::of(&plan);
@@ -101,15 +139,7 @@ fn a_row_limit_becomes_a_fetch_on_every_merge() {
 fn returns_the_union_formulations_rows_in_locus_order() {
     for format in FORMATS {
         for representation in REPRESENTATIONS {
-            let rows = |formulation: &Formulation| {
-                let dataset = dataset(format, representation);
-                let (_, batches) = collected_batches(formulation, dataset, Ok);
-                batches
-                    .iter()
-                    .flat_map(|batch| fixture::decode_rows(batch, representation))
-                    .collect::<Vec<Row>>()
-            };
-            let union = rows(&Formulation::CombineRefsUnion);
+            let union = collected_rows(&Formulation::CombineRefsUnion, format, representation);
             assert_eq!(
                 union.len(),
                 fixture::sample_rows()
@@ -119,9 +149,7 @@ fn returns_the_union_formulations_rows_in_locus_order() {
             );
             for groups in [2, 3] {
                 let context = format!("{format:?} {representation:?} {groups} groups");
-                let grouped = rows(&grouped_merge(groups));
-                let loci =
-                    |rows: &[Row]| rows.iter().map(|(locus, _, _)| *locus).collect::<Vec<_>>();
+                let grouped = collected_rows(&GroupedMerge(groups), format, representation);
                 assert_eq!(loci(&grouped), loci(&union), "{context}");
                 assert!(loci(&grouped).is_sorted(), "{context}: {grouped:?}");
                 let mut grouped = grouped;
@@ -132,4 +160,8 @@ fn returns_the_union_formulations_rows_in_locus_order() {
             }
         }
     }
+}
+
+fn groups(count: usize) -> NonZeroUsize {
+    NonZeroUsize::new(count).unwrap()
 }

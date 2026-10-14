@@ -400,7 +400,7 @@ impl Dataset {
 pub fn union_or_single(ctx: &SessionContext, mut plans: Vec<LogicalPlan>) -> Result<DataFrame> {
     let plan = if plans.len() == 1 {
         plans.pop().ok_or_else(|| {
-            DataFusionError::Internal("a non-empty input group produced no plans".to_string())
+            DataFusionError::Internal("expected one plan to return as is, found none".to_string())
         })?
     } else {
         LogicalPlan::Union(Union::try_new(plans.into_iter().map(Arc::new).collect())?)

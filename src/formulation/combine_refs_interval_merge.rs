@@ -1,8 +1,15 @@
 use super::combine_refs_union;
-use crate::locus::{SplitPoints, StoredOrdering};
+use crate::locus::SplitPoints;
+use crate::ordered_frame::{OrderedFrame, OutputLayout};
 use crate::stored::dataset::{Dataset, union_or_single};
 
 use datafusion::{error::Result, prelude::*};
+
+/// How a write of the interval-merge formulation's rows lays them out: one file per partition of
+/// its frame, which is one per locus interval.
+pub(super) const fn output_layout() -> OutputLayout {
+    OutputLayout::FilePerPartition
+}
 
 /// Builds the interval-merge formulation: merge every sample within each locus interval.
 ///
@@ -19,12 +26,16 @@ use datafusion::{error::Result, prelude::*};
 /// collect and explain see the rows in global locus order (ADR 0014).
 ///
 /// With no split points the one interval has no filter and the plan is the union formulation's.
-pub async fn plan(
+pub(super) async fn plan(
     ctx: &SessionContext,
     dataset: &Dataset,
     split_points: &SplitPoints,
-) -> Result<(DataFrame, StoredOrdering)> {
-    let (union, ordering) = combine_refs_union::plan(ctx, dataset).await?;
+) -> Result<OrderedFrame> {
+    let OrderedFrame {
+        frame: union,
+        ordering,
+        ..
+    } = combine_refs_union::plan(ctx, dataset).await?;
     let representation = dataset.locus_representation();
     let mut branches = Vec::new();
     for interval in split_points.intervals() {
@@ -34,5 +45,9 @@ pub async fn plan(
         };
         branches.push(branch.into_unoptimized_plan());
     }
-    Ok((union_or_single(ctx, branches)?, ordering))
+    Ok(OrderedFrame {
+        frame: union_or_single(ctx, branches)?,
+        ordering,
+        layout: output_layout(),
+    })
 }
