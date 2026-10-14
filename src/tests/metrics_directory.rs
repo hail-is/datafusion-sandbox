@@ -2,12 +2,15 @@
 //! that fail the writes under one of its tables.
 
 use crate::{
-    fixture::{self, MemoryStore, RecordedRun},
     format::InputFormat,
-    generated::make_range_table,
     metrics_directory::{Grid, MetricsDirectory, ProbeRecord, ReplayCount, RunRecord},
     pipeline::{self, PipelineOptions},
     sink::{self, CollectingSink, DataSinkTarget},
+    testing::{
+        fixture::{self, RecordedRun},
+        generated::make_range_table,
+        memory_store::MemoryStore,
+    },
     tests::support::{
         f64_values, noisy_series, recorded_would_stop, run_record, string_values, timestamp_values,
         u64_values,

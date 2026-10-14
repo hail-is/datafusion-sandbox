@@ -2,7 +2,10 @@ mod filtered_scans;
 mod format_contract;
 mod metadata_collection;
 
-use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
+use crate::testing::{
+    fixture::{self, DatasetFixture, FixtureFormat, block_on},
+    memory_store::MemoryStore,
+};
 
 use crate::{
     locus::{Locus, LocusRepresentation, RowOrdering},

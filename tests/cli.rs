@@ -11,10 +11,10 @@
 )]
 
 use datafusion_sandbox::{
-    fixture::{self, FixtureFormat, RecordedRun},
     format::InputFormat,
     metrics_directory::MetricsDirectory,
     pipeline::{self, PipelineOptions},
+    testing::fixture::{self, FixtureFormat, RecordedRun},
     throughput_probe::{self, ProbeSettings, ProgressSample},
 };
 

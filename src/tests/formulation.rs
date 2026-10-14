@@ -16,10 +16,10 @@
 mod filtered_plans;
 
 use crate::{
-    fixture::{FixtureFormat, block_on},
     formulation::Formulation,
     locus::{LocusRepresentation, RowOrdering},
     stored::dataset::InputTable,
+    testing::fixture::{FixtureFormat, block_on},
     tests::{
         formulation_plans::{
             FORMATS, FixtureDataset, REPRESENTATIONS, dataset, dataset_with_ordering,

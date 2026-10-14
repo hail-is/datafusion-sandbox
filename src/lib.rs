@@ -1,7 +1,6 @@
 //! Prototypes and benchmarks for comparing `DataFusion` formulations of Hail-style genomics pipelines.
 //!
 //! - [`combiner_run`] resolves and executes one combiner run.
-//! - [`fixture`] builds small stored datasets for tests.
 //! - [`mod@format`] describes supported input and output file formats.
 //! - [`formulation`] builds the alternative combiner plans under comparison.
 //! - [`locus`] describes the supported stored locus representations, split points, and locus
@@ -17,7 +16,8 @@
 //! - [`throughput_probe`] holds a throughput probe's settings and progress samples, and decides
 //!   when it stops.
 //! - [`mod@write`] builds and executes file writes.
-//! - [`generated`] builds generated tables for tests and benchmarks.
+//! - [`testing`] is public test support: dataset fixtures, the in-memory object store, and generated
+//!   tables, for module tests, crate tests, benchmarks, and examples. No module above imports it.
 //!
 //! See the [project glossary](../GLOSSARY.md) for domain vocabulary.
 
@@ -40,16 +40,15 @@
 static ALLOCATOR: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
 pub mod combiner_run;
-pub mod fixture;
 pub mod format;
 pub mod formulation;
-pub mod generated;
 pub mod locus;
 pub mod metrics_directory;
 pub mod ordered_frame;
 pub mod pipeline;
 pub mod sink;
 pub mod stored;
+pub mod testing;
 pub mod throughput_probe;
 pub mod write;
 

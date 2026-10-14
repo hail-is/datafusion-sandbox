@@ -1,10 +1,9 @@
 //! The sinks an action runs its frame into, and the ordering requirement they put on the plan.
 
 use super::plan_shape::PlanShape;
-use crate::fixture::{self, DatasetFixture, FixtureFormat, SAMPLES, block_on};
+use crate::testing::fixture::{self, DatasetFixture, FixtureFormat, SAMPLES, block_on};
 use crate::{
     formulation::Formulation,
-    generated::{make_range_table, make_unbounded_table},
     locus::LocusRepresentation,
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
@@ -13,6 +12,7 @@ use crate::{
         SinkTarget,
     },
     stored::dataset::Dataset,
+    testing::generated::{make_range_table, make_unbounded_table},
     throughput_probe::{self, ProbeKind, ProbeSettings, ProbedKind, StopReason},
 };
 

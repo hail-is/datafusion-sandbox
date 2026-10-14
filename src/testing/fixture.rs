@@ -38,14 +38,7 @@
 //! A shared fixture's `output_root` is a directory on its store beside the dataset,
 //! where a test that writes puts its output, since discovery rejects stray entries.
 //!
-//! Store handles:
-//! - `MemoryStore`, an empty in-memory object store a test registers on its own
-//!   session. Every shared dataset fixture holds one. The sorted-table planning
-//!   tests build metadata-only tables over one with nothing in it. One built by
-//!   `MemoryStore::failing_writes_under` fails every write under a prefix, for
-//!   tests of what a failed write leaves behind, which `MemoryStore::locations_under`
-//!   lists. `MemoryStore::with_failing_writes_under` does the same over a store's
-//!   existing objects, so a later write can fail where an earlier one succeeded.
+//! Everything in the in-memory inventories above is held in a [`MemoryStore`].
 //!
 //! Row helpers, for tests that filter a fixture and check what comes back:
 //! - `sample_rows`, the rows above as one sample's expected result.
@@ -69,17 +62,13 @@
     reason = "invalid fixture definitions and setup failures are test harness bugs"
 )]
 
-mod failing_writes;
-mod memory_store;
-
-pub use memory_store::MemoryStore;
-
 use crate::format::{InputFormat, OutputFormat};
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::metrics_directory::{self, MetricsDirectory};
 use crate::ordered_frame::OutputLayout;
 use crate::pipeline::{self, PipelineOptions};
 use crate::stored::dataset::{sample_annotation_table::write_marked, sample_field};
+use crate::testing::memory_store::MemoryStore;
 use crate::write::WriteTarget;
 use datafusion::{
     arrow::{

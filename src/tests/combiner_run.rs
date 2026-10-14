@@ -1,4 +1,4 @@
-use crate::fixture;
+use crate::testing::{fixture, memory_store::MemoryStore};
 
 use crate::{
     combiner_run::{Action, CombinerRun, Outcome, PlanInputs},
@@ -38,7 +38,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use fixture::{FixtureFormat, INPUT_TABLES, MemoryStore, RecordedRun, SAMPLES};
+use fixture::{FixtureFormat, INPUT_TABLES, RecordedRun, SAMPLES};
 
 #[test]
 fn renders_outcomes() {

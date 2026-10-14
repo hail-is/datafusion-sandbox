@@ -65,12 +65,18 @@ parent, and a production item kept for tests are each a violation.
 ## Seams and adapters
 
 A test exercises every dependency its module hard-wires. At each seam it uses an adapter: a
-production one where that works, otherwise a test adapter. `src/fixture.rs` inventories the shared
-dataset fixtures and adapters; check it before writing a new one.
+production one where that works, otherwise a test adapter. `src/testing.rs` lists the public
+test-support modules, and `src/testing/fixture.rs` inventories the shared dataset fixtures; check
+them before writing a new one.
 
 Test support lives in a `tests` subtree, beside the suites that use it, and is `cfg(test)` like them.
-Examples are plan observation, session builders, and constructors several suites share. It becomes
-public library code, as `fixture` and `generated` are, only when a crate test or benchmark needs it.
+Examples are plan observation, session builders, and constructors several suites share. A support
+module becomes public library code under `testing`, as `fixture`, `memory_store`, and `generated`
+are, only when a crate test, benchmark, or example needs it, since those compile as separate crates.
+The rule moves whole modules: an item belongs in a module under `testing` by concept, even when only
+suites use it.
+
+Review check: a production module that imports from `testing` is a violation.
 
 At the object store, every Rust test uses the in-memory adapter, except `src/tests/combiner_run.rs`
 and `tests/cli.rs`, which use local disk. Python tests under `python/tests` check tools that read

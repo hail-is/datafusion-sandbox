@@ -6,8 +6,11 @@ use super::{
     metadata_collection::MeteredFormat, multi_column_table, sample_table, sample_table_with_format,
     scalar_table, table,
 };
-use crate::fixture::{self, DatasetFixture, FixtureFormat, MemoryStore, block_on};
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
+use crate::testing::{
+    fixture::{self, DatasetFixture, FixtureFormat, block_on},
+    memory_store::MemoryStore,
+};
 use crate::{
     pipeline::{self, PipelineOptions},
     tests::{plan_shape::PlanShape, support::hostile_config},

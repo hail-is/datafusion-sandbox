@@ -1,8 +1,8 @@
-use crate::fixture::SAMPLES;
 use crate::formulation::combine_refs_union;
 use crate::locus::RowOrdering;
 use crate::ordered_frame::OrderedFrame;
 use crate::stored::dataset::Dataset;
+use crate::testing::fixture::SAMPLES;
 use crate::tests::{
     formulation_plans::{FORMATS, PlanBuilder, REPRESENTATIONS, dataset, physical_plan},
     plan_shape::PlanShape,

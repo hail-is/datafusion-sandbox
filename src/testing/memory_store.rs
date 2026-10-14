@@ -1,4 +1,19 @@
-use super::failing_writes::FailingWrites;
+//! An empty in-memory object store a test registers on its own session, the adapter every Rust
+//! test but `src/tests/combiner_run.rs` and `tests/cli.rs` uses at the object store (ADR 0010).
+//!
+//! One built by `MemoryStore::failing_writes_under` fails every write under a prefix, for tests of
+//! what a failed write leaves behind, which `MemoryStore::locations_under` lists.
+//! `MemoryStore::with_failing_writes_under` does the same over a store's existing objects, so a
+//! later write can fail where an earlier one succeeded.
+
+#![expect(
+    clippy::panic,
+    reason = "invalid store names and listing failures are test harness bugs"
+)]
+
+mod failing_writes;
+
+use failing_writes::FailingWrites;
 
 use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 use futures_util::TryStreamExt;

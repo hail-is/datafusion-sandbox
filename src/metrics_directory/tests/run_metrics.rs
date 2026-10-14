@@ -2,16 +2,19 @@
 //! object stores.
 
 use crate::{
-    fixture::{self, FixtureFormat, MemoryStore, SAMPLES},
     format::OutputFormat,
     formulation::Formulation,
-    generated::make_range_table,
     locus::LocusRepresentation,
     metrics_directory::run_metrics,
     ordered_frame::OutputLayout,
     pipeline::{self, PipelineOptions},
     sink::{self, CollectingSink, DataSinkTarget},
     stored::dataset::Dataset,
+    testing::{
+        fixture::{self, FixtureFormat, SAMPLES},
+        generated::make_range_table,
+        memory_store::MemoryStore,
+    },
     tests::support::{grouped_merge, interval_merge, string_values, timestamp_values, u64_values},
     write::WriteTarget,
 };

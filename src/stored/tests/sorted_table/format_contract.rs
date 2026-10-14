@@ -1,5 +1,5 @@
 use super::{column_statistics, file_with_statistics};
-use crate::fixture::MemoryStore;
+use crate::testing::memory_store::MemoryStore;
 
 use crate::stored::sorted_table::SortedTable;
 use async_trait::async_trait;

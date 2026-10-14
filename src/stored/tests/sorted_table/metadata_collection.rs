@@ -2,9 +2,12 @@
 //! runtime's file statistics cache, or inferred concurrently from file footers.
 
 use super::{column_statistics, file, ordering, sample_table_with_format, schema, statistics};
-use crate::fixture::{self, FixtureFormat, MemoryStore, block_on};
 use crate::locus::LocusRepresentation;
 use crate::stored::sorted_table::SortedTable;
+use crate::testing::{
+    fixture::{self, FixtureFormat, block_on},
+    memory_store::MemoryStore,
+};
 use crate::tests::plan_shape::PlanShape;
 
 use async_trait::async_trait;
