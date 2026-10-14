@@ -8,13 +8,11 @@ use crate::{
     locus::LocusRepresentation,
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
-    run_metrics,
     sink::{
         self, CollectingSink, DataSinkTarget, DrainingSink, PartitionedSinkExec, ProbedSink,
         SinkTarget,
     },
     stored::dataset::Dataset,
-    tests::support::{rows_of_operator, u64_values},
     throughput_probe::{self, ProbeKind, ProbeSettings, ProbedKind, StopReason},
 };
 
@@ -33,6 +31,7 @@ use datafusion::{
         ChildrenPropertiesMode, Distribution, ExecutionPlan, ExecutionPlanProperties,
         ReplaceChildrenOptions,
         coalesce_partitions::CoalescePartitionsExec,
+        filter::FilterExec,
         projection::ProjectionExec,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
         stream::RecordBatchStreamAdapter,
@@ -737,8 +736,8 @@ fn probe_generated(
 }
 
 /// Probes a drain of the generated table `build` makes with `settings`, filtered so that the
-/// operator feeding the sink counts its rows. Returns the probe and the `output_rows` of the
-/// filter, over its partitions, in the run metrics of the plan it stopped.
+/// operator feeding the sink counts its rows. Returns the probe and the output rows of the
+/// filter, over its partitions, in the metrics of the plan it stopped.
 fn try_probe_generated(
     settings: ProbeSettings,
     build: impl FnOnce(&SessionContext) -> Result<DataFrame> + Send + 'static,
@@ -754,12 +753,7 @@ fn try_probe_generated(
                 ProbeKind::Probe,
             )
             .await?;
-            let metrics = run_metrics::run_metrics_batch("probe", &probed.plan)?.batch;
-            let output_rows = u64_values(&metrics, "output_rows");
-            let filter_rows = rows_of_operator(&metrics, "FilterExec")
-                .into_iter()
-                .map(|row| output_rows[row].unwrap())
-                .sum();
+            let filter_rows = PlanShape::of(&probed.plan).output_rows_of::<FilterExec>();
             Ok((probed, filter_rows))
         },
         PipelineOptions::single_threaded(),

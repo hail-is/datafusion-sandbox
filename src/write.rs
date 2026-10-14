@@ -12,7 +12,6 @@ use crate::{
     format::OutputFormat,
     locus::StoredOrdering,
     ordered_frame::{OrderedFrame, OutputLayout},
-    run_metrics::WriteRecord,
     sink::{self, ExecutedSink, PartitionedSinkExec, ProbedSink, SinkTarget},
     throughput_probe::{ProbeKind, ProbeSettings},
 };
@@ -340,16 +339,6 @@ async fn objects_under(store: &dyn ObjectStore, location: &ObjectPath) -> Result
         .map_ok(|meta| meta.location)
         .try_collect()
         .await?)
-}
-
-impl From<&WriteTarget> for WriteRecord {
-    fn from(target: &WriteTarget) -> Self {
-        Self {
-            output_path: target.output_path.clone(),
-            output_format: target.output_format.name().to_string(),
-            compression: target.output_format.compression().map(str::to_string),
-        }
-    }
 }
 
 /// A format's file sink at a path, built the way `COPY TO` builds it except that the caller

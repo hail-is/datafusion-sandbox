@@ -11,7 +11,6 @@ mod tests;
 use crate::{
     locus::{RowOrdering, SplitPoints},
     ordered_frame::{OrderedFrame, OutputLayout},
-    run_metrics::FormulationRecord,
     stored::dataset::Dataset,
 };
 
@@ -40,23 +39,6 @@ impl fmt::Display for Formulation {
             Self::CombineAllelesUnion | Self::CombineRefsUnion => formatter.write_str("union"),
             Self::CombineRefsGroupedMerge { .. } => formatter.write_str("grouped-merge"),
             Self::CombineRefsIntervalMerge { .. } => formatter.write_str("interval-merge"),
-        }
-    }
-}
-
-impl From<&Formulation> for FormulationRecord {
-    fn from(formulation: &Formulation) -> Self {
-        let (groups, split_points) = match formulation {
-            Formulation::CombineAllelesUnion | Formulation::CombineRefsUnion => (None, None),
-            Formulation::CombineRefsGroupedMerge { groups } => (Some(groups.get()), None),
-            Formulation::CombineRefsIntervalMerge { split_points } => {
-                (None, Some(split_points.to_string()))
-            }
-        };
-        Self {
-            name: formulation.to_string(),
-            groups,
-            split_points,
         }
     }
 }

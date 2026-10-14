@@ -12,7 +12,8 @@
 //!
 //! The rule takes two steps: [`tightness_checks`] judges each probe batch end, and [`stop`] finds
 //! the check that stops the probe. [`decide`] and [`would_stop`] take them after every sample, and
-//! a [replay](crate::replay) once over a whole run under many settings.
+//! a [replay](crate::metrics_directory::MetricsDirectory::replay) once over a whole run under many
+//! settings.
 
 use std::{num::NonZeroU32, time::Duration};
 

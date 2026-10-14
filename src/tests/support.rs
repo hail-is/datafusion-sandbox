@@ -3,13 +3,14 @@
 use crate::{
     formulation::Formulation,
     locus::SplitPoints,
+    metrics_directory::{FormulationRecord, RunRecord, WriteRecord},
     pipeline,
-    run_metrics::{FormulationRecord, RunRecord, WriteRecord},
     throughput_probe::{self, Decision, ProbeSettings, ProgressSample},
 };
 use datafusion::{
     arrow::{
         array::{Float64Array, TimestampNanosecondArray, UInt64Array},
+        datatypes::{DataType, Schema},
         record_batch::RecordBatch,
         util::display::array_value_to_string,
     },
@@ -27,7 +28,7 @@ use std::{
 ///
 /// Panics if `batch` has no column `name` or a value cannot be rendered.
 #[must_use]
-pub(super) fn string_values(batch: &RecordBatch, name: &str) -> Vec<String> {
+pub(crate) fn string_values(batch: &RecordBatch, name: &str) -> Vec<String> {
     let column = batch
         .column_by_name(name)
         .unwrap_or_else(|| panic!("no column {name}"));
@@ -42,7 +43,7 @@ pub(super) fn string_values(batch: &RecordBatch, name: &str) -> Vec<String> {
 ///
 /// Panics if `batch` has no column `name` or it is not a `UInt64` column.
 #[must_use]
-pub(super) fn u64_values(batch: &RecordBatch, name: &str) -> Vec<Option<u64>> {
+pub(crate) fn u64_values(batch: &RecordBatch, name: &str) -> Vec<Option<u64>> {
     let column = batch
         .column_by_name(name)
         .unwrap_or_else(|| panic!("no column {name}"));
@@ -60,7 +61,7 @@ pub(super) fn u64_values(batch: &RecordBatch, name: &str) -> Vec<Option<u64>> {
 ///
 /// Panics if `batch` has no column `name` or it is not a `Float64` column.
 #[must_use]
-pub(super) fn f64_values(batch: &RecordBatch, name: &str) -> Vec<Option<f64>> {
+pub(crate) fn f64_values(batch: &RecordBatch, name: &str) -> Vec<Option<f64>> {
     let column = batch
         .column_by_name(name)
         .unwrap_or_else(|| panic!("no column {name}"));
@@ -72,19 +73,25 @@ pub(super) fn f64_values(batch: &RecordBatch, name: &str) -> Vec<Option<f64>> {
         .collect()
 }
 
-/// The rows of the run metrics batch `batch` whose operator is `operator`, in order.
+/// Asserts that `schema` has exactly `expected` columns, in order, each with its name, type, and
+/// nullability.
 ///
 /// # Panics
 ///
-/// Panics if `batch` has no `operator` column.
-#[must_use]
-pub(super) fn rows_of_operator(batch: &RecordBatch, operator: &str) -> Vec<usize> {
-    string_values(batch, "operator")
+/// Panics if the columns differ.
+pub(crate) fn assert_columns(schema: &Schema, expected: &[(&str, DataType, bool)]) {
+    let columns: Vec<_> = schema
+        .fields()
         .iter()
-        .enumerate()
-        .filter(|(_, name)| *name == operator)
-        .map(|(row, _)| row)
-        .collect()
+        .map(|field| {
+            (
+                field.name().as_str(),
+                field.data_type().clone(),
+                field.is_nullable(),
+            )
+        })
+        .collect();
+    assert_eq!(columns, expected);
 }
 
 /// The values of the nanosecond timestamp column `name`, null included.
@@ -93,7 +100,7 @@ pub(super) fn rows_of_operator(batch: &RecordBatch, operator: &str) -> Vec<usize
 ///
 /// Panics if `batch` has no column `name` or it is not a nanosecond timestamp column.
 #[must_use]
-pub(super) fn timestamp_values(batch: &RecordBatch, name: &str) -> Vec<Option<i64>> {
+pub(crate) fn timestamp_values(batch: &RecordBatch, name: &str) -> Vec<Option<i64>> {
     let column = batch
         .column_by_name(name)
         .unwrap_or_else(|| panic!("no column {name}"));
@@ -120,7 +127,7 @@ pub(crate) fn hostile_config(target_partitions: usize) -> SessionConfig {
 ///
 /// Panics if `groups` is zero.
 #[must_use]
-pub(super) fn grouped_merge(groups: usize) -> Formulation {
+pub(crate) fn grouped_merge(groups: usize) -> Formulation {
     Formulation::CombineRefsGroupedMerge {
         groups: NonZeroUsize::new(groups).expect("a grouped merge needs at least one group"),
     }
@@ -134,7 +141,7 @@ pub(super) fn grouped_merge(groups: usize) -> Formulation {
 ///
 /// Panics if `split_points` is not empty and is not a valid, strictly increasing list.
 #[must_use]
-pub(super) fn interval_merge(split_points: &str) -> Formulation {
+pub(crate) fn interval_merge(split_points: &str) -> Formulation {
     let split_points = if split_points.is_empty() {
         SplitPoints::new(Vec::new())
     } else {
@@ -147,7 +154,7 @@ pub(super) fn interval_merge(split_points: &str) -> Formulation {
 /// A run record of `run_id` whose other fields hold plausible settings and measurements of a
 /// grouped-merge write, for tests that need a record but assert on none of its facts.
 #[must_use]
-pub(super) fn run_record(run_id: &str) -> RunRecord {
+pub(crate) fn run_record(run_id: &str) -> RunRecord {
     RunRecord {
         run_id: run_id.to_string(),
         started_at: SystemTime::UNIX_EPOCH
@@ -187,7 +194,7 @@ pub(super) fn run_record(run_id: &str) -> RunRecord {
     clippy::cast_sign_loss,
     reason = "made-up series are far too short to overflow, and their rows need no precision"
 )]
-pub(super) fn noisy_series(seed: u64, ramp: u64, noise: f64) -> Vec<ProgressSample> {
+pub(crate) fn noisy_series(seed: u64, ramp: u64, noise: f64) -> Vec<ProgressSample> {
     const MS: u64 = 1_000_000;
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut uniform = move || {
@@ -223,7 +230,7 @@ pub(super) fn noisy_series(seed: u64, ramp: u64, noise: f64) -> Vec<ProgressSamp
 /// The would-stop a shadow probe with `settings` records over `samples`: the first decision
 /// [`throughput_probe::would_stop`] makes, judging after every sample as the probe does.
 /// `first_partition_end_ns` reaches the rule once a sample has shown it.
-pub(super) fn recorded_would_stop(
+pub(crate) fn recorded_would_stop(
     settings: &ProbeSettings,
     samples: &[ProgressSample],
     first_partition_end_ns: Option<u64>,
@@ -236,7 +243,7 @@ pub(super) fn recorded_would_stop(
 /// The decision a probe with `settings` stops with over `samples`: the first decision
 /// [`throughput_probe::decide`] makes, judging after every sample as the probe does.
 /// `first_partition_end_ns` reaches the rule once a sample has shown it.
-pub(super) fn first_decision(
+pub(crate) fn first_decision(
     settings: &ProbeSettings,
     samples: &[ProgressSample],
     first_partition_end_ns: Option<u64>,

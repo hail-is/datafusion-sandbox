@@ -5,7 +5,7 @@
 //! merge trees reserve nothing from one. The kernel's peak resident set size is the figure that
 //! sees scan buffers and the pages the allocator keeps resident, under any allocator, and this
 //! module reads it. See
-//! [ADR 0016](../docs/adr/0016-record-run-metrics-as-wide-parquet-tables.md) for why the memory
+//! [ADR 0016](../../docs/adr/0016-record-run-metrics-as-wide-parquet-tables.md) for why the memory
 //! pool's peak is not recorded instead.
 
 use datafusion::error::{DataFusionError, Result};

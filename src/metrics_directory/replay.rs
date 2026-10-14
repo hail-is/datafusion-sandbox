@@ -9,7 +9,7 @@
 //!
 //! This module is pure and in memory: its input is one shadow probe's settings, first partition
 //! end and progress samples, and its output the rows of the three replay tables, which
-//! [`crate::metrics_directory`] reads runs for and writes. The tables are:
+//! its parent, the metrics directory, reads runs for and writes. The tables are:
 //!
 //! - **checks**: one row per tightness check per pair;
 //! - **replay baselines**: one row per pair, with the end-of-run decision under it and when the
@@ -17,9 +17,9 @@
 //! - **replays**: one row per combination, with when, and with what estimate, a shadow probe with
 //!   it would first have stopped steady, and how a probe with it would have ended.
 
-use crate::{
-    run_metrics::{duration_ns, to_u64},
-    throughput_probe::{self, Decision, ProbeSettings, ProgressSample, StopReason, TightnessCheck},
+use super::{duration_ns, to_u64};
+use crate::throughput_probe::{
+    self, Decision, ProbeSettings, ProgressSample, StopReason, TightnessCheck,
 };
 
 use datafusion::{
@@ -191,8 +191,7 @@ fn combinations<'a>(
 }
 
 /// The schema of the checks table: one row per tightness check of a run under each pair.
-#[must_use]
-pub fn checks_schema() -> SchemaRef {
+fn checks_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("run_id", DataType::Utf8, false),
         Field::new("batch_duration_ns", DataType::UInt64, false),
@@ -207,8 +206,7 @@ pub fn checks_schema() -> SchemaRef {
 }
 
 /// The schema of the replay baselines table: one row per pair a run was judged under.
-#[must_use]
-pub fn replay_baselines_schema() -> SchemaRef {
+fn replay_baselines_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("run_id", DataType::Utf8, false),
         Field::new("batch_duration_ns", DataType::UInt64, false),
@@ -222,8 +220,7 @@ pub fn replay_baselines_schema() -> SchemaRef {
 }
 
 /// The schema of the replays table: one row per combination a run was judged under.
-#[must_use]
-pub fn replays_schema() -> SchemaRef {
+fn replays_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("run_id", DataType::Utf8, false),
         Field::new("batch_duration_ns", DataType::UInt64, false),

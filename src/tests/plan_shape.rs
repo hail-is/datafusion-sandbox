@@ -44,6 +44,17 @@ impl PlanShape {
         nodes_of::<T>(&self.plan)
     }
 
+    /// The rows every node of type `T` output, over all its partitions, as the executed plan's own
+    /// metrics count them. A node that reports no output rows counts none.
+    #[must_use]
+    pub fn output_rows_of<T: ExecutionPlan>(&self) -> u64 {
+        self.nodes_of::<T>()
+            .iter()
+            .filter_map(|node| node.metrics()?.output_rows())
+            .map(|rows| u64::try_from(rows).unwrap())
+            .sum()
+    }
+
     /// The operator on each rendered line, root first, with display indentation retained and
     /// operator details removed.
     #[must_use]

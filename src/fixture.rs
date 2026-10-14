@@ -76,10 +76,9 @@ pub use memory_store::MemoryStore;
 
 use crate::format::{InputFormat, OutputFormat};
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
-use crate::metrics_directory::MetricsDirectory;
+use crate::metrics_directory::{self, MetricsDirectory};
 use crate::ordered_frame::OutputLayout;
 use crate::pipeline::{self, PipelineOptions};
-use crate::run_metrics;
 use crate::stored::dataset::{sample_annotation_table::write_marked, sample_field};
 use crate::write::WriteTarget;
 use datafusion::{
@@ -994,19 +993,19 @@ pub async fn read_recorded_run(
         record: read_run_table(
             ctx,
             &directory.run_record_path(run_id),
-            run_metrics::run_record_schema(),
+            metrics_directory::run_record_schema(),
         )
         .await?,
         metrics: read_run_table(
             ctx,
             &directory.run_metrics_path(run_id),
-            run_metrics::run_metrics_schema(),
+            metrics_directory::run_metrics_schema(),
         )
         .await?,
         progress_samples: read_run_table(
             ctx,
             &directory.progress_samples_path(run_id),
-            run_metrics::progress_samples_schema(),
+            metrics_directory::progress_samples_schema(),
         )
         .await?,
     })

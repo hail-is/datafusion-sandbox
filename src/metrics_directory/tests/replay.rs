@@ -1,10 +1,13 @@
 use crate::{
-    replay::{self, Grid, Replay, ShadowRun},
+    metrics_directory::replay::{self, Grid, Replay, ShadowRun},
     tests::support::{
-        f64_values, first_decision, noisy_series, recorded_would_stop, string_values, u64_values,
+        assert_columns, f64_values, first_decision, noisy_series, recorded_would_stop,
+        string_values, u64_values,
     },
     throughput_probe::{self, Decision, ProbeSettings, ProgressSample, StopReason},
 };
+
+use datafusion::arrow::datatypes::DataType;
 
 use std::{num::NonZeroU32, time::Duration};
 
@@ -269,7 +272,20 @@ fn the_checks_table_holds_each_pair_s_checks_in_order() {
         })
         .collect();
 
-    assert_eq!(batch.schema(), replay::checks_schema());
+    assert_columns(
+        &batch.schema(),
+        &[
+            ("run_id", DataType::Utf8, false),
+            ("batch_duration_ns", DataType::UInt64, false),
+            ("window_groups", DataType::UInt64, false),
+            ("check_index", DataType::UInt64, false),
+            ("sample_index", DataType::UInt64, false),
+            ("elapsed_ns", DataType::UInt64, false),
+            ("warmup_end_ns", DataType::UInt64, true),
+            ("steady_state_throughput", DataType::Float64, true),
+            ("relative_half_width", DataType::Float64, true),
+        ],
+    );
     assert!(
         string_values(&batch, "run_id")
             .iter()
@@ -322,7 +338,19 @@ fn the_replay_baselines_table_holds_each_pair_s_end_of_run_decision_and_the_cap(
         .map(|pair| pair.baseline.as_ref().unwrap())
         .collect();
 
-    assert_eq!(batch.schema(), replay::replay_baselines_schema());
+    assert_columns(
+        &batch.schema(),
+        &[
+            ("run_id", DataType::Utf8, false),
+            ("batch_duration_ns", DataType::UInt64, false),
+            ("window_groups", DataType::UInt64, false),
+            ("steady_state_throughput", DataType::Float64, true),
+            ("relative_half_width", DataType::Float64, true),
+            ("warmup_end_ns", DataType::UInt64, true),
+            ("window_end_ns", DataType::UInt64, true),
+            ("capped_at_ns", DataType::UInt64, true),
+        ],
+    );
     assert_eq!(
         u64_values(&batch, "batch_duration_ns"),
         [Some(300 * MS), Some(300 * MS), Some(S), Some(S)]
@@ -371,7 +399,22 @@ fn the_replays_table_holds_each_combination_s_would_stop_and_stop_reason() {
         .collect();
     let would_stop = || combinations.iter().map(|row| row.would_stop.as_ref());
 
-    assert_eq!(batch.schema(), replay::replays_schema());
+    assert_columns(
+        &batch.schema(),
+        &[
+            ("run_id", DataType::Utf8, false),
+            ("batch_duration_ns", DataType::UInt64, false),
+            ("window_groups", DataType::UInt64, false),
+            ("precision", DataType::Float64, false),
+            ("consecutive_checks", DataType::UInt64, false),
+            ("min_duration_ns", DataType::UInt64, false),
+            ("would_stop_ns", DataType::UInt64, true),
+            ("would_be_steady_state_throughput", DataType::Float64, true),
+            ("would_be_relative_half_width", DataType::Float64, true),
+            ("would_be_warmup_end_ns", DataType::UInt64, true),
+            ("probe_stop_reason", DataType::Utf8, false),
+        ],
+    );
     assert_eq!(batch.num_rows(), 32);
     assert_eq!(
         f64_values(&batch, "precision"),

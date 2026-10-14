@@ -1,6 +1,6 @@
 //! The process measurement a run record carries, read from the process running the tests.
 
-use crate::process;
+use crate::combiner_run::process;
 
 use std::hint::black_box;
 
