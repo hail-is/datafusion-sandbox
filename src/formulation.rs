@@ -1,4 +1,5 @@
-//! The supported combiner formulations and their shared plan-building helpers.
+//! The supported combiner formulations, each dispatching to the plan builder of its own child
+//! module.
 
 mod combine_alleles;
 mod combine_refs_grouped_merge;
@@ -61,10 +62,10 @@ impl Formulation {
     #[must_use]
     pub const fn output_layout(&self) -> OutputLayout {
         match self {
-            Self::CombineAllelesUnion
-            | Self::CombineRefsUnion
-            | Self::CombineRefsGroupedMerge { .. } => OutputLayout::SingleFile,
-            Self::CombineRefsIntervalMerge { .. } => OutputLayout::FilePerPartition,
+            Self::CombineAllelesUnion => combine_alleles::output_layout(),
+            Self::CombineRefsUnion => combine_refs_union::output_layout(),
+            Self::CombineRefsGroupedMerge { .. } => combine_refs_grouped_merge::output_layout(),
+            Self::CombineRefsIntervalMerge { .. } => combine_refs_interval_merge::output_layout(),
         }
     }
 
@@ -87,7 +88,7 @@ impl Formulation {
     /// Returns an error if the dataset cannot satisfy the formulation's required ordering or if
     /// `DataFusion` cannot build the plan.
     pub async fn plan(&self, ctx: &SessionContext, dataset: &Dataset) -> Result<OrderedFrame> {
-        let (frame, ordering) = match self {
+        match self {
             Self::CombineAllelesUnion => combine_alleles::plan(ctx, dataset).await,
             Self::CombineRefsUnion => combine_refs_union::plan(ctx, dataset).await,
             Self::CombineRefsGroupedMerge { groups } => {
@@ -96,11 +97,6 @@ impl Formulation {
             Self::CombineRefsIntervalMerge { split_points } => {
                 combine_refs_interval_merge::plan(ctx, dataset, split_points).await
             }
-        }?;
-        Ok(OrderedFrame {
-            frame,
-            ordering,
-            layout: self.output_layout(),
-        })
+        }
     }
 }

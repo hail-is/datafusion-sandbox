@@ -9,7 +9,7 @@
 //!
 //! The tests here check that the filter stays inside every sample's scan, which files each scan
 //! kept, that Parquet and Vortex plans have the same operators, and that the rows that come back
-//! are the filter's rows. Every plan is observed through a sink, as the parent module explains,
+//! are the filter's rows. Every plan is observed through a sink, as `formulation_plans` explains,
 //! and rows are collected through the collecting sink so grouped-merge returns them in locus
 //! order. The reference combiner's filtered plan is its unfiltered plan. The
 //! allele combiner's parallel operators repartition above the union with or without a filter,
@@ -17,15 +17,19 @@
 //! filtered scan's row count is inexact. It does so in both formats alike, so that plan is
 //! compared across formats rather than against its unfiltered shape.
 
-use super::{
-    FORMATS, FixtureDataset, REPRESENTATIONS, collected_batches, dataset, expected_groups,
-    formulations, formulations_over, planned, reference_formulations, shared_datasets, sink_plan,
-};
+use super::{expected_groups, formulations, formulations_over, reference_formulations};
 use crate::fixture::{self, FixtureFormat, SAMPLES, SampleRow, block_on};
 use crate::formulation::Formulation;
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::ordered_frame::OrderedFrame;
-use crate::tests::{plan_shape::PlanShape, support::hostile_config};
+use crate::tests::{
+    formulation_plans::{
+        FORMATS, FixtureDataset, REPRESENTATIONS, collected_batches, dataset, planned,
+        shared_datasets, sink_plan,
+    },
+    plan_shape::PlanShape,
+    support::hostile_config,
+};
 
 use datafusion::{logical_expr::Expr, physical_plan::ExecutionPlan};
 

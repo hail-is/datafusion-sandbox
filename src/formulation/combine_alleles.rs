@@ -1,4 +1,5 @@
-use crate::locus::{RowOrdering, StoredOrdering};
+use crate::locus::RowOrdering;
+use crate::ordered_frame::{OrderedFrame, OutputLayout};
 use crate::stored::dataset::Dataset;
 
 use datafusion::{
@@ -8,8 +9,13 @@ use datafusion::{
 };
 
 /// The least row ordering of the allele combiner.
-pub fn required_ordering() -> RowOrdering {
+pub(super) fn required_ordering() -> RowOrdering {
     RowOrdering::locus_then_alleles()
+}
+
+/// How a write of the allele combiner's rows lays them out: one file.
+pub(super) const fn output_layout() -> OutputLayout {
+    OutputLayout::SingleFile
 }
 
 /// Builds the union-of-per-sample-scans formulation. Produces the distinct set
@@ -19,7 +25,7 @@ pub fn required_ordering() -> RowOrdering {
 ///
 /// Returns a plan error if the dataset holds a multi-sample input table, which this combiner does
 /// not read, or does not satisfy its ordering.
-pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<(DataFrame, StoredOrdering)> {
+pub(super) async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<OrderedFrame> {
     if let Some(table) = dataset
         .input_tables()
         .iter()
@@ -47,5 +53,9 @@ pub async fn plan(ctx: &SessionContext, dataset: &Dataset) -> Result<(DataFrame,
             .build()?,
     ])?;
     let frame = frame.sort(ordering.sort_expressions())?;
-    Ok((frame, ordering))
+    Ok(OrderedFrame {
+        frame,
+        ordering,
+        layout: output_layout(),
+    })
 }
