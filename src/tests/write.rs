@@ -1,13 +1,16 @@
 //! File writes through a write target, over in-memory object stores.
 
 use crate::{
-    fixture::{self, FixtureFormat, MemoryStore},
     format::OutputFormat,
     formulation::Formulation,
-    generated::make_range_table,
     locus::LocusRepresentation,
     pipeline::{self, PipelineOptions},
     stored::dataset::Dataset,
+    testing::{
+        fixture::{self, FixtureFormat},
+        generated::make_range_table,
+        memory_store::MemoryStore,
+    },
     write::WriteTarget,
 };
 

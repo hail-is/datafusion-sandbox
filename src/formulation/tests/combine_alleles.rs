@@ -1,8 +1,8 @@
-use crate::fixture::{SAMPLES, block_on};
 use crate::formulation::combine_alleles;
 use crate::locus::{LocusRepresentation, RowOrdering};
 use crate::ordered_frame::OrderedFrame;
 use crate::stored::dataset::Dataset;
+use crate::testing::fixture::{SAMPLES, block_on};
 use crate::tests::{
     formulation_plans::{
         FORMATS, PlanBuilder, REPRESENTATIONS, dataset, mixed_dataset, physical_plan,

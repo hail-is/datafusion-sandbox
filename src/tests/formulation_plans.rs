@@ -6,7 +6,6 @@
 //! a bare frame's physical plan is not the plan a run executes. See ADR 0014.
 
 use crate::{
-    fixture::{self, FixtureFormat, INPUT_TABLES, Row, block_on},
     format::OutputFormat,
     formulation::Formulation,
     locus::{Locus, LocusRepresentation, RowOrdering, StoredOrdering},
@@ -14,6 +13,7 @@ use crate::{
     pipeline::{self, PipelineOptions},
     sink,
     stored::dataset::Dataset,
+    testing::fixture::{self, FixtureFormat, INPUT_TABLES, Row, block_on},
     tests::support::hostile_config,
     write::WriteTarget,
 };

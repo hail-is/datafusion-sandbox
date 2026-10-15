@@ -7,11 +7,11 @@
 )]
 
 use crate::{
-    fixture::{self, MemoryStore},
     format::{InputFormat, OutputFormat},
     ordered_frame::OutputLayout,
     pipeline::{self, PipelineOptions},
     stored::dataset::sample_annotation_table::{self, annotated_stem, write_marked},
+    testing::{fixture, memory_store::MemoryStore},
     write::WriteTarget,
 };
 

@@ -4,10 +4,10 @@
 //! The formulation suite's shared loops already hold grouped-merge to the merge tree over two
 //! groups under a hostile session, with and without a filter.
 
-use crate::fixture::{self, SAMPLES};
 use crate::formulation::{Formulation, combine_refs_grouped_merge};
 use crate::ordered_frame::OrderedFrame;
 use crate::stored::dataset::{Dataset, InputTable};
+use crate::testing::fixture::{self, SAMPLES};
 use crate::tests::{
     formulation_plans::{
         FORMATS, PlanBuilder, REPRESENTATIONS, collected_rows, dataset, drained_plan,

@@ -18,10 +18,10 @@
 //! compared across formats rather than against its unfiltered shape.
 
 use super::{expected_groups, formulations, formulations_over, reference_formulations};
-use crate::fixture::{self, FixtureFormat, SAMPLES, SampleRow, block_on};
 use crate::formulation::Formulation;
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::ordered_frame::OrderedFrame;
+use crate::testing::fixture::{self, FixtureFormat, SAMPLES, SampleRow, block_on};
 use crate::tests::{
     formulation_plans::{
         FORMATS, FixtureDataset, REPRESENTATIONS, collected_batches, dataset, planned,

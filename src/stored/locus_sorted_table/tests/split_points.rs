@@ -1,9 +1,9 @@
 use crate::{
-    fixture::{self, FixtureFormat, SortedTableFixture},
     format::InputFormat,
     locus::{Locus, LocusRepresentation, SplitPoints},
     pipeline::{self, PipelineOptions},
     stored::locus_sorted_table::{LocusSortedTable, split_points},
+    testing::fixture::{self, FixtureFormat, SortedTableFixture},
 };
 
 use datafusion::{

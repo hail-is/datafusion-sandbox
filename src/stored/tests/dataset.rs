@@ -3,7 +3,10 @@
     reason = "the test controls the concrete array types erased behind ArrayRef"
 )]
 
-use crate::fixture::{self, block_on};
+use crate::testing::{
+    fixture::{self, block_on},
+    memory_store::MemoryStore,
+};
 use crate::tests::plan_shape::PlanShape;
 
 use crate::{
@@ -980,7 +983,7 @@ fn invalid_sample_columns() -> [(&'static str, Vec<(Field, ArrayRef)>); 3] {
 /// Discovers, with an inferred schema, the Vortex dataset under `samples/` of an in-memory store
 /// holding a one-row file at each of `entries`, a path under `samples/` and the file's columns.
 fn discover_written(entries: Vec<(&str, Vec<(Field, ArrayRef)>)>) -> Result<Dataset> {
-    let store = fixture::MemoryStore::new("written-entries");
+    let store = MemoryStore::new("written-entries");
     let root = format!("{}samples", store.url().as_str());
     let entries = entries
         .into_iter()

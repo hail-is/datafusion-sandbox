@@ -1,8 +1,8 @@
 use super::{IntervalMerge, THREE_INTERVALS};
-use crate::fixture::{self, SAMPLES};
 use crate::locus::LocusRepresentation;
 use crate::pipeline;
 use crate::sink::PartitionedSinkExec;
+use crate::testing::fixture::{self, SAMPLES};
 use crate::tests::{
     formulation_plans::{
         FORMATS, REPRESENTATIONS, dataset, drained_plan, drained_plan_and_ordering, file_sink_plan,

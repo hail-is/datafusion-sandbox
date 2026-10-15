@@ -4,8 +4,8 @@
 )]
 
 use crate::format::OutputFormat;
-use crate::generated::make_range_table;
 use crate::pipeline::{self, PipelineOptions};
+use crate::testing::generated::make_range_table;
 use crate::write::WriteTarget;
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::error::DataFusionError;

@@ -144,7 +144,7 @@ pub fn make_unbounded_table(ctx: &SessionContext, batch_size: u32) -> Result<Dat
 ///
 /// Returns an error if `batch_size` is zero or too large, the range lacks enough integer
 /// headroom, or `DataFusion` rejects the table configuration.
-pub fn make_range_table_source(start: i32, end: i32, batch_size: u32) -> Result<StreamingTable> {
+fn make_range_table_source(start: i32, end: i32, batch_size: u32) -> Result<StreamingTable> {
     let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new("idx", DataType::Int32, false)]));
 
     let partition: Arc<dyn PartitionStream> = Arc::new(IntRangeStream::new(

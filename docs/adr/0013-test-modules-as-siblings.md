@@ -34,9 +34,9 @@ of the contract its suite checks.
 A `tests` subtree may also hold shared test-support modules that are the tests of no child: plan
 observation, session builders, and constructors several test modules use. They are `#[cfg(test)]` like
 the tests beside them and keep the same rule, reaching tested modules through their paths and naming
-no private item of the parent. Test support becomes public library code, as `fixture` is, only when a
-crate test or benchmark needs it. Nothing under `tests/` or `benches/` observes a plan, so plan
-observation stays inside the library.
+no private item of the parent. Test support becomes public library code under `testing`, as `fixture`
+is, only when a crate test, benchmark, or example needs it. Nothing under `tests/`, `benches/`, or
+`examples/` observes a plan, so plan observation stays inside the library.
 
 A crate test lives under `tests/` and is reserved for behavior that needs the built binary. The tests
 that run the CLI as a process live in `tests/cli.rs`, and every crate test is of that kind. "Module
@@ -48,7 +48,7 @@ Inline child test modules in the library remain permitted when a test must use p
 module starts with a module doc explaining why private access is needed and naming the module surface
 the tests should eventually move behind. This rule does not apply to inline tests in the binary.
 
-Shared dataset fixtures live in the public `fixture` module. Module tests, crate tests, and benchmarks
+Shared dataset fixtures live in the public `testing::fixture` module. Module tests, crate tests, and benchmarks
 all use that implementation. The module is part of the public crate API because crate tests and
 benchmarks compile as separate crates.
 
@@ -73,6 +73,7 @@ Two dependencies can make a later split non-mechanical. A module's public signat
 `pub(crate)` type owned by another module. The fixture module also cannot become its own crate until
 the format, locus, and pipeline modules have moved out of the root crate. A fixture crate that depends
 back on the root would compile the root twice in tests and produce distinct copies of its types.
+Such a crate would hold the whole `testing` module, which groups all the public test support.
 
 ### Keep one tests subtree at the crate root
 

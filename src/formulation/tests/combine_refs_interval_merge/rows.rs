@@ -1,7 +1,7 @@
 use super::{IntervalMerge, THREE_INTERVALS, WITH_AN_EMPTY_INTERVAL};
-use crate::fixture::{self, Row, SAMPLES};
 use crate::formulation::Formulation;
 use crate::pipeline::{self, PipelineOptions};
+use crate::testing::fixture::{self, Row, SAMPLES};
 use crate::tests::{
     formulation_plans::{
         FORMATS, FixtureDataset, PlanBuilder, REPRESENTATIONS, collected_rows, dataset, loci,

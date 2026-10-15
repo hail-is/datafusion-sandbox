@@ -9,7 +9,7 @@
 
 use datafusion::error::Result;
 use datafusion::prelude::*;
-use datafusion_sandbox::generated::make_table_range_join;
+use datafusion_sandbox::testing::generated::make_table_range_join;
 
 #[tokio::main]
 async fn main() -> Result<()> {
