@@ -24,9 +24,9 @@
 //! back as it stood at the stop.
 
 use crate::{
-    locus::StoredOrdering,
     ordered_frame::OrderedFrame,
     pipeline,
+    row_ordering::StoredOrdering,
     throughput_probe::{self, Decision, ProbeKind, ProbeSettings, ProbedKind, ProgressSample},
 };
 

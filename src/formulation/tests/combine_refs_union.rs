@@ -1,6 +1,6 @@
 use crate::formulation::combine_refs_union;
-use crate::locus::RowOrdering;
 use crate::ordered_frame::OrderedFrame;
+use crate::row_ordering::RowOrdering;
 use crate::stored::dataset::Dataset;
 use crate::testing::fixture::SAMPLES;
 use crate::tests::{

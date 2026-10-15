@@ -1,6 +1,6 @@
 //! A formulation's deferred rows and the requirements that travel with them.
 
-use crate::locus::StoredOrdering;
+use crate::row_ordering::StoredOrdering;
 
 use datafusion::{error::Result, prelude::DataFrame};
 

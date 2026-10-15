@@ -15,11 +15,13 @@ use super::{
 };
 use crate::{
     format::InputFormat,
-    locus::{LocusRepresentation, RowOrdering, StoredOrdering},
+    locus::LocusRepresentation,
+    row_ordering::{RowOrdering, StoredOrdering},
+    sample::{check_sample_column, sample_field},
 };
 
 use datafusion::{
-    arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef},
+    arrow::datatypes::{FieldRef, Schema, SchemaRef},
     common::{DataFusionError, ScalarValue},
     datasource::listing::{ListingTableUrl, PartitionedFile},
     error::Result,
@@ -32,13 +34,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-
-/// The column every row read from a dataset carries its sample id in: a non-null `s` of the view
-/// string type, which is how both formats read a stored string column back.
-#[must_use]
-pub fn sample_field() -> FieldRef {
-    Arc::new(Field::new("s", DataType::Utf8View, false))
-}
 
 /// How an input table is stored in its dataset's root, which decides how its rows come to carry
 /// their sample.
@@ -654,32 +649,4 @@ fn unmatched_columns(schema: &Schema, other: &Schema) -> Vec<String> {
             format!("{}: {}{nullable}", field.name(), field.data_type())
         })
         .collect()
-}
-
-/// Checks that `schema` has a non-null string `s`, describing the problem if not.
-fn check_sample_column(schema: &Schema) -> std::result::Result<(), String> {
-    let sample = sample_field();
-    let problem = match schema.field_with_name(sample.name()) {
-        Ok(field)
-            if matches!(
-                field.data_type(),
-                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-            ) && !field.is_nullable() =>
-        {
-            return Ok(());
-        }
-        Ok(field) if field.is_nullable() => {
-            format!("has a nullable column '{}'", sample.name())
-        }
-        Ok(field) => format!(
-            "has a column '{}' of type {}",
-            sample.name(),
-            field.data_type()
-        ),
-        Err(_) => format!("has no column '{}'", sample.name()),
-    };
-    Err(format!(
-        "{problem}; it needs a non-null string column '{}'",
-        sample.name()
-    ))
 }

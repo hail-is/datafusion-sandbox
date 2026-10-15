@@ -8,8 +8,9 @@ use crate::testing::{
 };
 
 use crate::{
-    locus::{Locus, LocusRepresentation, RowOrdering},
+    locus::{Locus, LocusRepresentation},
     pipeline::{self, PipelineOptions},
+    row_ordering::RowOrdering,
     stored::sorted_table::{AttachedScalar, SortedTable},
     tests::{plan_shape::PlanShape, support::hostile_config},
 };

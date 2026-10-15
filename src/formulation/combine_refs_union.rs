@@ -1,5 +1,5 @@
-use crate::locus::RowOrdering;
 use crate::ordered_frame::{OrderedFrame, OutputLayout};
+use crate::row_ordering::RowOrdering;
 use crate::stored::dataset::Dataset;
 
 use datafusion::{error::Result, prelude::*};

@@ -10,6 +10,9 @@
 //!   a run's run record, run metrics and progress samples there, and replays the shadow probes it
 //!   holds.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
+//! - [`row_ordering`] declares row orderings in row components and expands them into stored
+//!   fields under a locus representation.
+//! - [`sample`] defines the field that carries each row's sample id.
 //! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of
 //!   every partition.
 //! - [`stored`] reads stored tables under a row ordering: datasets and locus-sorted tables.
@@ -46,6 +49,8 @@ pub mod locus;
 pub mod metrics_directory;
 pub mod ordered_frame;
 pub mod pipeline;
+pub mod row_ordering;
+pub mod sample;
 pub mod sink;
 pub mod stored;
 pub mod testing;

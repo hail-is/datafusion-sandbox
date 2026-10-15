@@ -11,8 +11,9 @@ use crate::tests::plan_shape::PlanShape;
 
 use crate::{
     format::{InputFormat, OutputFormat},
-    locus::{Locus, LocusRepresentation, RowOrdering},
+    locus::{Locus, LocusRepresentation},
     pipeline::{self, PipelineOptions},
+    row_ordering::RowOrdering,
     stored::dataset::{Dataset, InputTable, InputTableKind},
     write::WriteTarget,
 };
