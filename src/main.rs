@@ -646,52 +646,54 @@ fn validate_input_path(input_path: &str, input_format: &InputFormat) -> Result<(
     Ok(())
 }
 
-/// Rejects an output path whose extension contradicts the format, or any extension at all when
-/// the path names the directory a file-per-partition formulation fills. A formulation whose write
-/// is a multi-sample input table to a later run must name its one file as discovery finds it:
-/// with the format's extension, and a stem that does not name a sample annotation table.
+/// Rejects an output path that does not name what the formulation's output layout writes. Under a
+/// file-per-partition layout it names a directory, which carries no extension. Under a one-file
+/// layout it names a file, which must be named as a later run's discovery finds an input table:
+/// with the format's extension, a stem that does not name a sample annotation table, and no
+/// trailing slash, which would name a directory.
 fn validate_output_path(
     output_path: &str,
     output_format: &OutputFormat,
     formulation: &Formulation,
 ) -> Result<()> {
     let path = Path::new(output_path);
-    let annotated_file = formulation.writes_sample_annotation_table()
-        && formulation.output_layout() == OutputLayout::SingleFile;
-    let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
-        if annotated_file {
-            return Err(DataFusionError::Configuration(format!(
-                "output path '{output_path}' has no extension; the {formulation} formulation's \
-                 file needs extension '.{}' for a later run to read it",
-                output_format.extension()
-            )));
+    let extension = path.extension().and_then(|ext| ext.to_str());
+    match (formulation.output_layout(), extension) {
+        (OutputLayout::FilePerPartition, Some(extension)) => {
+            Err(DataFusionError::Configuration(format!(
+                "output path '{output_path}' has extension '.{extension}', but it names the directory \
+                 the {formulation} formulation writes one file per partition into"
+            )))
         }
-        return Ok(());
-    };
-    match formulation.output_layout() {
-        OutputLayout::SingleFile if extension != output_format.extension() => {
+        (OutputLayout::SingleFile, _) if output_path.ends_with('/') => {
+            Err(DataFusionError::Configuration(format!(
+                "output path '{output_path}' has a trailing slash, but the {formulation} \
+                 formulation writes one file"
+            )))
+        }
+        (OutputLayout::SingleFile, None) => Err(DataFusionError::Configuration(format!(
+            "output path '{output_path}' has no extension; the {formulation} formulation's file \
+             needs extension '.{}' for a later run to read it",
+            output_format.extension()
+        ))),
+        (OutputLayout::SingleFile, Some(extension)) if extension != output_format.extension() => {
             Err(DataFusionError::Configuration(format!(
                 "output path '{output_path}' has extension '.{extension}', which contradicts output format '{output_format}'"
             )))
         }
-        OutputLayout::SingleFile
-            if annotated_file
-                && path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .and_then(|name| annotated_stem(name, output_format.extension()))
-                    .is_some() =>
+        (OutputLayout::SingleFile, Some(_))
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| annotated_stem(name, output_format.extension()))
+                .is_some() =>
         {
             Err(DataFusionError::Configuration(format!(
                 "output path '{output_path}' is named as a sample annotation table, which a later \
                  run would not read as the {formulation} formulation's data"
             )))
         }
-        OutputLayout::SingleFile => Ok(()),
-        OutputLayout::FilePerPartition => Err(DataFusionError::Configuration(format!(
-            "output path '{output_path}' has extension '.{extension}', but it names the directory \
-             the {formulation} formulation writes one file per partition into"
-        ))),
+        (OutputLayout::FilePerPartition, None) | (OutputLayout::SingleFile, Some(_)) => Ok(()),
     }
 }
 
@@ -1352,54 +1354,44 @@ mod tests {
         }
     }
 
-    /// A reference combiner write's output is a multi-sample input table to a later run, which
-    /// finds one file only by the format's extension and tells it from its sample annotation
-    /// table by the stem. The allele combiner writes no annotation table and takes any name.
+    /// A write of one file must be named as a later run finds an input table: only by the format's
+    /// extension, and told from a sample annotation table by the stem. A trailing slash names a
+    /// directory, which one file cannot be.
     #[test]
-    fn a_reference_write_of_one_file_names_it_as_a_later_run_finds_it() {
+    fn a_write_of_one_file_names_it_as_a_later_run_finds_it() {
         for (path, problem) in [
             ("out/g0", "no extension"),
+            ("out/g0.parquet", "contradicts output format"),
+            ("out/g0/", "trailing slash"),
+            ("out/g0.vortex/", "trailing slash"),
             ("out/g0.samples.vortex", "sample annotation table"),
             ("out/.samples.vortex", "sample annotation table"),
         ] {
-            for formulation in ["union", "grouped-merge"] {
-                let error = resolve(parse_combiner([
-                    "--formulation",
-                    formulation,
-                    "--write",
-                    path,
-                ]))
-                .err()
+            let commands: [&[&str]; 3] = [
+                &["combine-refs", "--formulation", "union"],
+                &["combine-refs", "--formulation", "grouped-merge"],
+                &["combine-alleles"],
+            ];
+            for command in commands {
+                let cli = Cli::try_parse_from(
+                    ["datafusion-sandbox", "--threads", "1", command[0], "input"]
+                        .into_iter()
+                        .chain(command[1..].iter().copied())
+                        .chain(["--write", path]),
+                )
                 .unwrap();
+                let error = resolve(cli).err().unwrap();
                 let diagnostic = error.to_string();
 
                 assert!(
                     diagnostic.contains(path),
-                    "{formulation} {path}:\n{diagnostic}"
+                    "{command:?} {path}:\n{diagnostic}"
                 );
                 assert!(
                     diagnostic.contains(problem),
-                    "{formulation} {path}:\n{diagnostic}"
+                    "{command:?} {path}:\n{diagnostic}"
                 );
             }
-        }
-
-        for path in ["out/g0", "out/g0.samples.vortex"] {
-            let cli = Cli::try_parse_from([
-                "datafusion-sandbox",
-                "--threads",
-                "1",
-                "combine-alleles",
-                "input",
-                "--write",
-                path,
-            ])
-            .unwrap();
-            let run = resolve(cli).unwrap();
-            let Action::Write(target) = run.action else {
-                panic!("{path}: expected a write");
-            };
-            assert_eq!(target.output_path, path);
         }
     }
 

@@ -14,7 +14,11 @@ use crate::{
     write::WriteTarget,
 };
 
-use datafusion::datasource::listing::ListingTableUrl;
+use datafusion::{
+    arrow::{array::Int32Array, compute::concat_batches},
+    datasource::listing::ListingTableUrl,
+    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder,
+};
 use object_store::{ObjectStoreExt, path::Path};
 use std::sync::Arc;
 
@@ -57,6 +61,48 @@ fn an_ordered_write_uses_its_frames_single_file_layout() {
     assert!(executed.execute_ns > 0);
     assert!(executed.plan.metrics().is_some());
     assert!(metadata.size > 0, "{output_path}");
+}
+
+/// A one-file layout writes its file at exactly the output path, whatever the path's shape, so a
+/// path without an extension does not become a directory of files that split the rows' order.
+#[test]
+fn a_single_file_write_writes_exactly_its_output_path() {
+    let store = MemoryStore::new("write-exact");
+    let target = WriteTarget {
+        output_path: format!("{}rows", store.url().as_str()),
+        output_format: OutputFormat::PARQUET,
+    };
+
+    let (written, bytes) = pipeline::run(
+        move |ctx| async move {
+            store.register(&ctx);
+            let frame = make_range_table(&ctx, 1000, 128)?;
+            target.write_unordered(frame).await?;
+            let written = store.locations_under("").await;
+            let bytes = store
+                .store()
+                .get(&Path::from("rows"))
+                .await?
+                .bytes()
+                .await?;
+            Ok((written, bytes))
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap();
+
+    assert_eq!(written, [Path::from("rows")]);
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
+        .unwrap()
+        .build()
+        .unwrap();
+    let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
+    let rows = concat_batches(&batches[0].schema(), &batches).unwrap();
+    let expected: Int32Array = (1..=1000).collect();
+    assert_eq!(
+        rows.column(0).as_any().downcast_ref::<Int32Array>(),
+        Some(&expected)
+    );
 }
 
 #[test]

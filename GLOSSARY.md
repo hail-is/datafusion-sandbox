@@ -102,8 +102,9 @@ its frame. The formulation chooses it; the action does not.
 _Avoid_: layout (unqualified), partitioning, write mode
 
 **Output path**:
-The path a write is given. Under a one-file output layout it names the file; under a
-file-per-partition layout it names the directory the partition files go into.
+The path a write is given. Under a one-file output layout it names the file, with the output
+format's extension; under a file-per-partition layout it names the directory the partition files
+go into, with none.
 _Avoid_: output (ambiguous with Outcome), destination, write path
 
 **Session**:
