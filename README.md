@@ -116,9 +116,10 @@ cargo run -r -- combine-refs data/vortices_chr22 --formulation interval-merge --
 A reference combiner write, measured or not, ends by writing a sample annotation table beside its
 output, in the output format: `data/combined.samples.vortex` beside the file `data/combined.vortex`
 or the directory `data/combined`. It holds the run's sample ids, sorted, in one `s` column, which
-makes the output a complete multi-sample input table for a later run. So a reference combiner
-write of one file needs the output format's extension, and a path such as `g0.samples.vortex`,
-named as an annotation table, is rejected. A write that fails leaves none, and a probe, a
+makes the output a complete multi-sample input table for a later run. Any write of one file,
+the allele combiner's included, must be named as a later run finds an input table, so its path
+needs the output format's extension and no trailing slash, and a path such as
+`g0.samples.vortex`, named as an annotation table, is rejected. A write that fails leaves none, and a probe, a
 collect, an explain or an allele combiner write writes none. See
 [ADR 0018](docs/adr/0018-declare-a-multi-sample-input-tables-samples-in-a-sample-annotation-table.md).
 A measured write, `--write PATH --metrics DIR`, writes the output as a plain write does and records

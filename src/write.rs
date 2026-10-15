@@ -425,7 +425,8 @@ async fn file_sink_plan(
         .await
 }
 
-/// The sink configuration writing one file of `format` at `path`, as `COPY TO` configures it.
+/// The sink configuration writing one file of `format` at exactly `path`, as `COPY TO` configures
+/// it except that the path's shape never makes it a directory.
 fn single_file_sink_config(
     state: &dyn Session,
     format: &dyn FileFormat,
@@ -443,6 +444,6 @@ fn single_file_sink_config(
         insert_op: InsertOp::Append,
         keep_partition_by_columns: state.config_options().execution.keep_partition_by_columns,
         file_extension: format.get_ext(),
-        file_output_mode: FileOutputMode::Automatic,
+        file_output_mode: FileOutputMode::SingleFile,
     })
 }
