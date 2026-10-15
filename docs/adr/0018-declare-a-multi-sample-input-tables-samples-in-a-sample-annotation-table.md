@@ -10,7 +10,8 @@ annotation table stored beside it: `<stem>.samples.<ext>` next to the data at `<
 `s` and ignore any other column, so the table can grow to hold per-sample data. A reference
 combiner write or measured write writes it after every data file, and a run trusts it without
 checking it against the rows. A dataset root holds only `s=<id>/` directories and paired
-multi-sample input tables; anything else is a plan error.
+multi-sample input tables; anything else, other than a hidden entry whose name starts with `.`, is
+a plan error.
 
 The annotation table doubles as the mark that an input table is complete. A write that fails partway
 leaves data with no annotation table, which discovery rejects instead of reading as an input table

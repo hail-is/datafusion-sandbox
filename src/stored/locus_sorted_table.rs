@@ -45,7 +45,7 @@ pub struct LocusSortedTable {
 
 impl LocusSortedTable {
     /// Opens `table_path` as one locus-sorted table. An object at the path is one file; otherwise
-    /// the table is every file of `input_format` beneath the path.
+    /// the table is every file of `input_format` beneath the path, apart from hidden ones.
     ///
     /// # Errors
     ///

@@ -30,6 +30,7 @@ use datafusion::{
     execution::object_store::ObjectStoreUrl,
     prelude::{SessionContext, col, lit},
 };
+use futures::TryStreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
 use std::sync::Arc;
@@ -648,19 +649,30 @@ fn reads_a_mixed_dataset_with_one_view_string_sample_column_and_each_tables_rows
             )
             .unwrap();
 
-            let mut expected = fixture::SAMPLES
-                .iter()
-                .flat_map(|sample| {
-                    fixture::sample_rows()
-                        .into_iter()
-                        .map(|(locus, alleles)| (locus, alleles.to_string(), sample.to_string()))
-                })
-                .collect::<Vec<_>>();
             rows.sort();
-            expected.sort();
-            assert_eq!(rows, expected);
+            assert_eq!(rows, mixed_rows());
         }
     }
+}
+
+#[test]
+fn reads_input_tables_ignoring_hidden_files_below_them() {
+    let mut rows = read_mixed_copy(
+        "samples",
+        &["s=NA18534/._part-0.vortex", "g1/.x=1/part.vortex"],
+    )
+    .unwrap();
+
+    rows.sort();
+    assert_eq!(rows, mixed_rows());
+}
+
+#[test]
+fn reads_a_dataset_under_a_hidden_directory() {
+    let mut rows = read_mixed_copy(".cache/samples", &[]).unwrap();
+
+    rows.sort();
+    assert_eq!(rows, mixed_rows());
 }
 
 #[test]
@@ -724,6 +736,7 @@ fn narrowing_a_mixed_dataset_selects_whole_multi_sample_input_tables() {
 fn rejects_a_root_entry_that_is_no_input_table_naming_it() {
     for (entries, rejected) in [
         (&["notes.txt"][..], "notes.txt"),
+        (&["_SUCCESS"][..], "_SUCCESS"),
         (&["g0.parquet", "g0.samples.parquet"][..], "g0.parquet"),
         (&["g0.samples.txt"][..], "g0.samples.txt"),
     ] {
@@ -740,10 +753,45 @@ fn rejects_a_root_entry_that_is_no_input_table_naming_it() {
 }
 
 #[test]
+fn discovery_ignores_hidden_root_entries() {
+    let dataset = block_on(discover_entries_in_memory(&[
+        ".DS_Store",
+        "._s=sample-a",
+        ".something/part.vortex",
+        ".s=sample-b/marker",
+    ]))
+    .unwrap();
+
+    let input_tables = dataset
+        .input_tables()
+        .iter()
+        .map(InputTable::name)
+        .collect::<Vec<_>>();
+    assert_eq!(input_tables, ["s=sample-a"]);
+}
+
+#[test]
+fn rejects_a_root_of_only_hidden_entries_as_having_no_samples() {
+    let error = block_on(discover_root_in_memory(&[
+        ".DS_Store",
+        ".s=sample-a/marker",
+    ]))
+    .expect_err("a root of hidden entries holds no input table");
+
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    assert!(
+        error.to_string().contains("no samples"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn rejects_multi_sample_data_without_its_sample_annotation_table_naming_it() {
     for (entries, rejected) in [
         (&["g0.vortex"][..], "g0.vortex"),
         (&["g1/0.vortex", "g1/1.vortex"][..], "g1/"),
+        (&["g0.vortex", ".g0.samples.vortex"][..], "g0.vortex"),
+        (&["_temporary/0.vortex"][..], "_temporary/"),
     ] {
         let error = block_on(discover_entries_in_memory(entries))
             .expect_err("data without its annotation table must fail discovery");
@@ -1022,6 +1070,79 @@ fn discover_written(entries: Vec<(&str, Vec<(Field, ArrayRef)>)>) -> Result<Data
     )
 }
 
+/// Discovers and reads, with an inferred schema, a copy of the mixed Vortex dataset fixture at
+/// `root`, a path in a fresh in-memory store, beside an unreadable object at each of `hidden`,
+/// paths under `root` that discovery and reading must skip.
+fn read_mixed_copy(root: &str, hidden: &[&str]) -> Result<Vec<fixture::Row>> {
+    let representation = LocusRepresentation::ContigPosition;
+    let fixture = Arc::clone(fixture::mixed_dataset_fixture(
+        fixture::FixtureFormat::Vortex,
+        representation,
+    ));
+    let store = MemoryStore::new("copied-dataset");
+    let table_path = ListingTableUrl::parse(format!("{}{root}/", store.url().as_str()))?;
+    let hidden = hidden
+        .iter()
+        .map(|entry| Path::from(format!("{root}/{entry}")))
+        .collect::<Vec<_>>();
+    let root = Path::from(root);
+    pipeline::run(
+        move |ctx| {
+            store.register(&ctx);
+            async move {
+                let source = fixture.table_path().prefix();
+                let objects = fixture
+                    .store()
+                    .list(Some(source))
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                for object in objects {
+                    let bytes = fixture.store().get(&object.location).await?.bytes().await?;
+                    let location = root
+                        .parts()
+                        .chain(object.location.prefix_match(source).unwrap())
+                        .collect::<Path>();
+                    store.store().put(&location, bytes.into()).await?;
+                }
+                for location in hidden {
+                    store
+                        .store()
+                        .put(&location, b"not a data file".to_vec().into())
+                        .await?;
+                }
+                let dataset = Dataset::discover(
+                    &ctx,
+                    table_path,
+                    fixture.input_format(),
+                    RowOrdering::locus_then_alleles(),
+                    None,
+                )
+                .await?;
+                let batches = dataset.read(&ctx).await?.collect().await?;
+                Ok(batches
+                    .iter()
+                    .flat_map(|batch| fixture::decode_rows(batch, representation))
+                    .collect())
+            }
+        },
+        PipelineOptions::single_threaded(),
+    )
+}
+
+/// The rows of the mixed dataset fixture, each with its sample, in sorted order.
+fn mixed_rows() -> Vec<fixture::Row> {
+    let mut rows = fixture::SAMPLES
+        .iter()
+        .flat_map(|sample| {
+            fixture::sample_rows()
+                .into_iter()
+                .map(|(locus, alleles)| (locus, alleles.to_string(), sample.to_string()))
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
 fn discover_mixed(format: fixture::FixtureFormat, representation: LocusRepresentation) -> Dataset {
     let fixture = fixture::mixed_dataset_fixture(format, representation);
     let ctx = SessionContext::new();
@@ -1039,9 +1160,15 @@ fn discover_mixed(format: fixture::FixtureFormat, representation: LocusRepresent
 /// Discovers a Vortex dataset whose root holds a single-sample input table and empty objects at
 /// `entries`, under a pinned schema. Every rejection of a root entry precedes reading one.
 async fn discover_entries_in_memory(entries: &[&str]) -> Result<Dataset> {
+    discover_root_in_memory(&[&["s=sample-a/marker"][..], entries].concat()).await
+}
+
+/// Discovers a Vortex dataset whose root holds only empty objects at `entries`, under a pinned
+/// schema.
+async fn discover_root_in_memory(entries: &[&str]) -> Result<Dataset> {
     let ctx = SessionContext::new();
     let store = Arc::new(InMemory::new());
-    for entry in std::iter::once(&"s=sample-a/marker").chain(entries) {
+    for entry in entries {
         store
             .put(
                 &Path::from(format!("samples/{entry}")),

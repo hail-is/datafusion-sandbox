@@ -25,6 +25,9 @@ use datafusion::{datasource::listing::ListingTableUrl, error::Result, prelude::S
 use futures_util::TryStreamExt;
 use object_store::ObjectMeta;
 
+/// The files of `input_format` at or below `table_path`, skipping each one with a hidden path
+/// segment below `table_path`, such as `._part-0.vortex`, the metadata file macOS writes beside
+/// `part-0.vortex` on a volume without extended attributes.
 async fn list_files_by_extension(
     ctx: &SessionContext,
     table_path: &ListingTableUrl,
@@ -36,8 +39,21 @@ async fn list_files_by_extension(
     table_path
         .list_all_files(&state, store.as_ref(), &extension)
         .await?
+        .try_filter(|file| {
+            let hidden = file
+                .location
+                .prefix_match(table_path.prefix())
+                .is_some_and(|mut segments| segments.any(|segment| is_hidden(segment.as_ref())));
+            futures_util::future::ready(!hidden)
+        })
         .try_collect()
         .await
+}
+
+/// Whether a path segment names a hidden entry, such as macOS Finder's `.DS_Store`, which no
+/// stored table owns.
+fn is_hidden(segment: &str) -> bool {
+    segment.starts_with('.')
 }
 
 fn first_nonempty_file(files: &[ObjectMeta]) -> Option<&ObjectMeta> {
