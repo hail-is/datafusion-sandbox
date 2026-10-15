@@ -1,6 +1,6 @@
 # What the run metrics measure
 
-This note says what each metric in `METRICS` (`src/metrics_directory/run_metrics.rs`) measures, read from the pinned sources: DataFusion 55.0.0, parquet 59.2.0, and the `vortex-datafusion` fork in `Cargo.lock`. Nothing here was measured by running queries. References name functions and types, not lines, so they should survive small upstream changes. Recheck the caveats after a DataFusion upgrade, since several describe upstream bugs.
+This note says what each metric in `METRICS` (`src/metrics_directory/run_metrics.rs`) measures, read from the pinned sources: DataFusion 55.1.0, parquet 59.2.0, and the `vortex-datafusion` fork in `Cargo.lock`. Nothing here was measured by running queries. References name functions and types, not lines, so they should survive small upstream changes. Recheck the caveats after a DataFusion upgrade, since several describe upstream bugs.
 
 Crate abbreviations used below:
 
@@ -74,7 +74,7 @@ The Parquet opener builds an extra `BaselineMetrics` per file in `ParquetMorseli
 
 **`time_elapsed_processing`.** Total time inside `ScanState::poll_scan`, which is time inside the stream's `poll_next`. The only one of the four that excludes unpolled time. It covers planning and opening polls as well as reader polls, so it overlaps the polled part of `time_elapsed_opening`. Neither this nor `time_elapsed_scanning_total` contains the other. This is the closest thing to scan cost that the scan reports.
 
-**`batches_split`.** `SplitMetrics` (`pec`, `baseline`), registered by `DataSourceExec::execute` for every data source. `BatchSplitStream::next_sliced_batch` (`pp`, `stream`) increments it once per slice emitted from an input batch with more rows than the session `batch_size`. It counts output slices, not input batches split. A batch of `batch_size` rows or fewer adds nothing.
+**`batches_split`.** `SplitMetrics` (`pec`, `baseline`), registered by `DataSourceExec::execute` for every data source. `BatchSplitStream::next_sliced_batch` (`pp`, `stream`) increments it once per slice emitted from an input batch with more rows than the session `batch_size`. It counts output slices, not input batches split. A batch of `batch_size` rows or fewer adds nothing. Since 55.1 `UnnestExec::execute` also wraps its output in a `BatchSplitStream` and registers its own `batches_split`, so its `output_batches` likewise counts batches before the split. No current formulation's plan contains an `UnnestExec`.
 
 ## Parquet scan
 
