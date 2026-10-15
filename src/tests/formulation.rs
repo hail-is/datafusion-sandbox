@@ -17,7 +17,8 @@ mod filtered_plans;
 
 use crate::{
     formulation::Formulation,
-    locus::{LocusRepresentation, RowOrdering},
+    locus::LocusRepresentation,
+    row_ordering::RowOrdering,
     stored::dataset::InputTable,
     testing::fixture::{FixtureFormat, block_on},
     tests::{

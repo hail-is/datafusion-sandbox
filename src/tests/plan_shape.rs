@@ -5,7 +5,8 @@
 //! on failure; checks within a child plan include that subtree as well.
 
 use crate::{
-    locus::{LocusRepresentation, RowOrdering, StoredOrdering},
+    locus::LocusRepresentation,
+    row_ordering::{RowOrdering, StoredOrdering},
     sink::PartitionedSinkExec,
 };
 

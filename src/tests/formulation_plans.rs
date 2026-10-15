@@ -8,9 +8,10 @@
 use crate::{
     format::OutputFormat,
     formulation::Formulation,
-    locus::{Locus, LocusRepresentation, RowOrdering, StoredOrdering},
+    locus::{Locus, LocusRepresentation},
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
+    row_ordering::{RowOrdering, StoredOrdering},
     sink,
     stored::dataset::Dataset,
     testing::fixture::{self, FixtureFormat, INPUT_TABLES, Row, block_on},

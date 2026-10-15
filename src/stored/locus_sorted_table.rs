@@ -16,7 +16,8 @@ use super::{
 };
 use crate::{
     format::InputFormat,
-    locus::{LocusRepresentation, RowOrdering, StoredOrdering},
+    locus::LocusRepresentation,
+    row_ordering::{RowOrdering, StoredOrdering},
 };
 
 use datafusion::{

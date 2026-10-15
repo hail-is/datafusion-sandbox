@@ -67,7 +67,8 @@ use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::metrics_directory::{self, MetricsDirectory};
 use crate::ordered_frame::OutputLayout;
 use crate::pipeline::{self, PipelineOptions};
-use crate::stored::dataset::{sample_annotation_table::write_marked, sample_field};
+use crate::sample::sample_field;
+use crate::stored::dataset::sample_annotation_table::write_marked;
 use crate::testing::memory_store::MemoryStore;
 use crate::write::WriteTarget;
 use datafusion::{

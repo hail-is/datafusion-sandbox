@@ -10,12 +10,12 @@ mod tests;
 use crate::{
     format::InputFormat,
     formulation::Formulation,
-    locus::RowOrdering,
     metrics_directory::{
         FormulationRecord, MetricsDirectory, ProbeRecord, RunRecord, UnrecordedRun, WriteRecord,
     },
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
+    row_ordering::RowOrdering,
     sink::{self, ExecutedSink},
     stored::dataset::{Dataset, sample_annotation_table::write_marked},
     throughput_probe::{ProbeKind, ProbeSettings, StopReason},

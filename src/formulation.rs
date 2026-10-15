@@ -10,8 +10,9 @@ mod combine_refs_union;
 mod tests;
 
 use crate::{
-    locus::{RowOrdering, SplitPoints},
+    locus::SplitPoints,
     ordered_frame::{OrderedFrame, OutputLayout},
+    row_ordering::RowOrdering,
     stored::dataset::Dataset,
 };
 

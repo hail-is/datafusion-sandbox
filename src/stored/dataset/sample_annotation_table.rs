@@ -5,8 +5,12 @@
 //! owns the table's naming, schema, reading, and writing, and the order a write of the data
 //! beside it keeps.
 
-use super::{check_sample_column, sample_field};
-use crate::{format::InputFormat, ordered_frame::OutputLayout, write::WriteTarget};
+use crate::{
+    format::InputFormat,
+    ordered_frame::OutputLayout,
+    sample::{check_sample_column, sample_field},
+    write::WriteTarget,
+};
 
 use datafusion::{
     arrow::{

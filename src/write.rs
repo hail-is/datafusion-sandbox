@@ -10,8 +10,8 @@
 
 use crate::{
     format::OutputFormat,
-    locus::StoredOrdering,
     ordered_frame::{OrderedFrame, OutputLayout},
+    row_ordering::StoredOrdering,
     sink::{self, ExecutedSink, PartitionedSinkExec, ProbedSink, SinkTarget},
     throughput_probe::{ProbeKind, ProbeSettings},
 };

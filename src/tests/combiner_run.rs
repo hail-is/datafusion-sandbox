@@ -4,10 +4,11 @@ use crate::{
     combiner_run::{Action, CombinerRun, Outcome, PlanInputs},
     format::{InputFormat, OutputFormat},
     formulation::Formulation,
-    locus::{Locus, LocusRepresentation, RowOrdering},
+    locus::{Locus, LocusRepresentation},
     metrics_directory::MetricsDirectory,
     ordered_frame::OutputLayout,
     pipeline::{self, PipelineOptions},
+    row_ordering::RowOrdering,
     tests::{
         plan_shape::exec_names,
         support::{
