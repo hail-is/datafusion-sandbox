@@ -127,6 +127,80 @@ fn ignores_files_with_another_formats_extension() {
 }
 
 #[test]
+fn ignores_hidden_files_below_its_path() {
+    let expected = vec![Locus::new(1, 1).unwrap(), Locus::new(1, 2).unwrap()];
+    let fixture = fixture::sorted_table_fixture(
+        "locus-sorted-table-hidden-files",
+        FixtureFormat::Vortex,
+        LocusRepresentation::Packed,
+        vec![expected.clone()],
+    );
+
+    pipeline::run(
+        move |ctx| {
+            fixture.register(&ctx);
+            async move {
+                // The metadata file macOS writes beside a file it copies to a volume without
+                // extended attributes.
+                let hidden = Path::from(format!("{}/._0001.vortex", fixture.table_path().prefix()));
+                fixture
+                    .store()
+                    .put(&hidden, b"not vortex".to_vec().into())
+                    .await?;
+                let table = LocusSortedTable::open(
+                    &ctx,
+                    fixture.table_path().clone(),
+                    fixture.input_format(),
+                )
+                .await?;
+                let actual = loci(table.read(&ctx)?, fixture.representation()).await?;
+                assert_eq!(actual, expected);
+                Ok(())
+            }
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn reads_a_hidden_file_named_as_its_path() {
+    let expected = vec![Locus::new(1, 1).unwrap(), Locus::new(1, 2).unwrap()];
+    let fixture = fixture::sorted_table_fixture(
+        "locus-sorted-table-hidden-path",
+        FixtureFormat::Vortex,
+        LocusRepresentation::Packed,
+        vec![expected.clone()],
+    );
+
+    pipeline::run(
+        move |ctx| {
+            fixture.register(&ctx);
+            async move {
+                let hidden = Path::from(".tmp.vortex");
+                let bytes = fixture
+                    .store()
+                    .get(fixture.file_path(0).prefix())
+                    .await?
+                    .bytes()
+                    .await?;
+                fixture.store().put(&hidden, bytes.into()).await?;
+                let path = ListingTableUrl::parse(format!(
+                    "{}{hidden}",
+                    fixture.table_path().object_store().as_str()
+                ))?;
+                let table = LocusSortedTable::open(&ctx, path, fixture.input_format()).await?;
+                let actual = loci(table.read(&ctx)?, fixture.representation()).await?;
+                assert_eq!(actual, expected);
+                Ok(())
+            }
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap();
+}
+
+#[test]
 fn rejects_a_path_with_no_nonempty_file_of_the_format() {
     let fixture = fixture::sorted_table_fixture(
         "locus-sorted-table-no-parquet",

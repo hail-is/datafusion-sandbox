@@ -10,7 +10,7 @@ pub mod sample_annotation_table;
 mod tests;
 
 use super::{
-    first_nonempty_file, list_files_by_extension, normalize_table_path,
+    first_nonempty_file, is_hidden, list_files_by_extension, normalize_table_path,
     sorted_table::{AttachedScalar, SortedTable},
 };
 use crate::{
@@ -189,7 +189,8 @@ impl Dataset {
     ///
     /// Each root entry must be an `s=<id>/` directory, a sample annotation table
     /// `<stem>.samples.<ext>`, or the file `<stem>.<ext>` or directory `<stem>/` it is beside,
-    /// where `<ext>` is the input format's extension. See ADR 0018.
+    /// where `<ext>` is the input format's extension, or else be hidden, its name starting with
+    /// `.`, and ignored. See ADR 0018.
     ///
     /// # Errors
     ///
@@ -428,6 +429,7 @@ impl RootEntries {
             .common_prefixes
             .iter()
             .filter_map(|prefix| prefix.filename())
+            .filter(|directory| !is_hidden(directory))
             .collect::<Vec<_>>();
         directories.sort_unstable();
         for directory in directories {
@@ -450,6 +452,7 @@ impl RootEntries {
             // A store may list a directory marker as an object at the root itself.
             .filter(|object| &object.location != table_path.prefix())
             .filter_map(|object| object.location.filename())
+            .filter(|object| !is_hidden(object))
             .collect::<Vec<_>>();
         objects.sort_unstable();
         for object in objects {
