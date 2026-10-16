@@ -28,4 +28,4 @@ For optimized local runs, use `--profile release-nonlto`. The fat-LTO `-r` profi
 
 ### Checks
 
-Before finishing, if the change touches Rust sources (`src/`, `tests/`, `benches/`, `examples/`, `Cargo.toml`), run `cargo fmt`, `cargo clippy --all-targets`, and `cargo test`, and fix new warnings. If it touches `python/`, run `uv run --directory python pytest`.
+Before finishing, if the change touches Rust sources (`src/`, `tests/`, `benches/`, `examples/`, `Cargo.toml`), run `cargo fmt`, `cargo clippy --all-targets`, and `cargo test`, and fix new warnings. If it touches `python/`, run `uv run --directory python ruff format`, `uv run --directory python ruff check --fix`, `uv run --directory python ruff format` again, and `uv run --directory python pytest`, and fix what `ruff check` reports.

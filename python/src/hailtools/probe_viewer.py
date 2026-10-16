@@ -10,6 +10,7 @@ import html
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
+from itertools import pairwise
 from pathlib import Path
 from statistics import median
 from string import Template
@@ -128,7 +129,8 @@ def _shadow_runs(metrics_dir: Path) -> pa.Table:
         runs = runs.slice(0, 0)
     if runs.num_rows == 0:
         raise ProbeViewerError(
-            f"{metrics_dir} has no shadow probes: none of its {len(records)} run records has action shadow"
+            f"{metrics_dir} has no shadow probes: none of its {len(records)} run records"
+            " has action shadow"
         )
     return runs.sort_by("run_id")
 
@@ -478,8 +480,8 @@ MAXIMUM_DURATION = "maximum duration"
 def run_details(
     metrics_dir: Path, calibration: Calibration, replay: Replay | None = None
 ) -> list[RunDetail]:
-    """The detail of each shadow run in `calibration`, from its progress samples under `metrics_dir`,
-    and its replay under every pair of `replay` if there is one."""
+    """The detail of each shadow run in `calibration`, from its progress samples under
+    `metrics_dir`, and its replay under every pair of `replay` if there is one."""
     details = []
     for record in calibration.runs.to_pylist():
         samples = _progress(metrics_dir, record["run_id"])
@@ -614,7 +616,7 @@ def _run_detail(
         settled=record.get("would_stop_ns") is not None,
         samples=[
             _rate(first, second)
-            for first, second in zip(samples, samples[1:])
+            for first, second in pairwise(samples)
             if second.elapsed_ns > first.elapsed_ns
         ],
         batches=[] if batch_duration_ns is None else batch_rates(samples, batch_duration_ns),
@@ -688,8 +690,8 @@ def stop_params(
 
 
 def selection_params(selection: Settings) -> list[alt.Parameter]:
-    """Every setting the page selects, as Vega-Lite parameters: those `on_selected_pair` reads, which
-    a click on the overview sets, and those of `stop_params`."""
+    """Every setting the page selects, as Vega-Lite parameters: those `on_selected_pair` reads,
+    which a click on the overview sets, and those of `stop_params`."""
     return [
         alt.param(name="batch_duration_ns", value=selection.batch_duration_ns),
         alt.param(name="window_groups", value=selection.window_groups),
@@ -743,7 +745,8 @@ def with_stop(chart: alt.Chart) -> alt.Chart:
         .transform_calculate(
             stops_here="datum.check_index - datum.last_failed_index >= consecutive_checks"
             " && datum.elapsed_ns >= min_duration_ns"
-            " && (!isValid(datum.first_partition_end_ns) || datum.elapsed_ns < datum.first_partition_end_ns)"
+            " && (!isValid(datum.first_partition_end_ns)"
+            " || datum.elapsed_ns < datum.first_partition_end_ns)"
         )
         # Times grow with the check index, so the first stopping check has the least time.
         .transform_calculate(stop_ns="datum.stops_here ? datum.elapsed_ns : null")
@@ -753,9 +756,11 @@ def with_stop(chart: alt.Chart) -> alt.Chart:
         )
         .transform_calculate(
             probe_stop_reason="isValid(datum.would_stop_ns)"
-            " && (!isValid(datum.capped_at_ns) || datum.would_stop_ns <= datum.capped_at_ns) ? 'steady'"
+            " && (!isValid(datum.capped_at_ns) || datum.would_stop_ns <= datum.capped_at_ns)"
+            " ? 'steady'"
             " : isValid(datum.capped_at_ns)"
-            " && (!isValid(datum.first_partition_end_ns) || datum.capped_at_ns < datum.first_partition_end_ns)"
+            " && (!isValid(datum.first_partition_end_ns)"
+            " || datum.capped_at_ns < datum.first_partition_end_ns)"
             " ? 'capped' : 'completed'"
         )
     )
@@ -855,7 +860,8 @@ def _controls(replay: Replay) -> str:
         unit = " s" if scale != 1 else ""
         return (
             f'<label>{title} <input type="range" data-param="{param}" data-scale="{scale:g}"'
-            f' min="{min(values) / scale:g}" max="{max(values) / scale:g}" step="{step:g}" value="{value / scale:g}">'
+            f' min="{min(values) / scale:g}" max="{max(values) / scale:g}"'
+            f' step="{step:g}" value="{value / scale:g}">'
             f" <output>{value / scale:g}{unit}</output></label>"
         )
 
@@ -878,8 +884,10 @@ def _controls(replay: Replay) -> str:
                 selection.min_duration_ns,
                 1e9,
             ),
-            f'<span id="pair">Batch duration {selection.batch_duration_ns / 1e9:g} s,'
-            f" {selection.window_groups} window groups</span>",
+            (
+                f'<span id="pair">Batch duration {selection.batch_duration_ns / 1e9:g} s,'
+                f" {selection.window_groups} window groups</span>"
+            ),
             "</div>",
         ]
     )
@@ -1081,7 +1089,8 @@ def _headline_caption(judged: alt.Chart) -> alt.Chart:
     first = "datum.check_index == 0"
     interval = "datum.stops_here && isValid(datum.relative_half_width)"
     covers = (
-        f"{interval} && datum.steady_state_throughput * (1 - datum.relative_half_width) <= datum.end"
+        f"{interval}"
+        " && datum.steady_state_throughput * (1 - datum.relative_half_width) <= datum.end"
         " && datum.end <= datum.steady_state_throughput * (1 + datum.relative_half_width)"
     )
     counts = {
@@ -1090,7 +1099,9 @@ def _headline_caption(judged: alt.Chart) -> alt.Chart:
         "intervals": interval,
         "covered": covers,
         "capped": f"{first} && datum.status == 'capped'",
-        "never_settled": f"{first} && datum.status != 'not replayed' && !isValid(datum.would_stop_ns)",
+        "never_settled": (
+            f"{first} && datum.status != 'not replayed' && !isValid(datum.would_stop_ns)"
+        ),
         "not_replayed": f"{first} && datum.status == 'not replayed'",
     }
 
@@ -1108,10 +1119,12 @@ def _headline_caption(judged: alt.Chart) -> alt.Chart:
             caption=f"(datum.intervals > 0 ? {count('covered')} + ' of ' + {count('intervals')}"
             " + ' would-be estimate intervals cover the end-of-run estimate."
             " About 95% should if the estimate interval is calibrated.\\n' : '')"
-            f" + {count('never_settled')} + ' of ' + {count('runs')} + ' shadow runs never settled.'"
+            f" + {count('never_settled')} + ' of ' + {count('runs')}"
+            " + ' shadow runs never settled.'"
             f" + (datum.capped > 0 ? '\\n' + {count('capped')} + ' of ' + {count('runs')}"
             " + ' shadow runs would have been capped at their maximum duration.' : '')"
-            f" + (datum.not_replayed > 0 ? '\\n' + {count('not_replayed')} + ' of ' + {count('runs')}"
+            f" + (datum.not_replayed > 0 ? '\\n' + {count('not_replayed')}"
+            f" + ' of ' + {count('runs')}"
             " + ' shadow runs were not replayed under these settings.' : '')"
         )
         .mark_text(align="left", baseline="top", fontWeight="bold", lineBreak="\n", lineHeight=16)
@@ -1186,11 +1199,13 @@ def overview_chart(combinations: list[Combination], selection: Settings) -> alt.
     judged = (
         alt.Chart(alt.InlineData(values=rows))
         .transform_calculate(
-            on_pair="datum.batch_duration_ns == batch_duration_ns && datum.window_groups == window_groups"
+            on_pair="datum.batch_duration_ns == batch_duration_ns"
+            " && datum.window_groups == window_groups"
         )
         .transform_calculate(
             selected="datum.on_pair && datum.precision == precision"
-            " && datum.consecutive_checks == consecutive_checks && datum.min_duration_ns == min_duration_ns ? 1 : 0"
+            " && datum.consecutive_checks == consecutive_checks"
+            " && datum.min_duration_ns == min_duration_ns ? 1 : 0"
         )
         .transform_joinaggregate(on_grid="max(selected)")
         .transform_calculate(highlighted="datum.on_grid == 1 ? datum.selected == 1 : datum.on_pair")
@@ -1328,12 +1343,13 @@ def detail_chart(detail: RunDetail, bar: Controls | None = None) -> alt.TopLevel
 
 
 def _detail_title(detail: RunDetail, replay_tables: bool) -> alt.TitleParams:
-    """The run's id, over why its chart lacks what it lacks; `replay_tables` if the page has them."""
+    """The run's id, over why its chart lacks what it lacks; `replay_tables` if the page has
+    them."""
     subtitle = []
     if replay_tables and detail.replayed is None:
         subtitle.append(
-            "The run was not replayed, so it has no tightness check panel and is drawn under its recorded"
-            " settings. Run replay again to replay it."
+            "The run was not replayed, so it has no tightness check panel and is drawn under its"
+            " recorded settings. Run replay again to replay it."
         )
     if detail.replayed is None and not detail.settled:
         subtitle.append("The stopping rule never settled.")
@@ -1654,12 +1670,14 @@ def _tightness_check_panel(
         .transform_calculate(
             elapsed_s="datum.elapsed_ns / 1e9",
             warmup_end_s="isValid(datum.warmup_end_ns) ? datum.warmup_end_ns / 1e9 : null",
-            state="!isValid(datum.warmup_end_ns) ? 'no end of warmup' : datum.passes ? 'passes' : 'fails'",
+            state="!isValid(datum.warmup_end_ns) ? 'no end of warmup'"
+            " : datum.passes ? 'passes' : 'fails'",
             off_scale=f"!isValid(datum.relative_half_width) || datum.relative_half_width > {high!r}"
             f" || datum.relative_half_width < {low!r}",
             # VegaFusion, which tests the page's transforms, has no min() or max().
-            shown_half_width=f"!isValid(datum.relative_half_width) || datum.relative_half_width > {high!r}"
-            f" ? {high!r} : datum.relative_half_width < {low!r} ? {low!r} : datum.relative_half_width",
+            shown_half_width="!isValid(datum.relative_half_width)"
+            f" || datum.relative_half_width > {high!r} ? {high!r}"
+            f" : datum.relative_half_width < {low!r} ? {low!r} : datum.relative_half_width",
         )
         .encode(
             alt.X("elapsed_s:Q", axis=_SECONDS),
@@ -1674,7 +1692,8 @@ def _tightness_check_panel(
     reason = (
         f"datum.probe_stop_reason == 'steady' ? 'A probe would stop steady at ' + {stop_s} + ' s.'"
         " : datum.probe_stop_reason == 'capped' ? 'A probe would be capped at its maximum duration'"
-        f" + (isValid(datum.would_stop_ns) ? ', before settling at ' + {stop_s} + ' s.' : ', unsettled.')"
+        f" + (isValid(datum.would_stop_ns) ? ', before settling at ' + {stop_s} + ' s.'"
+        " : ', unsettled.')"
         " : 'A probe would complete at its first partition end, unsettled.'"
     )
     return alt.layer(
@@ -1709,8 +1728,8 @@ def _tightness_check_panel(
                         {
                             "batch_duration_ns": batch_duration_ns,
                             "window_groups": window_groups,
-                            "note": f"Not replayed under {batch_duration_ns / 1e9:g} s batches, as they are"
-                            " shorter than the run's poll period.",
+                            "note": f"Not replayed under {batch_duration_ns / 1e9:g} s batches,"
+                            " as they are shorter than the run's poll period.",
                         }
                         for batch_duration_ns, window_groups in missing
                     ]
@@ -1773,8 +1792,8 @@ def _caption(calibration: Calibration) -> str:
     sentences = []
     if calibration.intervals:
         sentences.append(
-            f"{calibration.covered} of {calibration.intervals} would-be estimate intervals cover the"
-            " end-of-run estimate. About 95% should if the estimate interval is calibrated."
+            f"{calibration.covered} of {calibration.intervals} would-be estimate intervals cover"
+            " the end-of-run estimate. About 95% should if the estimate interval is calibrated."
         )
     unmeasured = len(calibration.settled) - calibration.intervals
     if unmeasured:
@@ -1839,7 +1858,10 @@ _PAGE = Template("""<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/vega-lite@$vega_lite"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-embed@$vega_embed"></script>
 <style>
-body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.4; }
+body {
+  font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem;
+  line-height: 1.4;
+}
 table { border-collapse: collapse; font-size: 0.85rem; }
 th, td { border: 1px solid #ccc; padding: 0.2rem 0.4rem; text-align: left; }
 .caption { font-weight: bold; }
@@ -1847,7 +1869,8 @@ summary { cursor: pointer; }
 summary h2 { display: inline; }
 .detail { scroll-margin-top: 4rem; padding: 0.5rem; border-radius: 4px; }
 .controls {
-  position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; align-items: center;
+  position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem;
+  align-items: center;
   padding: 0.5rem; background: #f4f4f4; border-bottom: 1px solid #ccc; font-size: 0.9rem;
 }
 .controls output { display: inline-block; min-width: 3rem; font-variant-numeric: tabular-nums; }
@@ -1950,11 +1973,12 @@ rates and its end-of-run marks.
 When the metrics directory has replay tables, each replayed run's chart shows how the stopping rule
 would have judged it under the settings in the control bar, which stays at the top of the page. Its
 batch duration and window groups, which a click on the overview selects, decide the run's tightness
-checks, one at the end of each probe batch, and its end-of-run marks. Its precision, consecutive checks and minimum duration decide
-where the probe stops among those checks, and the sliders move them freely between the grid's
-values. The would-stop point, the would-be warmup end, estimate and estimate interval, the running
-estimate and the precision band follow the sliders. The grey dashed rule is the maximum duration:
-the first progress sample at or past it, where a probe that has not stopped is capped.
+checks, one at the end of each probe batch, and its end-of-run marks. Its precision, consecutive
+checks and minimum duration decide where the probe stops among those checks, and the sliders move
+them freely between the grid's values. The would-stop point, the would-be warmup end, estimate and
+estimate interval, the running estimate and the precision band follow the sliders. The grey dashed
+rule is the maximum duration: the first progress sample at or past it, where a probe that has not
+stopped is capped.
 </p>
 <p>
 The panel under the rates draws each tightness check's relative half-width, the relative half-width
@@ -1979,7 +2003,8 @@ no replay; a test keeps the copy in step with the rule. At the grid's values, it
 $details
 
 <h2>Settings</h2>
-<p>The settings each shadow run was recorded with. An empty cell is a setting the run record leaves empty.</p>
+<p>The settings each shadow run was recorded with. An empty cell is a setting the run record leaves
+empty.</p>
 $settings
 
 <script>
@@ -1991,7 +2016,9 @@ function showDetail(run) {
   }
 }
 // The settings the page selects, each a parameter of every view that follows the selection.
-const SETTINGS = ["batch_duration_ns", "window_groups", "precision", "consecutive_checks", "min_duration_ns"];
+const SETTINGS = [
+  "batch_duration_ns", "window_groups", "precision", "consecutive_checks", "min_duration_ns",
+];
 // Every setting moved since the page opened, so that a view that loads late catches up.
 const selection = {};
 const selectionViews = [];
@@ -2012,7 +2039,8 @@ function selectCombination(datum) {
     showSlider(input);
   }
   document.getElementById("pair").textContent =
-    "Batch duration " + datum.batch_duration_ns / 1e9 + " s, " + datum.window_groups + " window groups";
+    "Batch duration " + datum.batch_duration_ns / 1e9 + " s, " +
+    datum.window_groups + " window groups";
   select(Object.fromEntries(SETTINGS.map((name) => [name, datum[name]])));
 }
 for (const spec of document.querySelectorAll('script[type="application/json"]')) {
@@ -2025,7 +2053,10 @@ for (const spec of document.querySelectorAll('script[type="application/json"]'))
     if (spec.id === "overview") {
       result.view.addEventListener("click", (event, item) => {
         // The frontier's line stands for several combinations, so a click on it selects none.
-        if (item && item.mark.marktype !== "line" && item.datum && item.datum.batch_duration_ns !== undefined) {
+        if (
+          item && item.mark.marktype !== "line" && item.datum &&
+          item.datum.batch_duration_ns !== undefined
+        ) {
           selectCombination(item.datum);
         }
       });
@@ -2040,7 +2071,8 @@ for (const input of document.querySelectorAll(".controls input")) {
   input.addEventListener("input", () => {
     showSlider(input);
     // Rounded, so that a slider on a grid value selects it exactly despite floating point steps.
-    select({ [input.dataset.param]: Number((Number(input.value) * Number(input.dataset.scale)).toPrecision(12)) });
+    const value = Number(input.value) * Number(input.dataset.scale);
+    select({ [input.dataset.param]: Number(value.toPrecision(12)) });
   });
 }
 </script>
