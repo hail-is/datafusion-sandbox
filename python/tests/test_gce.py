@@ -20,9 +20,7 @@ import pytest
 
 from hailtools import gce
 
-requires_rustc = pytest.mark.skipif(
-    shutil.which("rustc") is None, reason="needs a rust toolchain"
-)
+requires_rustc = pytest.mark.skipif(shutil.which("rustc") is None, reason="needs a rust toolchain")
 
 # Real `flags` lines lifted from /proc/cpuinfo on GCE instances. Between them these cover
 # every alias in CPUINFO_ALIASES that our families actually reference: pni, cx16, abm,

@@ -105,9 +105,7 @@ def known_target_cpus() -> frozenset[str]:
     out = _rustc("--print", "target-cpus", "--target", TARGET)
     # Lines look like "    cascadelake" or "    native  - Select the CPU of the host".
     return frozenset(
-        line.split()[0]
-        for line in out.splitlines()
-        if line.startswith(" ") and line.split()
+        line.split()[0] for line in out.splitlines() if line.startswith(" ") and line.split()
     )
 
 
@@ -162,9 +160,7 @@ def family_flags(family: str) -> str:
 
 
 def _metadata(key: str) -> str | None:
-    req = urllib.request.Request(
-        f"{METADATA_ROOT}/{key}", headers={"Metadata-Flavor": "Google"}
-    )
+    req = urllib.request.Request(f"{METADATA_ROOT}/{key}", headers={"Metadata-Flavor": "Google"})
     try:
         with urllib.request.urlopen(req, timeout=2) as resp:
             return resp.read().decode().strip()
@@ -188,11 +184,7 @@ def cpuinfo_flags(path: Path = Path("/proc/cpuinfo")) -> frozenset[str]:
 
 def missing_features(family: str, present: frozenset[str]) -> list[str]:
     """Which of the family's computed features are absent from a real CPU's flags."""
-    return sorted(
-        f
-        for f in family_features(family)
-        if CPUINFO_ALIASES.get(f, f) not in present
-    )
+    return sorted(f for f in family_features(family) if CPUINFO_ALIASES.get(f, f) not in present)
 
 
 # --------------------------------------------------------------------------- commands
@@ -232,9 +224,7 @@ def cmd_verify(family: str | None = None) -> str:
     if family is None:
         machine_type = _metadata("machine-type")
         if machine_type is None:
-            raise GceCpuError(
-                "could not reach the metadata server; pass the family explicitly"
-            )
+            raise GceCpuError("could not reach the metadata server; pass the family explicitly")
         machine_type = machine_type.rsplit("/", 1)[-1]
         family = machine_type.split("-", 1)[0]
         out.append(f"detected machine-type {machine_type} -> family {family}")

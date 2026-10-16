@@ -23,14 +23,14 @@ The conversion logic is copied from `vds_to_reference` and `ht_to_reference` in
 
 import argparse
 import base64
-from collections.abc import Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass, replace
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 import hailtop.fs as hfs
 
@@ -140,7 +140,7 @@ def layout(name: str, mt: str) -> Layout:
     """What `NN.mt` becomes in the layout `name`."""
     index = int(mt)
     every = range(SOURCE_SAMPLES)
-    halves = [range(0, SOURCE_SAMPLES // 2), range(SOURCE_SAMPLES // 2, SOURCE_SAMPLES)]
+    halves = [range(SOURCE_SAMPLES // 2), range(SOURCE_SAMPLES // 2, SOURCE_SAMPLES)]
     if name == "multi-file":
         return Layout(
             reports=f"{BUCKET}/convert_mts",

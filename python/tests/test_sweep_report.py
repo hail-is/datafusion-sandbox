@@ -23,30 +23,44 @@ def write_run_record(metrics, run_id, **columns):
     runs = metrics / "runs"
     runs.mkdir(parents=True, exist_ok=True)
     pq.write_table(
-        pa.table({name: pa.array([value], type=RUN_RECORD_TYPES[name]) for name, value in columns.items()}),
+        pa.table(
+            {
+                name: pa.array([value], type=RUN_RECORD_TYPES[name])
+                for name, value in columns.items()
+            }
+        ),
         runs / f"{run_id}.parquet",
     )
 
 
-def write_runner(metrics, runner, machine_type, threads_per_core, cells, status="done", repetition=1):
+def write_runner(
+    metrics, runner, machine_type, threads_per_core, cells, status="done", repetition=1
+):
     """`cells` maps each cell, in cell order, to its exit status, or to None when the runner
     recorded no outcome for it."""
     runners = metrics / "runners"
     runners.mkdir(parents=True, exist_ok=True)
     (runners / f"{runner}.json").write_text(
-        json.dumps({
-            "runner": runner,
-            "machine_type": machine_type,
-            "threads_per_core": str(threads_per_core),
-            "repetition": str(repetition),
-            "cell_order": list(cells),
-            "cells": [
-                {"cell": cell, "run_id": f"{cell}-{runner}", "exit_status": exit_status, "seconds": 1}
-                for cell, exit_status in cells.items()
-                if exit_status is not None
-            ],
-            "status": status,
-        })
+        json.dumps(
+            {
+                "runner": runner,
+                "machine_type": machine_type,
+                "threads_per_core": str(threads_per_core),
+                "repetition": str(repetition),
+                "cell_order": list(cells),
+                "cells": [
+                    {
+                        "cell": cell,
+                        "run_id": f"{cell}-{runner}",
+                        "exit_status": exit_status,
+                        "seconds": 1,
+                    }
+                    for cell, exit_status in cells.items()
+                    if exit_status is not None
+                ],
+                "status": status,
+            }
+        )
     )
 
 
@@ -77,7 +91,10 @@ def test_report_groups_repetitions_by_cell_and_runner_shape(tmp_path):
 
     report = sweep_report.report(tmp_path)
 
-    assert [(cell.cell, cell.machine_type, cell.threads_per_core, len(cell.runs)) for cell in report.figures] == [
+    assert [
+        (cell.cell, cell.machine_type, cell.threads_per_core, len(cell.runs))
+        for cell in report.figures
+    ] == [
         ("b50", "c4-standard-2", 2, 2),
         ("b50", "n4-standard-2", 1, 1),
     ]
@@ -103,7 +120,9 @@ def test_whole_run_figure_uses_the_records_branching_factor(tmp_path):
 
 
 def test_report_lists_failed_cells_and_unfinished_runners(tmp_path):
-    write_runner(tmp_path, "r1", "c4-standard-2", 2, {"oom": 137, "lost": 0, "ok": 0}, status="interrupted")
+    write_runner(
+        tmp_path, "r1", "c4-standard-2", 2, {"oom": 137, "lost": 0, "ok": 0}, status="interrupted"
+    )
     write_cell_run(tmp_path, "ok", "r1", 1.0, 1e6)
 
     report = sweep_report.report(tmp_path)
@@ -122,13 +141,17 @@ def test_report_lists_failed_cells_and_unfinished_runners(tmp_path):
 
 def test_markdown_gives_mean_and_half_range_in_millions(tmp_path):
     for repetition, run_s in enumerate([1.0, 0.5], start=1):
-        write_runner(tmp_path, f"r{repetition}", "c4-standard-2", 2, {"b": 0}, repetition=repetition)
+        write_runner(
+            tmp_path, f"r{repetition}", "c4-standard-2", 2, {"b": 0}, repetition=repetition
+        )
         write_cell_run(tmp_path, "b", f"r{repetition}", run_s, None, peak=3 * 2**29)
 
     markdown = sweep_report.render_markdown(sweep_report.report(tmp_path))
 
     # Whole-run throughputs of 1M and 2M rows/s: mean 1.5M, half-range 0.5M, before the ln b.
-    assert f"| b | c4-standard-2 | 2 | 2 | {1.5 * math.log(50):.2f} ±33.3% |  |  | 1.50 |" in markdown
+    assert (
+        f"| b | c4-standard-2 | 2 | 2 | {1.5 * math.log(50):.2f} ±33.3% |  |  | 1.50 |" in markdown
+    )
 
 
 def test_markdown_gives_each_repetition_in_order(tmp_path):
@@ -151,7 +174,9 @@ def test_markdown_gives_each_repetition_in_order(tmp_path):
 
 def test_steady_over_whole_leaves_out_repetitions_without_an_estimate(tmp_path):
     for repetition, run_s, steady in [(1, 1.0, 1.5e6), (2, 0.5, None)]:
-        write_runner(tmp_path, f"r{repetition}", "c4-standard-2", 2, {"b": 0}, repetition=repetition)
+        write_runner(
+            tmp_path, f"r{repetition}", "c4-standard-2", 2, {"b": 0}, repetition=repetition
+        )
         write_cell_run(tmp_path, "b", f"r{repetition}", run_s, steady)
 
     (cell,) = sweep_report.report(tmp_path).figures
@@ -162,12 +187,16 @@ def test_steady_over_whole_leaves_out_repetitions_without_an_estimate(tmp_path):
 
 def test_report_counts_the_recorded_runs_of_a_runner_that_recorded_no_outcomes(tmp_path):
     # A runner deleted by its maximum run duration leaves the record it wrote at its start.
-    write_runner(tmp_path, "r1", "c4-standard-2", 2, {"ran": None, "never-ran": None}, status="running")
+    write_runner(
+        tmp_path, "r1", "c4-standard-2", 2, {"ran": None, "never-ran": None}, status="running"
+    )
     write_cell_run(tmp_path, "ran", "r1", 1.0, 1e6)
 
     report = sweep_report.report(tmp_path)
 
-    assert [(cell.cell, [run.run_id for run in cell.runs]) for cell in report.figures] == [("ran", ["ran-r1"])]
+    assert [(cell.cell, [run.run_id for run in cell.runs]) for cell in report.figures] == [
+        ("ran", ["ran-r1"])
+    ]
     assert report.failed == []
     assert report.unfinished == [("r1", "running")]
 
