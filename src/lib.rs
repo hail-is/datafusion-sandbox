@@ -37,7 +37,7 @@
 ///
 /// It lives here rather than in `main.rs` so the benchmark, library-test, and CLI crate-test
 /// binaries allocate the same way the CLI does. Building this feature takes `cmake` and a
-/// `CXXFLAGS` that matches the `-Ctarget-cpu` in `RUSTFLAGS`; see the README.
+/// `CXXFLAGS` that matches the `-Ctarget-cpu` in `RUSTFLAGS`; see docs/snmalloc.md.
 #[cfg(feature = "snmalloc")]
 #[global_allocator]
 static ALLOCATOR: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;

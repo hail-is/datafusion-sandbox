@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# Off by default, so the system allocator stays the baseline to compare against. See the README
-# for the cmake and CXXFLAGS requirements that come with it.
+# Off by default, so the system allocator stays the baseline to compare against. See
+# docs/snmalloc.md for the cmake and CXXFLAGS requirements that come with it.
 snmalloc = ["dep:snmalloc-rs"]
 
 [dependencies]

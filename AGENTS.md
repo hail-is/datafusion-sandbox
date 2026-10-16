@@ -18,6 +18,10 @@ Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/ag
 
 The crate is a set of modules, each with a suite of module tests that checks the contract of its interface. Tests exercise everything a module hard-wires and use adapters only at its seams. Before adding a module, a test, or a test adapter, read `docs/modules-and-tests.md`.
 
+### Usage docs
+
+`docs/README.md` indexes one usage doc per subsystem. Before changing what a command does, read its doc, and update that doc in the same change. A new subsystem gets its own doc and an index line.
+
 ### Builds
 
 For optimized local runs, use `--profile release-nonlto`. The fat-LTO `-r` profile runs out of memory linking in the lima sandbox; on the host it builds but links slowly, so use it there only when a run genuinely needs it.

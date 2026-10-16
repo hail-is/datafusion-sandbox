@@ -456,7 +456,7 @@ fn a_window_of_one_sample_has_no_estimate() {
     );
 }
 
-/// The defaults the README's probe flag table lists.
+/// The defaults the probe settings table in docs/throughput-probe.md lists.
 #[test]
 fn defaults_every_setting_to_its_documented_value() {
     assert_eq!(

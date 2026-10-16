@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Creates the build VM. Its startup script, provision.sh, provisions it on every boot, so deleting
-# the VM loses nothing: running this again rebuilds it. See "Running on GCE" in the README.
+# the VM loses nothing: running this again rebuilds it. See docs/gce.md.
 set -euo pipefail
 
 NAME=${NAME:-combiner-build}
