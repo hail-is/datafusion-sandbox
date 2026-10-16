@@ -79,10 +79,14 @@ suites use it.
 Review check: a production module that imports from `testing` is a violation.
 
 At the object store, every Rust test uses the in-memory adapter, except `src/tests/combiner_run.rs`
-and `tests/cli.rs`, which use local disk. Python tests under `python/tests` check tools that read
-files the Rust binary wrote, and may write their fixtures under pytest's `tmp_path`.
+and `tests/cli.rs`, which use local disk ([ADR 0010](adr/0010-keep-tests-on-in-memory-object-stores.md)).
+Any other test that touches the filesystem, directly or through a dependency its module hard-wires,
+carries a comment saying why that is unavoidable, so a later reader can check whether the reason
+still holds. Python tests under `python/tests` check tools that read files the Rust binary wrote,
+and may write their fixtures under pytest's `tmp_path`.
 
-Review check: a test outside the two disk files that reads or writes the filesystem is a violation.
-`tempdir`, `TempDir`, or a filesystem path that is opened, listed, or written is the sign to look
-for. A path string nothing dereferences is not a violation. The fix is to move the test or switch it
-to the in-memory adapter, not to argue that the speed difference is small; ADR 0010 weighed that.
+Review check: a test outside the two disk files that reads or writes the filesystem without that
+comment is a violation. `tempdir`, `TempDir`, or a filesystem path that is opened, listed, or
+written is the sign to look for. A path string nothing dereferences is not a violation. The fix is
+to move the test or switch it to the in-memory adapter. A comment arguing that the speed difference
+is small does not count; ADR 0010 weighed that.

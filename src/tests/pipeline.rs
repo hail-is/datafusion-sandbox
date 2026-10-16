@@ -9,6 +9,7 @@ use crate::testing::{generated::make_range_table, memory_store::MemoryStore};
 use crate::write::WriteTarget;
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::error::DataFusionError;
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::{DataFrame, col, lit};
 use object_store::path::Path;
 use std::num::NonZeroUsize;
@@ -154,6 +155,37 @@ fn rejects_a_gs_path_that_names_no_bucket_when_options_are_built() {
         assert!(message.contains(path), "{path}: {message}");
         assert!(message.contains("bucket"), "{path}: {message}");
     }
+}
+
+/// Every distinct `gs://` bucket among the paths gets a store on the session, so a run reading one
+/// bucket and writing another can reach both. Building a store contacts no server, so nothing here
+/// needs network access or credentials.
+///
+/// This test touches the filesystem, which is unavoidable: the pipeline hard-wires the Google
+/// Cloud Storage builder, and building a store without credentials in the environment looks for
+/// the application default credentials file under `$HOME/.config/gcloud`.
+#[test]
+fn registers_a_store_for_each_gs_bucket_in_the_paths() {
+    let options = PipelineOptions::for_paths(
+        NonZeroUsize::MIN,
+        [
+            "gs://input-bucket/samples",
+            "gs://output-bucket/combined.vortex",
+        ],
+    )
+    .unwrap();
+
+    pipeline::run(
+        |ctx| async move {
+            for bucket in ["gs://input-bucket", "gs://output-bucket"] {
+                ctx.runtime_env()
+                    .object_store(ObjectStoreUrl::parse(bucket)?)?;
+            }
+            Ok(())
+        },
+        options,
+    )
+    .unwrap();
 }
 
 /// Thread count defaults to available parallelism.

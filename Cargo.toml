@@ -41,6 +41,8 @@ tempfile = "3.27.0"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+# The format suite reads written files back from the in-memory store as `Bytes`.
+bytes = "1.11"
 divan = "0.1.21"
 # The CPU runtime suite registers a socket to check that the runtime has no IO driver.
 tokio = { version = "1.0", features = ["net"] }
