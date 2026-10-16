@@ -188,7 +188,10 @@ def render_markdown(report: Report) -> str:
     millions of rows per second. In the first table each is a mean over repetitions, ± half their
     range as a percentage of that mean."""
     lines = [
-        "| cell | machine type | tpc | n | whole-run NT | steady-state NT | steady / whole | peak RSS GiB |",
+        (
+            "| cell | machine type | tpc | n | whole-run NT | steady-state NT | steady / whole"
+            " | peak RSS GiB |"
+        ),
         "|---|---|---|---|---|---|---|---|",
     ]
     for cell in report.figures:
@@ -201,7 +204,10 @@ def render_markdown(report: Report) -> str:
         )
     lines += [
         "",
-        "| cell | machine type | tpc | repetition | whole-run NT | steady-state NT | steady / whole | peak RSS GiB |",
+        (
+            "| cell | machine type | tpc | repetition | whole-run NT | steady-state NT"
+            " | steady / whole | peak RSS GiB |"
+        ),
         "|---|---|---|---|---|---|---|---|",
     ]
     for cell in report.figures:

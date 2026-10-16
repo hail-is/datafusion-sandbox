@@ -25,6 +25,8 @@ from pyspark.sql import functions as F
 
 from . import gce, probe_viewer, sweep_report
 
+logger = logging.getLogger(__name__)
+
 app = typer.Typer(
     help="Utilities for creating parquet and vortex files from Hail data.",
     no_args_is_help=True,
@@ -140,9 +142,9 @@ def resolve_path(path: Path) -> Path:
 def __download(data_dir: Path, filename: str) -> None:
     url = gs_curl_root / filename
     dest = data_dir / filename
-    logging.info(f"downloading: {filename}")
+    logger.info(f"downloading: {filename}")
     subprocess.check_call(["curl", url, "-Lfs", "-m", "200", "--output", dest])
-    logging.info(f"done: {filename}")
+    logger.info(f"done: {filename}")
 
 
 @app.command()

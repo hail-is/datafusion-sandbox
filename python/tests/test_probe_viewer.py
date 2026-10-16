@@ -424,7 +424,8 @@ def detail_specs(page):
     """Each detail chart's spec, by the run its section names."""
     specs = embedded_specs(page)
     sections = re.findall(
-        r'<section class="detail" data-run="([^"]+)">.*?<script type="application/json" id="([^"]+)">',
+        r'<section class="detail" data-run="([^"]+)">.*?'
+        r'<script type="application/json" id="([^"]+)">',
         page,
         re.DOTALL,
     )
@@ -903,7 +904,7 @@ def half_width_domains(spec):
     return []
 
 
-def test_page_draws_every_tightness_check_panel_on_one_axis_that_reaches_every_precision_the_sliders_do(
+def test_tightness_check_panels_share_one_axis_that_reaches_every_slider_precision(
     replayed,
 ):
     page = probe_viewer.write_page(replayed).read_text()
@@ -915,7 +916,8 @@ def test_page_draws_every_tightness_check_panel_on_one_axis_that_reaches_every_p
         for domain in half_width_domains(details[run_id])
     }
     [(low, high)] = domains
-    # The precision slider runs from 1% to 5%, and the half-widths under the selected pair from 1% to 3%.
+    # The precision slider runs from 1% to 5%, and the half-widths under the selected pair from 1%
+    # to 3%.
     assert low <= 0.01 and high >= 0.05
 
 
@@ -949,8 +951,8 @@ def test_tightness_check_panel_pins_a_check_without_a_relative_half_width_to_its
     data = probe_viewer.detail_chart(detail, bar).transformed_data()
 
     rows = [row for frame in flatten(data) for row in frame.to_dict("records") if "state" in row]
-    # The check at 1.0 s found neither an end of warmup nor an estimate interval. At 2%, the check at
-    # 2.2 s fails and the one at 3.2 s passes.
+    # The check at 1.0 s found neither an end of warmup nor an estimate interval. At 2%, the check
+    # at 2.2 s fails and the one at 3.2 s passes.
     assert sorted(
         (row["elapsed_s"], row["state"], row["shown_half_width"], row["off_scale"]) for row in rows
     ) == [
@@ -1156,7 +1158,7 @@ def caption(rows):
     }
 
 
-def test_headline_under_a_replay_draws_the_pages_stop_against_the_selected_pairs_end_of_run_estimate(
+def test_headline_under_a_replay_draws_the_stop_against_the_pairs_end_of_run_estimate(
     replayed,
 ):
     would_be = 200 / 1.2
@@ -1185,7 +1187,7 @@ def test_headline_under_a_replay_draws_the_pages_stop_against_the_selected_pairs
     }
 
 
-def test_headline_under_a_replay_lists_runs_that_would_be_capped_apart_from_those_that_never_settled(
+def test_headline_under_a_replay_lists_capped_runs_apart_from_never_settled_ones(
     replayed,
 ):
     rows = headline_rows(replayed, RECORDED)

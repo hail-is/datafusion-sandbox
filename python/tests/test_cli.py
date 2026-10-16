@@ -570,8 +570,10 @@ def test_sweep_report_prints_a_row_per_cell_and_runner_shape(tmp_path):
         tmp_path / "runs" / "b50-c4-standard-2-tpc2-r1.parquet",
     )
     (tmp_path / "runners" / "c4-standard-2-tpc2-r1.json").write_text(
-        '{"runner": "c4-standard-2-tpc2-r1", "machine_type": "c4-standard-2", "threads_per_core": "2", "repetition": "1", "cell_order": ["b50"],'
-        ' "cells": [{"cell": "b50", "run_id": "b50-c4-standard-2-tpc2-r1", "exit_status": 0, "seconds": 1}],'
+        '{"runner": "c4-standard-2-tpc2-r1", "machine_type": "c4-standard-2",'
+        ' "threads_per_core": "2", "repetition": "1", "cell_order": ["b50"],'
+        ' "cells": [{"cell": "b50", "run_id": "b50-c4-standard-2-tpc2-r1",'
+        ' "exit_status": 0, "seconds": 1}],'
         ' "status": "done"}'
     )
 
