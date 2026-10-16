@@ -6,9 +6,9 @@ cell it ran. The report joins the two, and for each cell on each runner shape gi
 and steady-state normalized throughput, and the peak RSS, of its repetitions.
 """
 
-from dataclasses import dataclass
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -56,7 +56,9 @@ class Run:
     def steady_state_normalized(self) -> float | None:
         if self.steady_state_throughput is None:
             return None
-        return normalized_throughput(self.steady_state_throughput, self.branching_factor, self.threads)
+        return normalized_throughput(
+            self.steady_state_throughput, self.branching_factor, self.threads
+        )
 
 
 @dataclass(frozen=True)
@@ -153,10 +155,14 @@ def report(metrics_dir: Path) -> Report:
             )
             groups.setdefault((run.cell, run.machine_type, run.threads_per_core), []).append(run)
     figures = [
-        CellFigures(cell, machine_type, threads_per_core, sorted(runs, key=lambda run: run.repetition))
+        CellFigures(
+            cell, machine_type, threads_per_core, sorted(runs, key=lambda run: run.repetition)
+        )
         for (cell, machine_type, threads_per_core), runs in sorted(groups.items())
     ]
-    unfinished = [(runner["runner"], runner["status"]) for runner in runners if runner["status"] != "done"]
+    unfinished = [
+        (runner["runner"], runner["status"]) for runner in runners if runner["status"] != "done"
+    ]
     return Report(figures, failed, unfinished)
 
 

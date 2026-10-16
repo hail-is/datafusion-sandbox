@@ -10,9 +10,14 @@ import pytest
 
 from hailtools import probe_viewer
 
-FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "stop_over_tightness_checks.json").read_text())
+FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" / "stop_over_tightness_checks.json").read_text()
+)
 SETTINGS = sorted(
-    {(stop["precision"], stop["consecutive_checks"], stop["min_duration_ns"]) for stop in FIXTURE["stops"]}
+    {
+        (stop["precision"], stop["consecutive_checks"], stop["min_duration_ns"])
+        for stop in FIXTURE["stops"]
+    }
 )
 
 
@@ -32,7 +37,9 @@ def fixture_checks() -> pa.Table:
 
 
 @pytest.mark.parametrize(("precision", "consecutive_checks", "min_duration_ns"), SETTINGS)
-def test_the_pages_stop_matches_the_rust_stop_over_the_shared_fixture(precision, consecutive_checks, min_duration_ns):
+def test_the_pages_stop_matches_the_rust_stop_over_the_shared_fixture(
+    precision, consecutive_checks, min_duration_ns
+):
     chart = probe_viewer.with_stop(alt.Chart(fixture_checks()).mark_point()).add_params(
         *probe_viewer.stop_params(precision, consecutive_checks, min_duration_ns)
     )
@@ -54,4 +61,6 @@ def test_the_pages_stop_matches_the_rust_stop_over_the_shared_fixture(precision,
     assert found == expected
     # Exactly the check a probe would stop at is marked, carrying the would-be decision.
     stopping = {row["run_id"]: int(row["elapsed_ns"]) for row in rows if row["stops_here"]}
-    assert stopping == {run_id: stop_ns for run_id, [(stop_ns, _)] in expected.items() if stop_ns is not None}
+    assert stopping == {
+        run_id: stop_ns for run_id, [(stop_ns, _)] in expected.items() if stop_ns is not None
+    }

@@ -6,8 +6,8 @@ import hail as hl
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from typer.testing import CliRunner
 import vortex
+from typer.testing import CliRunner
 
 from hailtools import cli
 
@@ -105,9 +105,7 @@ def write_reference_table(path, sample, loci):
     table.write(str(path))
 
 
-def test_convert_hts_writes_one_parquet_per_contig_for_the_global_sample(
-    tmp_path, hail_context
-):
+def test_convert_hts_writes_one_parquet_per_contig_for_the_global_sample(tmp_path, hail_context):
     source = tmp_path / "hts"
     write_reference_table(
         source / "table-file-name.ht",
@@ -126,14 +124,16 @@ def test_convert_hts_writes_one_parquet_per_contig_for_the_global_sample(
         "SAMPLE-7.0.reference.chr08.zstd.parquet",
     ]
     chr01 = pq.read_table(sample_dir / "SAMPLE-7.0.reference.chr01.zstd.parquet")
-    assert chr01.schema.remove_metadata() == pa.schema([
-        pa.field("contig", pa.string(), nullable=False),
-        pa.field("position", pa.int32(), nullable=False),
-        ("DP", pa.int32()),
-        ("GQ", pa.int32()),
-        ("LEN", pa.int32()),
-        ("ploidy", pa.int32()),
-    ])
+    assert chr01.schema.remove_metadata() == pa.schema(
+        [
+            pa.field("contig", pa.string(), nullable=False),
+            pa.field("position", pa.int32(), nullable=False),
+            ("DP", pa.int32()),
+            ("GQ", pa.int32()),
+            ("LEN", pa.int32()),
+            ("ploidy", pa.int32()),
+        ]
+    )
     assert chr01.to_pydict() == {
         "contig": ["chr01"] * 3,
         "position": [10, 20, 30],
@@ -153,9 +153,7 @@ def test_convert_hts_writes_one_parquet_per_contig_for_the_global_sample(
     }
 
 
-def test_convert_hts_limit_converts_the_first_tables_in_sorted_order(
-    tmp_path, hail_context
-):
+def test_convert_hts_limit_converts_the_first_tables_in_sorted_order(tmp_path, hail_context):
     source = tmp_path / "hts"
     for name, sample in [("c.ht", "S1"), ("a.ht", "S2"), ("b.ht", "S3")]:
         write_reference_table(source / name, sample, [("chr1", 1, 2), ("chr1", 2, 2)])
@@ -169,9 +167,7 @@ def test_convert_hts_limit_converts_the_first_tables_in_sorted_order(
     assert sorted(p.name for p in destination.iterdir()) == ["s=S2", "s=S3"]
 
 
-def test_convert_hts_rejects_a_non_numeric_contig_without_leaving_output(
-    tmp_path, hail_context
-):
+def test_convert_hts_rejects_a_non_numeric_contig_without_leaving_output(tmp_path, hail_context):
     source = tmp_path / "hts"
     write_reference_table(source / "sample.ht", "S1", [("chr1", 1, 2), ("chrX", 1, 1)])
     destination = tmp_path / "parquets"
@@ -185,9 +181,7 @@ def test_convert_hts_rejects_a_non_numeric_contig_without_leaving_output(
     assert list(destination.iterdir()) == []
 
 
-def test_convert_hts_rejects_a_missing_locus_without_leaving_output(
-    tmp_path, hail_context
-):
+def test_convert_hts_rejects_a_missing_locus_without_leaving_output(tmp_path, hail_context):
     source = tmp_path / "hts"
     write_reference_table(source / "sample.ht", "S1", [("chr1", 1, 2), (None, 2, 2)])
     destination = tmp_path / "parquets"
@@ -208,9 +202,7 @@ def test_convert_hts_refuses_an_existing_sample_directory(tmp_path, hail_context
     earlier.mkdir(parents=True)
     (earlier / "earlier.parquet").write_bytes(b"earlier")
 
-    result = CliRunner().invoke(
-        cli.app, ["convert-hts", str(source), str(tmp_path / "parquets")]
-    )
+    result = CliRunner().invoke(cli.app, ["convert-hts", str(source), str(tmp_path / "parquets")])
 
     assert result.exit_code != 0
     assert isinstance(result.exception, FileExistsError)
@@ -305,9 +297,7 @@ def test_pack_loci_accumulates_one_contig_across_batches(tmp_path):
 
     cli.pack_loci(source, destination)
 
-    packed = pq.read_table(
-        destination / "s=HG00187/HG00187.reference.chr22.zstd.parquet"
-    )
+    packed = pq.read_table(destination / "s=HG00187/HG00187.reference.chr22.zstd.parquet")
     assert packed.column("locus").to_pylist() == [
         (22 << 32) | 1,
         (22 << 32) | 2,
@@ -395,11 +385,7 @@ def test_scale_parquets_rewrites_stored_contigs_before_conversion(tmp_path, monk
     assert not [path for path in sample_destination.iterdir() if path.is_dir()]
     contigs = {
         file.name: set(
-            vortex.open(str(file))
-            .to_arrow(["contig"])
-            .read_all()
-            .column("contig")
-            .to_pylist()
+            vortex.open(str(file)).to_arrow(["contig"]).read_all().column("contig").to_pylist()
         )
         for file in files
     }
@@ -483,9 +469,7 @@ def test_setup_builds_both_locus_representations_for_both_datasets(monkeypatch):
     monkeypatch.setattr(
         cli,
         "convert_vdss",
-        lambda source, destination, alleles: calls.append(
-            ("vdss", source, destination, alleles)
-        ),
+        lambda source, destination, alleles: calls.append(("vdss", source, destination, alleles)),
     )
     monkeypatch.setattr(
         cli,
@@ -541,14 +525,16 @@ def test_probe_viewer_writes_the_page_where_it_is_told(tmp_path):
     metrics = tmp_path / "metrics"
     (metrics / "runs").mkdir(parents=True)
     pq.write_table(
-        pa.table({
-            "run_id": ["shadow-union-j1"],
-            "formulation": ["union"],
-            "threads": pa.array([1], type=pa.uint64()),
-            "action": ["shadow"],
-            "steady_state_throughput": [100.0],
-            "would_stop_ns": pa.array([None], type=pa.uint64()),
-        }),
+        pa.table(
+            {
+                "run_id": ["shadow-union-j1"],
+                "formulation": ["union"],
+                "threads": pa.array([1], type=pa.uint64()),
+                "action": ["shadow"],
+                "steady_state_throughput": [100.0],
+                "would_stop_ns": pa.array([None], type=pa.uint64()),
+            }
+        ),
         metrics / "runs" / "shadow-union-j1.parquet",
     )
     page = tmp_path / "page.html"
@@ -572,13 +558,15 @@ def test_sweep_report_prints_a_row_per_cell_and_runner_shape(tmp_path):
     (tmp_path / "runs").mkdir()
     (tmp_path / "runners").mkdir()
     pq.write_table(
-        pa.table({
-            "run_id": ["b50-c4-standard-2-tpc2-r1"],
-            "threads": pa.array([1], type=pa.uint64()),
-            "input_tables": pa.array([50], type=pa.uint64()),
-            "rows_written": pa.array([1_000_000], type=pa.uint64()),
-            "run_ns": pa.array([1_000_000_000], type=pa.uint64()),
-        }),
+        pa.table(
+            {
+                "run_id": ["b50-c4-standard-2-tpc2-r1"],
+                "threads": pa.array([1], type=pa.uint64()),
+                "input_tables": pa.array([50], type=pa.uint64()),
+                "rows_written": pa.array([1_000_000], type=pa.uint64()),
+                "run_ns": pa.array([1_000_000_000], type=pa.uint64()),
+            }
+        ),
         tmp_path / "runs" / "b50-c4-standard-2-tpc2-r1.parquet",
     )
     (tmp_path / "runners" / "c4-standard-2-tpc2-r1.json").write_text(
