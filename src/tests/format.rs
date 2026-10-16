@@ -1,106 +1,148 @@
 use crate::{
     format::OutputFormat,
-    formulation::Formulation,
-    locus::LocusRepresentation,
     pipeline::{self, PipelineOptions},
-    stored::dataset::Dataset,
-    testing::{
-        fixture::{self, FixtureFormat},
-        generated::make_range_table,
-        memory_store::MemoryStore,
-    },
+    testing::{generated::make_range_table, memory_store::MemoryStore},
     write::WriteTarget,
 };
 
+use bytes::Bytes;
+use datafusion::{
+    arrow::array::{ArrayRef, Float64Array, RecordBatch},
+    error::{DataFusionError, Result},
+    parquet::{
+        basic::CompressionCodec,
+        file::{
+            metadata::{ColumnChunkMetaData, RowGroupMetaData},
+            reader::{FileReader, SerializedFileReader},
+        },
+    },
+    prelude::{DataFrame, SessionContext},
+};
 use object_store::{ObjectStoreExt, path::Path};
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
+use vortex::{
+    VortexSessionDefault, array::stream::ArrayStreamExt, file::OpenOptionsSessionExt,
+    session::VortexSession,
+};
 
+/// A Parquet file records each column chunk's codec but not its level, so the claim is that the
+/// file is written with the codec its compression mode names.
 #[test]
-fn uncompressed_parquet_is_larger_than_zstd_parquet() {
-    let uncompressed = written_size(
-        OutputFormat::PARQUET
-            .with_compression("uncompressed")
-            .unwrap(),
-        "parquet-uncompressed",
-    );
-    let compressed = written_size(
-        OutputFormat::PARQUET.with_compression("zstd(7)").unwrap(),
-        "parquet-zstd",
-    );
+fn parquet_writes_with_the_codec_its_compression_mode_names() {
+    for (compression, codec) in [
+        ("uncompressed", CompressionCodec::UNCOMPRESSED),
+        ("snappy", CompressionCodec::SNAPPY),
+        ("gzip(6)", CompressionCodec::GZIP),
+        ("brotli(5)", CompressionCodec::BROTLI),
+        ("lz4", CompressionCodec::LZ4),
+        ("zstd(7)", CompressionCodec::ZSTD),
+        ("lz4_raw", CompressionCodec::LZ4_RAW),
+    ] {
+        let file = written_file(
+            OutputFormat::PARQUET.with_compression(compression).unwrap(),
+            |ctx| make_range_table(ctx, 1000, 128),
+        );
 
-    assert!(uncompressed > compressed, "{uncompressed} <= {compressed}");
+        let reader = SerializedFileReader::new(file).unwrap();
+        let codecs: Vec<_> = reader
+            .metadata()
+            .row_groups()
+            .iter()
+            .flat_map(RowGroupMetaData::columns)
+            .map(ColumnChunkMetaData::compression_codec)
+            .collect();
+        assert!(!codecs.is_empty(), "{compression}: no column chunks");
+        assert!(
+            codecs.iter().all(|written| *written == codec),
+            "{compression}: {codecs:?}"
+        );
+    }
 }
 
+/// Compact Vortex adds Pco and Zstd to the schemes the compressor may choose from, and uniformly
+/// random floats are a column Pco compresses best. Standard Vortex never writes either encoding.
 #[test]
-fn compact_and_standard_vortex_have_different_file_sizes() {
-    let standard = combined_refs_size(
-        OutputFormat::VORTEX.with_compression("standard").unwrap(),
-        "vortex-standard",
-    );
-    let compact = combined_refs_size(
-        OutputFormat::VORTEX.with_compression("compact").unwrap(),
-        "vortex-compact",
-    );
+fn vortex_writes_compact_encodings_only_in_compact_mode() {
+    for (compression, pco_expected) in [("standard", false), ("compact", true)] {
+        let file = written_file(
+            OutputFormat::VORTEX.with_compression(compression).unwrap(),
+            |ctx| ctx.read_batch(random_floats(16_384)),
+        );
 
-    assert_ne!(standard, compact, "standard and compact file sizes match");
+        let encodings = vortex_encodings(file);
+        assert_eq!(
+            encodings.contains("vortex.pco"),
+            pco_expected,
+            "{compression}: {encodings:?}"
+        );
+        if !pco_expected {
+            assert!(
+                !encodings.contains("vortex.zstd"),
+                "{compression}: {encodings:?}"
+            );
+        }
+    }
 }
 
-fn combined_refs_size(output_format: OutputFormat, store_name: &str) -> u64 {
-    let input = Arc::clone(fixture::dataset_fixture(
-        FixtureFormat::Vortex,
-        LocusRepresentation::ContigPosition,
+/// A one-column batch of `n_rows` uniformly distributed floats in `[0, 1)`, the same on every
+/// run. A linear congruential generator supplies 52 random mantissa bits under the exponent of
+/// 1.0 to make a float in `[1, 2)`, and subtracting 1.0 shifts it into `[0, 1)`.
+fn random_floats(n_rows: usize) -> RecordBatch {
+    let mut state = 110_u64;
+    let values: ArrayRef = Arc::new(Float64Array::from_iter_values(
+        std::iter::repeat_with(|| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            f64::from_bits(1.0_f64.to_bits() | (state >> 12)) - 1.0
+        })
+        .take(n_rows),
     ));
-    let output = MemoryStore::new(store_name);
-    let target = WriteTarget {
-        output_path: format!("{}combined.vortex", output.url().as_str()),
-        output_format,
-    };
+    RecordBatch::try_from_iter([("value", values)]).unwrap()
+}
 
+/// The IDs of every encoding in the arrays of the Vortex file `file`, read back undecoded.
+fn vortex_encodings(file: Bytes) -> BTreeSet<String> {
     pipeline::run(
-        move |ctx| async move {
-            input.register(&ctx);
-            output.register(&ctx);
-            let formulation = Formulation::CombineRefsUnion;
-            let dataset = Dataset::discover(
-                &ctx,
-                input.table_path().clone(),
-                input.input_format(),
-                formulation.required_ordering(),
-                None,
-            )
-            .await?;
-            let executed = target
-                .write(formulation.plan(&ctx, &dataset).await?)
-                .await?;
-            assert_eq!(executed.rows_written, 32);
-            Ok(output
-                .store()
-                .head(&Path::from("combined.vortex"))
-                .await?
-                .size)
+        |_ctx| async move {
+            let array = async {
+                VortexSession::default()
+                    .open_options()
+                    .open_buffer(file)?
+                    .scan()?
+                    .into_array_stream()?
+                    .read_all()
+                    .await
+            }
+            .await
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+            Ok(array
+                .depth_first_traversal()
+                .map(|node| node.encoding_id().to_string())
+                .collect())
         },
         PipelineOptions::single_threaded(),
     )
     .unwrap()
 }
 
-fn written_size(output_format: OutputFormat, store_name: &str) -> u64 {
-    let store = MemoryStore::new(store_name);
-    let extension = output_format.extension();
-    let object_path = Path::from(format!("rows.{extension}"));
+/// The bytes of the one file `output_format` writes from the frame `frame` builds.
+fn written_file(
+    output_format: OutputFormat,
+    frame: impl FnOnce(&SessionContext) -> Result<DataFrame> + Send + 'static,
+) -> Bytes {
+    let store = MemoryStore::new("written-file");
+    let object_path = Path::from(format!("rows.{}", output_format.extension()));
     let target = WriteTarget {
-        output_path: format!("{}rows.{extension}", store.url().as_str()),
+        output_path: format!("{}{object_path}", store.url().as_str()),
         output_format,
     };
 
     pipeline::run(
         move |ctx| async move {
             store.register(&ctx);
-            let executed = target
-                .write_unordered(make_range_table(&ctx, 10_000, 128)?)
-                .await?;
-            assert_eq!(executed.rows_written, 10_000);
-            Ok(store.store().head(&object_path).await?.size)
+            target.write_unordered(frame(&ctx)?).await?;
+            Ok::<_, DataFusionError>(store.store().get(&object_path).await?.bytes().await?)
         },
         PipelineOptions::single_threaded(),
     )
