@@ -1,5 +1,5 @@
 /target
-# One target dir per GCE instance family; see "Building for a specific GCE instance family".
+# One target dir per GCE instance family; see docs/target-cpu.md.
 /target-*
 data/
 

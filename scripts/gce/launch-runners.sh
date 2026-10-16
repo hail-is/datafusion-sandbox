@@ -7,7 +7,7 @@
 # A runner's startup script, runner.sh, does the rest and deletes the runner when it is done; see
 # there for the cell list's format and what a runner records. This returns once every runner is
 # created. Before creating any, it refuses a runner that has already run, which would find its run
-# ids taken. See "Running on GCE" in the README.
+# ids taken. See docs/gce.md.
 set -euo pipefail
 
 BUCKET=gs://hail-pschultz

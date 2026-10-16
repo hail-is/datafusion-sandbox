@@ -6,7 +6,7 @@
 #     datafusion-sandbox/scripts/gce/build.sh <commit> <family>...
 #
 # A published binary is never overwritten, so a path under $BIN names exactly one build. See
-# "Running on GCE" in the README.
+# docs/gce.md.
 set -euo pipefail
 
 BIN=${BIN:-gs://hail-pschultz/combiner-bench/bin}

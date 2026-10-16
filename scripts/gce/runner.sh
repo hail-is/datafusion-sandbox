@@ -21,7 +21,7 @@
 #
 # Beside the run records, in runners/ under the metrics directory, it writes <runner>.json,
 # describing the runner, its shuffled cell order, and each cell's exit status, and <runner>.log,
-# this script's output. See "Running on GCE" in the README.
+# this script's output. See docs/gce.md.
 set -euo pipefail
 
 BUCKET=gs://hail-pschultz
