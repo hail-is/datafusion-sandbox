@@ -76,8 +76,8 @@ impl LocusRestriction {
     }
 
     /// The files of one sample whose ordering statistics admit a matching row, in locus order.
-    /// Files d and c are constant on chr01, b spans the contig boundary, and a is constant on chr02.
-    /// File c holds chr01:3 and b starts at chr01:4.
+    /// Files d and c are constant on chr01, b spans the contig boundary, and a is constant on
+    /// chr02. File c holds chr01:3 and b starts at chr01:4.
     const fn expected_stems(self) -> [&'static str; 2] {
         match self {
             Self::Contig => ["b", "a"],

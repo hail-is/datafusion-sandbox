@@ -253,9 +253,9 @@ impl VacantTarget {
     ///
     /// The removal deletes every object under the output path and lists it again after a pause,
     /// until a listing finds nothing and a local directory it is to remove is gone, for at most
-    /// [`SETTLE_ROUNDS`] pauses. It does not reach an unfinished multipart upload, which an
-    /// object store lists nowhere: on Google Cloud Storage, a stopped write leaves one for each
-    /// file it had begun uploading in parts.
+    /// 50 pauses. It does not reach an unfinished multipart upload, which an object store lists
+    /// nowhere: on Google Cloud Storage, a stopped write leaves one for each file it had begun
+    /// uploading in parts.
     ///
     /// # Errors
     ///
