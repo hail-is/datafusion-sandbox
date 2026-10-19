@@ -65,7 +65,8 @@ where
         .with_inputs(|| deep_copy_plan(&physical_plan))
         .bench_local_values(|plan| -> usize {
             rt.block_on(async {
-                // only counts the number of record batches, but I think this is enough to prevent optimizing away any of the pipeline
+                // only counts the number of record batches, but I think this is enough to prevent
+                // optimizing away any of the pipeline
                 execute_stream(plan, ctx.task_ctx()).unwrap().count().await
             })
         });

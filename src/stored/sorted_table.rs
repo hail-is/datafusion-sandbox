@@ -30,10 +30,10 @@
 //! - Path-derived Hive columns are unnecessary; the caller supplies the attached scalar.
 //! - Listing and schema inference belong to the caller, per ADR 0005.
 //! - Table writes go through the format's sink instead.
-//! - Footer sort order is not ordering evidence: our writers do not record it, Vortex
-//!   has no equivalent, and ADR 0011 already trusts the writer beyond that evidence.
-//! - Schema drift adapters would hide mismatched files; a dataset declares one schema
-//!   and mismatches should fail rather than be adapted.
+//! - Footer sort order is not ordering evidence: our writers do not record it, Vortex has no
+//!   equivalent, and ADR 0011 already trusts the writer beyond that evidence.
+//! - Schema drift adapters would hide mismatched files; a dataset declares one schema and
+//!   mismatches should fail rather than be adapted.
 
 mod file_order;
 mod file_pruning;

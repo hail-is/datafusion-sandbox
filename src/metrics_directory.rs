@@ -19,8 +19,7 @@
 //! - `run_record` holds the record types and fills and reads the run record table.
 //! - `progress_samples` fills and reads a throughput probe's progress samples table.
 //! - `run_metrics` fills the run metrics table from an executed plan.
-//! - `replay` judges a shadow probe again under a [`Grid`], in memory, and fills the replay
-//!   tables.
+//! - `replay` judges a shadow probe again under a [`Grid`], in memory, and fills the replay tables.
 //!
 //! The tables share one way of storing values: counts and durations as saturating `UInt64`
 //! nanoseconds, timestamps as nanoseconds in UTC. The helpers at the end of this module state it.

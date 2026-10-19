@@ -1,4 +1,5 @@
-//! Prototypes and benchmarks for comparing `DataFusion` formulations of Hail-style genomics pipelines.
+//! Prototypes and benchmarks for comparing `DataFusion` formulations of Hail-style genomics
+//! pipelines.
 //!
 //! - [`combiner_run`] resolves and executes one combiner run.
 //! - [`mod@format`] describes supported input and output file formats.
@@ -6,25 +7,27 @@
 //! - [`locus`] describes the supported stored locus representations, split points, and locus
 //!   intervals.
 //! - [`ordered_frame`] carries a formulation's deferred rows, ordering, and output layout.
-//! - [`metrics_directory`] lays out the run tables under a metrics directory, fills and records
-//!   a run's run record, run metrics and progress samples there, and replays the shadow probes it
+//! - [`metrics_directory`] lays out the run tables under a metrics directory, fills and records a
+//!   run's run record, run metrics and progress samples there, and replays the shadow probes it
 //!   holds.
 //! - [`pipeline`] runs a pipeline to completion on separate CPU and IO runtimes.
-//! - [`row_ordering`] declares row orderings in row components and expands them into stored
-//!   fields under a locus representation.
+//! - [`row_ordering`] declares row orderings in row components and expands them into stored fields
+//!   under a locus representation.
 //! - [`sample`] defines the field that carries each row's sample id.
-//! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of
-//!   every partition.
+//! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of every
+//!   partition.
 //! - [`stored`] reads stored tables under a row ordering: datasets and locus-sorted tables.
 //! - [`throughput_probe`] holds a throughput probe's settings and progress samples, and decides
 //!   when it stops.
 //! - [`mod@write`] builds and executes file writes.
-//! - [`testing`] is public test support: dataset fixtures, the in-memory object store, and generated
-//!   tables, for module tests, crate tests, benchmarks, and examples. No module above imports it.
+//! - [`testing`] is public test support: dataset fixtures, the in-memory object store, and
+//!   generated tables, for module tests, crate tests, benchmarks, and examples. No module above
+//!   imports it.
 //!
 //! See the [project glossary](../GLOSSARY.md) for domain vocabulary.
 
-// `debug_assertions` here is a proxy for dev builds. Optimized builds don't trigger the linker warning.
+// `debug_assertions` here is a proxy for dev builds. Optimized builds don't trigger the linker
+// warning.
 #![cfg_attr(
     all(test, target_os = "macos", debug_assertions),
     allow(

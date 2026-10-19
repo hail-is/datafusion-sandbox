@@ -1,4 +1,5 @@
-// `debug_assertions` here is a proxy for dev builds. Optimized builds don't trigger the linker warning.
+// `debug_assertions` here is a proxy for dev builds. Optimized builds don't trigger the linker
+// warning.
 #![cfg_attr(
     all(target_os = "macos", debug_assertions),
     allow(

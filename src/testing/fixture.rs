@@ -7,10 +7,10 @@
 //! - Parquet with contig-position loci
 //! - Parquet with packed loci
 //! - Mixed datasets, in both formats and both representations: the input tables
-//!   [`MIXED_INPUT_TABLES`], which are a multi-sample file `g0.<ext>` of the first two
-//!   samples' rows in `(locus, s)` order, a multi-sample directory `g1/` of the third sample's
-//!   files with its rows carrying their sample, each beside its sample annotation table,
-//!   and the single-sample table `s=NA18534/`
+//!   [`MIXED_INPUT_TABLES`], which are a multi-sample file `g0.<ext>` of the first two samples'
+//!   rows in `(locus, s)` order, a multi-sample directory `g1/` of the third sample's files with
+//!   its rows carrying their sample, each beside its sample annotation table, and the single-sample
+//!   table `s=NA18534/`
 //!
 //! Per-test owned in-memory inventory:
 //! - A locus-sorted table, one or more files, with caller-chosen loci, format, and representation
@@ -42,14 +42,14 @@
 //!
 //! Row helpers, for tests that filter a fixture and check what comes back:
 //! - `sample_rows`, the rows above as one sample's expected result.
-//! - `contig_filter`, a whole-contig restriction written in a representation.
-//!   Interval restrictions are `LocusInterval::filter` in the library.
+//! - `contig_filter`, a whole-contig restriction written in a representation. Interval restrictions
+//!   are `LocusInterval::filter` in the library.
 //! - `decode_loci` and `string_column`, the locus or one string field of each row a plan returned.
 //! - `decode_rows`, the locus, alleles, and sample of each row a plan returned.
 //! - `file_stems`, the documented fixture stems named by scanned object-store paths.
 //! - `read_file`, the rows of one file a test wrote, on any registered store.
-//! - `read_recorded_run`, the tables a measured write or a throughput probe recorded for one
-//!   run id under a metrics directory, each as one batch if the run has a file there.
+//! - `read_recorded_run`, the tables a measured write or a throughput probe recorded for one run id
+//!   under a metrics directory, each as one batch if the run has a file there.
 
 #![expect(
     clippy::as_conversions,

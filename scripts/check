@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Runs the Rust checks that CI runs, stopping at the first failure:
+#
+#   scripts/check
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+cargo fmt --check || {
+    echo "scripts/check: formatting differs; run \`cargo fmt\`" >&2
+    exit 1
+}
+cargo clippy --all-targets -- -D warnings
+RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
+cargo test

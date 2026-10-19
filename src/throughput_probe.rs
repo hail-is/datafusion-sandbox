@@ -524,11 +524,11 @@ impl<'a> Window<'a> {
 /// The fewest batches whose cut minimizes MSER over `rates`, if that minimum lies in the first
 /// half of the batches.
 ///
-/// `MSER(d)` is `Σ_{i>d} (Yᵢ − Ȳ_d)² / (n − d)²`, the squared standard error of the rates left after
-/// cutting the first `d`. A cut leaving fewer than [`MSER_MIN_TAIL`] batches is not considered:
-/// the variance of the last few rates is too noisy to compare, and that of the last one alone is
-/// always zero, which would put every minimum past the half. A minimum past `n / 2` means the run
-/// is still too short to judge, and gives `None`.
+/// `MSER(d)` is `Σ_{i>d} (Yᵢ − Ȳ_d)² / (n − d)²`, the squared standard error of the rates left
+/// after cutting the first `d`. A cut leaving fewer than [`MSER_MIN_TAIL`] batches is not
+/// considered: the variance of the last few rates is too noisy to compare, and that of the last one
+/// alone is always zero, which would put every minimum past the half. A minimum past `n / 2` means
+/// the run is still too short to judge, and gives `None`.
 fn warmup_batches(rates: &[f64]) -> Option<usize> {
     // Welford's running variance over the tail, grown from the last rate backwards, so every
     // cut's MSER comes in one pass, and a constant tail's is exactly zero.

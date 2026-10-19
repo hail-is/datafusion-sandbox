@@ -9,8 +9,8 @@ use std::{fmt, sync::Arc};
 /// A store that fails every write under one prefix and serves everything else.
 ///
 /// It delegates every operation to its inner store, except a put, a multipart upload, or a copy
-/// whose destination is under the prefix, which fails before anything is stored. Prefixes match whole path
-/// segments, as listing does.
+/// whose destination is under the prefix, which fails before anything is stored. Prefixes match
+/// whole path segments, as listing does.
 #[derive(Debug)]
 pub(super) struct FailingWrites {
     inner: Arc<dyn ObjectStore>,
