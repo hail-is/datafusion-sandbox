@@ -835,6 +835,9 @@ pub fn sample_rows() -> Vec<SampleRow> {
 /// The rows on `contig`, written in `representation`: an equality on `contig`, or under packed
 /// the locus interval from the contig's first position to the next contig's.
 ///
+/// Name `contig` as the contig-position representation stores it, such as `chr01`: the equality
+/// matches only that spelling.
+///
 /// This stays separate from [`LocusInterval::filter`] because its contig-position equality is the
 /// simpler pushdown shape its caller tests.
 ///
@@ -843,10 +846,10 @@ pub fn sample_rows() -> Vec<SampleRow> {
 /// Panics if `contig` is not a contig name the library can read an ordinal from.
 #[must_use]
 pub fn contig_filter(representation: LocusRepresentation, contig: &str) -> Expr {
+    let first = Locus::from_contig_name(contig, 0).unwrap();
     match representation {
         LocusRepresentation::ContigPosition => col("contig").eq(lit(contig)),
         LocusRepresentation::Packed => {
-            let first = Locus::from_contig_name(contig, 0).unwrap();
             let next_contig = first.contig_ordinal().checked_add(1).unwrap();
             LocusInterval::new(Some(first), Some(Locus::new(next_contig, 0).unwrap()))
                 .unwrap()
@@ -927,8 +930,17 @@ pub fn locus_cells(locus: Locus, representation: LocusRepresentation) -> Vec<Str
 /// Panics if `batch` has no column `name`, or it is not a string column without nulls.
 #[must_use]
 pub fn string_column(batch: &RecordBatch, name: &str) -> Vec<String> {
+    let column = batch.column_by_name(name).unwrap();
+    assert!(
+        matches!(
+            column.data_type(),
+            DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
+        ),
+        "{name} is not a string column: {}",
+        column.data_type()
+    );
     // Parquet reads strings back as `Utf8View`; cast so one array type covers both formats.
-    let values = cast(batch.column_by_name(name).unwrap(), &DataType::Utf8).unwrap();
+    let values = cast(column, &DataType::Utf8).unwrap();
     let values = values.as_any().downcast_ref::<StringArray>().unwrap();
     values
         .iter()
