@@ -2,15 +2,15 @@
 //! remains, and the reads planning and execution make.
 
 use super::{
-    column_statistics, file, file_with_rows, file_with_statistics,
-    metadata_collection::MeteredFormat, multi_column_table, sample_table, sample_table_with_format,
-    scalar_table, table,
+    column_statistics, file, file_with_rows, file_with_statistics, multi_column_table,
+    sample_table, sample_table_with_format, scalar_table, table,
 };
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::pipeline::{self, PipelineOptions};
 use crate::testing::{
     fixture::{self, DatasetFixture, FixtureFormat, block_on},
     memory_store::MemoryStore,
+    metered_format::MeteredFormat,
     plan_shape::PlanShape,
     session::hostile_config,
 };
