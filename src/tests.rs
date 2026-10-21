@@ -6,6 +6,7 @@ mod formulation;
 pub(crate) mod formulation_plans;
 mod locus;
 mod metrics_directory;
+mod ordered_frame;
 mod pipeline;
 pub(crate) mod plan_shape;
 mod row_ordering;
