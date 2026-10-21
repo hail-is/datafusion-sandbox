@@ -2,3 +2,6 @@
 //! under the `stored` module's `tests` subtree.
 
 mod file_order;
+mod file_pruning;
+mod ordered_source;
+mod statistics_source;

@@ -20,9 +20,11 @@
 //! - `formulation_plans` discovers datasets over the shared fixtures and plans formulations over
 //!   them through a sink, for the suites of `formulation` and its plan builders.
 //! - `formulations` builds formulations and split points from compact test notation.
+//! - `metered_format` is a file format adapter that records, scripts, and gates metadata inference.
 //! - `plan_shape` observes a physical plan's shape and asserts the shapes this crate relies on.
 //! - `probe_series` makes synthetic series of progress samples and the decisions a probe would make
 //!   over them.
+//! - `recording_cache` is a file statistics cache adapter that records the keys read and written.
 //! - `run_records` builds run records for tests that assert on none of their facts.
 //! - `session` builds the hostile session config.
 
@@ -36,9 +38,13 @@ pub(crate) mod formulations;
 pub mod generated;
 pub mod memory_store;
 #[cfg(test)]
+pub(crate) mod metered_format;
+#[cfg(test)]
 pub(crate) mod plan_shape;
 #[cfg(test)]
 pub(crate) mod probe_series;
+#[cfg(test)]
+pub(crate) mod recording_cache;
 #[cfg(test)]
 pub(crate) mod run_records;
 #[cfg(test)]

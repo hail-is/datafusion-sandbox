@@ -7,310 +7,24 @@ use crate::stored::sorted_table::SortedTable;
 use crate::testing::{
     fixture::{self, FixtureFormat, block_on},
     memory_store::MemoryStore,
+    metered_format::{Gate, MeteredFormat},
     plan_shape::PlanShape,
+    recording_cache::{RecordingCache, cache_key, session_with_cache},
 };
 
-use async_trait::async_trait;
 use datafusion::{
-    arrow::datatypes::{DataType, Field, Schema, SchemaRef},
-    catalog::Session,
-    common::{Result, Statistics, TableReference, config::ConfigNonZeroUsize, stats::Precision},
-    datasource::{
-        file_format::{
-            FileFormat, FileMeta, file_compression_type::FileCompressionType,
-            parquet::ParquetFormat,
-        },
-        listing::PartitionedFile,
-        physical_plan::{FileScanConfig, FileSource},
-        table_schema::TableSchema,
-    },
-    execution::{
-        cache::{
-            Cache, CacheEntryInfo, SchemaFingerprint, TableScopedPath,
-            cache_manager::{CacheManagerConfig, CachedFileMetadata},
-            default_cache::DefaultCache,
-        },
-        runtime_env::RuntimeEnvBuilder,
-    },
+    arrow::datatypes::{DataType, Field, Schema},
+    common::{Statistics, config::ConfigNonZeroUsize, stats::Precision},
+    datasource::{file_format::FileMeta, listing::PartitionedFile},
+    execution::cache::{Cache, SchemaFingerprint, cache_manager::CachedFileMetadata},
     physical_expr::{LexOrdering, PhysicalSortExpr, expressions::Column},
     physical_plan::ExecutionPlan,
     prelude::{SessionConfig, SessionContext},
 };
-use object_store::{ObjectMeta, ObjectStore};
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 /// Fails a planning future that would otherwise hang on a gate the table never opens.
 const PLANNING_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How a metered format releases an inference once it has started.
-#[derive(Clone)]
-enum Gate {
-    /// Release immediately.
-    Open,
-    /// Hold every inference until `inferences` of them have started at once.
-    UntilStarted { inferences: usize },
-    /// Complete inferences in exactly this path order.
-    CompleteInOrder(Vec<String>),
-}
-
-/// A file format that records every metadata inference and can script its results.
-///
-/// Delegates everything else to `inner`. `infer_stats` and `infer_ordering` panic: the
-/// table must ask for both products with one call.
-pub(super) struct MeteredFormat {
-    inner: Arc<dyn FileFormat>,
-    scripted: Option<HashMap<String, FileMeta>>,
-    gate: Gate,
-    started: Mutex<Vec<String>>,
-    completed: Mutex<Vec<String>>,
-    in_flight: AtomicUsize,
-    peak_in_flight: AtomicUsize,
-}
-
-impl std::fmt::Debug for MeteredFormat {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("MeteredFormat")
-            .finish_non_exhaustive()
-    }
-}
-
-impl MeteredFormat {
-    pub(super) fn delegating(inner: Arc<dyn FileFormat>) -> Self {
-        Self {
-            inner,
-            scripted: None,
-            gate: Gate::Open,
-            started: Mutex::new(Vec::new()),
-            completed: Mutex::new(Vec::new()),
-            in_flight: AtomicUsize::new(0),
-            peak_in_flight: AtomicUsize::new(0),
-        }
-    }
-
-    /// Answers inferences from `scripted` without touching any store.
-    fn scripted(scripted: Vec<(&str, FileMeta)>, gate: Gate) -> Self {
-        Self {
-            scripted: Some(
-                scripted
-                    .into_iter()
-                    .map(|(path, meta)| (path.to_string(), meta))
-                    .collect(),
-            ),
-            gate,
-            ..Self::delegating(Arc::new(ParquetFormat::default()))
-        }
-    }
-
-    pub(super) fn started(&self) -> Vec<String> {
-        self.started.lock().unwrap().clone()
-    }
-
-    fn completed(&self) -> Vec<String> {
-        self.completed.lock().unwrap().clone()
-    }
-
-    async fn wait_for_gate(&self, path: &str) {
-        match &self.gate {
-            Gate::Open => {}
-            Gate::UntilStarted { inferences } => {
-                while self.started.lock().unwrap().len() < *inferences {
-                    tokio::task::yield_now().await;
-                }
-            }
-            Gate::CompleteInOrder(order) => {
-                let turn = order
-                    .iter()
-                    .position(|scripted| scripted == path)
-                    .unwrap_or_else(|| panic!("{path} is not in the completion order"));
-                while self.completed.lock().unwrap().len() < turn {
-                    tokio::task::yield_now().await;
-                }
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl FileFormat for MeteredFormat {
-    fn get_ext(&self) -> String {
-        self.inner.get_ext()
-    }
-
-    fn get_ext_with_compression(&self, compression: &FileCompressionType) -> Result<String> {
-        self.inner.get_ext_with_compression(compression)
-    }
-
-    fn compression_type(&self) -> Option<FileCompressionType> {
-        self.inner.compression_type()
-    }
-
-    async fn infer_schema(
-        &self,
-        state: &dyn Session,
-        store: &Arc<dyn ObjectStore>,
-        objects: &[ObjectMeta],
-    ) -> Result<SchemaRef> {
-        self.inner.infer_schema(state, store, objects).await
-    }
-
-    async fn infer_stats(
-        &self,
-        _state: &dyn Session,
-        _store: &Arc<dyn ObjectStore>,
-        _table_schema: SchemaRef,
-        object: &ObjectMeta,
-    ) -> Result<Statistics> {
-        panic!(
-            "statistics for {} must be inferred together with ordering",
-            object.location
-        )
-    }
-
-    async fn infer_ordering(
-        &self,
-        _state: &dyn Session,
-        _store: &Arc<dyn ObjectStore>,
-        _table_schema: SchemaRef,
-        object: &ObjectMeta,
-    ) -> Result<Option<LexOrdering>> {
-        panic!(
-            "ordering for {} must be inferred together with statistics",
-            object.location
-        )
-    }
-
-    async fn infer_stats_and_ordering(
-        &self,
-        state: &dyn Session,
-        store: &Arc<dyn ObjectStore>,
-        table_schema: SchemaRef,
-        object: &ObjectMeta,
-    ) -> Result<FileMeta> {
-        let path = object.location.to_string();
-        self.started.lock().unwrap().push(path.clone());
-        let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-        self.peak_in_flight.fetch_max(in_flight, Ordering::SeqCst);
-        self.wait_for_gate(&path).await;
-        let meta = match &self.scripted {
-            Some(scripted) => scripted
-                .get(&path)
-                .cloned()
-                .unwrap_or_else(|| panic!("no scripted metadata for {path}")),
-            None => {
-                self.inner
-                    .infer_stats_and_ordering(state, store, table_schema, object)
-                    .await?
-            }
-        };
-        self.in_flight.fetch_sub(1, Ordering::SeqCst);
-        self.completed.lock().unwrap().push(path);
-        Ok(meta)
-    }
-
-    async fn create_physical_plan(
-        &self,
-        state: &dyn Session,
-        conf: FileScanConfig,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.inner.create_physical_plan(state, conf).await
-    }
-
-    fn file_source(&self, table_schema: TableSchema) -> Arc<dyn FileSource> {
-        self.inner.file_source(table_schema)
-    }
-}
-
-/// The runtime's file statistics cache, recording which keys were read and written.
-struct RecordingCache {
-    inner: DefaultCache<TableScopedPath, CachedFileMetadata>,
-    gets: Mutex<Vec<TableScopedPath>>,
-    puts: Mutex<Vec<TableScopedPath>>,
-}
-
-impl RecordingCache {
-    fn new() -> Self {
-        Self {
-            inner: DefaultCache::new(usize::MAX),
-            gets: Mutex::new(Vec::new()),
-            puts: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl Cache<TableScopedPath, CachedFileMetadata> for RecordingCache {
-    fn get(&self, key: &TableScopedPath) -> Option<CachedFileMetadata> {
-        self.gets.lock().unwrap().push(key.clone());
-        self.inner.get(key)
-    }
-
-    fn put(&self, key: &TableScopedPath, value: CachedFileMetadata) -> Option<CachedFileMetadata> {
-        self.puts.lock().unwrap().push(key.clone());
-        self.inner.put(key, value)
-    }
-
-    fn remove(&self, key: &TableScopedPath) -> Option<CachedFileMetadata> {
-        self.inner.remove(key)
-    }
-
-    fn contains_key(&self, key: &TableScopedPath) -> bool {
-        self.inner.contains_key(key)
-    }
-
-    fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    fn clear(&self) {
-        self.inner.clear();
-    }
-
-    fn name(&self) -> String {
-        "RecordingCache".to_string()
-    }
-
-    fn cache_limit(&self) -> usize {
-        self.inner.cache_limit()
-    }
-
-    fn update_cache_limit(&self, limit: usize) {
-        self.inner.update_cache_limit(limit);
-    }
-
-    fn cache_ttl(&self) -> Option<Duration> {
-        self.inner.cache_ttl()
-    }
-
-    fn update_cache_ttl(&self, ttl: Option<Duration>) {
-        self.inner.update_cache_ttl(ttl);
-    }
-
-    fn drop_table_entries(&self, table_ref: &TableReference) -> Result<()> {
-        self.inner.drop_table_entries(table_ref)
-    }
-
-    fn list_entries(
-        &self,
-    ) -> datafusion::common::HashMap<TableScopedPath, CacheEntryInfo<CachedFileMetadata>> {
-        self.inner.list_entries()
-    }
-}
-
-/// A session whose runtime holds `cache` as its file statistics cache.
-fn session_with_cache(config: SessionConfig, cache: Arc<RecordingCache>) -> SessionContext {
-    let runtime = RuntimeEnvBuilder::new()
-        .with_cache_manager(CacheManagerConfig::default().with_file_statistics_cache(Some(cache)))
-        .build_arc()
-        .unwrap();
-    SessionContext::new_with_config_rt(config, runtime)
-}
 
 /// `super::table` reading through a metered `format`.
 fn table_with_format(
@@ -347,13 +61,6 @@ fn footer_ordering() -> LexOrdering {
         "position", 0,
     )))])
     .unwrap()
-}
-
-fn key(path: &str) -> TableScopedPath {
-    TableScopedPath {
-        table: None,
-        path: object_store::path::Path::from(path),
-    }
 }
 
 fn fingerprint(schema: &Schema) -> Arc<SchemaFingerprint> {
@@ -454,7 +161,7 @@ async fn inference_runs_concurrently_up_to_the_session_metadata_fetch_concurrenc
 
         assert_eq!(paths, ["d.parquet", "c.parquet", "b.parquet", "a.parquet"]);
         assert_eq!(
-            format.peak_in_flight.load(Ordering::SeqCst),
+            format.peak_in_flight(),
             concurrency,
             "peak in-flight inferences must equal the session bound {concurrency}"
         );
@@ -570,7 +277,7 @@ async fn valid_cache_entries_are_reused_and_stale_ones_are_replaced() {
     for (case, meta, schema_fingerprint, reused) in cases {
         cache.clear();
         cache.put(
-            &key("stored.parquet"),
+            &cache_key("stored.parquet"),
             CachedFileMetadata::new(
                 meta,
                 schema_fingerprint,
@@ -597,7 +304,7 @@ async fn valid_cache_entries_are_reused_and_stale_ones_are_replaced() {
             inferred.sort();
             assert_eq!(inferred, ["other.parquet", "stored.parquet"], "{case}");
             assert_eq!(
-                cache.get(&key("stored.parquet")),
+                cache.get(&cache_key("stored.parquet")),
                 Some(CachedFileMetadata::new(
                     stored.object_meta.clone(),
                     fingerprint(&schema()),
@@ -608,7 +315,7 @@ async fn valid_cache_entries_are_reused_and_stale_ones_are_replaced() {
             );
         }
         assert_eq!(
-            cache.get(&key("other.parquet")),
+            cache.get(&cache_key("other.parquet")),
             Some(CachedFileMetadata::new(
                 other.object_meta.clone(),
                 fingerprint(&schema()),
@@ -629,7 +336,7 @@ async fn attached_statistics_bypass_the_cache_and_inference() {
     let attached = file("attached.parquet", Some(11), Some(20));
     // A valid entry that would place `attached` first if it were consulted.
     cache.put(
-        &key("attached.parquet"),
+        &cache_key("attached.parquet"),
         CachedFileMetadata::new(
             attached.object_meta.clone(),
             fingerprint(&schema()),
@@ -637,7 +344,7 @@ async fn attached_statistics_bypass_the_cache_and_inference() {
             None,
         ),
     );
-    cache.puts.lock().unwrap().clear();
+    cache.take_puts();
     let format = Arc::new(MeteredFormat::scripted(
         vec![("inferred.parquet", position_meta(1, 10))],
         Gate::Open,
@@ -652,6 +359,6 @@ async fn attached_statistics_bypass_the_cache_and_inference() {
 
     assert_eq!(paths, ["inferred.parquet", "attached.parquet"]);
     assert_eq!(format.started(), ["inferred.parquet"]);
-    assert_eq!(*cache.gets.lock().unwrap(), [key("inferred.parquet")]);
-    assert_eq!(*cache.puts.lock().unwrap(), [key("inferred.parquet")]);
+    assert_eq!(cache.take_gets(), [cache_key("inferred.parquet")]);
+    assert_eq!(cache.take_puts(), [cache_key("inferred.parquet")]);
 }
