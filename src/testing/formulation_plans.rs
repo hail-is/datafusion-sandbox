@@ -138,15 +138,21 @@ fn discovered(
     format: FixtureFormat,
     ordering: RowOrdering,
 ) -> FixtureDataset {
-    let ctx = SessionContext::new();
-    fixture.register(&ctx);
-    let dataset = block_on(Dataset::discover(
-        &ctx,
-        fixture.table_path().clone(),
-        fixture.input_format(),
-        ordering,
-        None,
-    ))
+    // Discovery reads multi-sample tables' sample annotation tables, which executes plans.
+    let dataset = pipeline::run(
+        move |ctx| async move {
+            fixture.register(&ctx);
+            Dataset::discover(
+                &ctx,
+                fixture.table_path().clone(),
+                fixture.input_format(),
+                ordering,
+                None,
+            )
+            .await
+        },
+        PipelineOptions::single_threaded(),
+    )
     .unwrap();
     FixtureDataset {
         fixture,

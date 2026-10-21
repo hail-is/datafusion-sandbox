@@ -13,6 +13,9 @@
 
 mod failing_writes;
 
+#[cfg(test)]
+mod tests;
+
 use failing_writes::FailingWrites;
 
 use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};

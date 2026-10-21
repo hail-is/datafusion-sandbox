@@ -43,3 +43,6 @@ pub(crate) mod probe_series;
 pub(crate) mod run_records;
 #[cfg(test)]
 pub(crate) mod session;
+
+#[cfg(test)]
+mod tests;
