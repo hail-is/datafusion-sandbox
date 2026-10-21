@@ -23,15 +23,17 @@ use datafusion::{
         record_batch::RecordBatch,
     },
     catalog::{Session, streaming::StreamingTable},
+    common::tree_node::TreeNodeRecursion,
     datasource::sink::DataSinkExec,
     error::{DataFusionError, Result},
     execution::{SendableRecordBatchStream, TaskContext},
-    physical_expr::LexRequirement,
+    physical_expr::{LexRequirement, PhysicalExpr},
     physical_plan::{
-        ChildrenPropertiesMode, Distribution, ExecutionPlan, ExecutionPlanProperties,
-        ReplaceChildrenOptions,
+        ChildrenPropertiesMode, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan,
+        ExecutionPlanProperties, PlanProperties, ReplaceChildrenOptions,
         coalesce_partitions::CoalescePartitionsExec,
         filter::FilterExec,
+        metrics::MetricsSet,
         projection::ProjectionExec,
         sorts::{sort::SortExec, sort_preserving_merge::SortPreservingMergeExec},
         stream::RecordBatchStreamAdapter,
@@ -41,7 +43,7 @@ use datafusion::{
     prelude::{DataFrame, SessionContext, col, lit},
 };
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 
 use std::{
     fmt,
@@ -489,8 +491,10 @@ impl SinkTarget for CollectingPartitions {
 
 /// Probing a plan that never finishes stops it at the maximum duration, capped, with no
 /// partition end. The samples start near the start of execution, take the time forward, and
-/// their rows only increase; the plan dropped at the stop still reports its metrics, where the
-/// operator feeding the sink holds the rows the probe says the sink received.
+/// their rows never decrease; the plan dropped at the stop still reports its metrics, where the
+/// operator feeding the sink holds the rows the probe says the sink received. It does not claim
+/// that rows arrive before the cap, since a loaded machine can starve the plan past it; the probe
+/// of a plan that finishes shows that samples count rows.
 #[test]
 fn probing_a_plan_that_never_finishes_stops_it_capped() {
     let max_duration = Duration::from_millis(300);
@@ -510,7 +514,6 @@ fn probing_a_plan_that_never_finishes_stops_it_capped() {
         assert!(pair[0].elapsed_ns < pair[1].elapsed_ns, "{pair:?}");
         assert!(pair[0].rows <= pair[1].rows, "{pair:?}");
     }
-    assert!(last.rows > samples[0].rows, "{samples:?}");
     assert_eq!(probed.decision.window_end_ns, last.elapsed_ns);
     assert!(probed.rows_received >= last.rows);
     assert!(probed.execute_ns >= last.elapsed_ns);
@@ -543,10 +546,137 @@ fn probing_with_a_zero_poll_period_is_refused() {
         ..ProbeSettings::default()
     };
 
-    let error = try_probe_generated(settings, |ctx| make_range_table(ctx, 100, 64)).unwrap_err();
+    let error = try_probe_generated(
+        settings,
+        |ctx| make_range_table(ctx, 100, 64),
+        |target| Arc::new(target),
+    )
+    .unwrap_err();
 
     let message = error.to_string();
     assert!(message.contains("poll period"), "{message}");
+}
+
+/// A reading taken before the operator feeding the sink has executed, so before it reports any
+/// output rows, counts none, and the probe goes on to receive every row. The operator here
+/// executes its filter only once the probe first polls the plan, which it does only after its
+/// first reading, so that reading always precedes it.
+#[test]
+fn a_reading_before_the_operator_feeding_the_sink_executes_counts_no_rows() {
+    let (probed, filter_rows) = try_probe_generated(
+        ProbeSettings::default(),
+        |ctx| make_range_table(ctx, 10_000, 64),
+        |target| Arc::new(PlanBehindExecuteOnPoll(target)),
+    )
+    .unwrap();
+
+    assert_eq!(probed.plan.children()[0].name(), "ExecuteOnPoll");
+    assert_eq!(probed.samples[0].rows, 0, "{:?}", probed.samples);
+    assert_eq!(probed.decision.stop_reason, StopReason::Completed);
+    assert_eq!(probed.samples.last().unwrap().rows, 10_000);
+    assert_eq!(probed.rows_received, 10_000);
+    assert_eq!(filter_rows, 10_000);
+}
+
+/// A target planning `DataSinkTarget`'s sink over its input behind an [`ExecuteOnPoll`].
+#[derive(Debug)]
+struct PlanBehindExecuteOnPoll(DataSinkTarget);
+
+#[async_trait::async_trait]
+impl SinkTarget for PlanBehindExecuteOnPoll {
+    async fn plan(
+        &self,
+        state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        ordering: Option<LexRequirement>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.0
+            .plan(state, Arc::new(ExecuteOnPoll(input)), ordering)
+            .await
+    }
+}
+
+/// An operator passing its input through unchanged that executes the input only once its own
+/// stream is first polled, so the input's metrics, its output rows among them, exist only from
+/// then on. It reports its input's metrics as its own.
+#[derive(Debug)]
+struct ExecuteOnPoll(Arc<dyn ExecutionPlan>);
+
+impl DisplayAs for ExecuteOnPoll {
+    fn fmt_as(&self, _: DisplayFormatType, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "ExecuteOnPoll")
+    }
+}
+
+impl ExecutionPlan for ExecuteOnPoll {
+    fn name(&self) -> &'static str {
+        "ExecuteOnPoll"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        self.0.properties()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.0]
+    }
+
+    fn maintains_input_order(&self) -> Vec<bool> {
+        vec![true]
+    }
+
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        vec![false]
+    }
+
+    fn replace_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+        _: ReplaceChildrenOptions,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        match children.as_slice() {
+            [input] => Ok(Arc::new(Self(Arc::clone(input)))),
+            _ => Err(DataFusionError::Internal(format!(
+                "ExecuteOnPoll takes one child, got {}",
+                children.len()
+            ))),
+        }
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.replace_children(
+            children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+    }
+
+    fn apply_expressions(
+        &self,
+        _: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let input = Arc::clone(&self.0);
+        let stream =
+            futures::stream::once(async move { input.execute(partition, context) }).try_flatten();
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            self.schema(),
+            stream,
+        )))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.0.metrics()
+    }
 }
 
 /// A shadow probe runs its plan to completion, past its maximum duration and past its first
@@ -732,21 +862,28 @@ fn probe_generated(
         max_duration,
         ..ProbeSettings::default()
     };
-    try_probe_generated(settings, build).unwrap()
+    try_probe_generated(settings, build, |target| Arc::new(target)).unwrap()
 }
 
-/// Probes a drain of the generated table `build` makes with `settings`, filtered so that the
-/// operator feeding the sink counts its rows. Returns the probe and the output rows of the
+/// Probes, with `settings`, the generated table `build` makes, filtered so that the operator
+/// feeding the sink counts its rows, through the target `target` makes of a draining sink's.
+/// Round-robin repartitioning is off, so the filter keeps the table's single partition and nothing
+/// is placed between it and what the target plans. Returns the probe and the output rows of the
 /// filter, over its partitions, in the metrics of the plan it stopped.
 fn try_probe_generated(
     settings: ProbeSettings,
     build: impl FnOnce(&SessionContext) -> Result<DataFrame> + Send + 'static,
+    target: impl FnOnce(DataSinkTarget) -> Arc<dyn SinkTarget> + Send + 'static,
 ) -> Result<(ProbedSink, u64)> {
     pipeline::run(
         move |ctx| async move {
+            ctx.state_ref().write().config_mut().options_mut().set(
+                "datafusion.optimizer.enable_round_robin_repartition",
+                "false",
+            )?;
             let frame = build(&ctx)?.filter(col("idx").gt_eq(lit(0)))?;
             let sink = Arc::new(DrainingSink::new(Arc::clone(frame.schema().inner())));
-            let target = Arc::new(DataSinkTarget::new(sink));
+            let target = target(DataSinkTarget::new(sink));
             let probed = sink::probe(
                 sink::run_into(frame, "drain", None, target)?,
                 &settings,
