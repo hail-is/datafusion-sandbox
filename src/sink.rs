@@ -177,8 +177,10 @@ pub struct ProbedSink {
 /// the session's IO runtime reads the metrics of the operator feeding the sink every poll period,
 /// starting as execution starts, and after each reading the probe decides whether to stop. The
 /// stream is polled only once the first reading is in, so the samples start at the start of
-/// execution. When the stream ends before a decision, the sampler takes one last reading at once.
-/// Stopping drops the stream, which aborts the plan's tasks.
+/// execution. The operator feeding the sink reports no output rows until a partition of it
+/// executes, and a reading taken before then counts 0 rows. When the stream ends before a decision,
+/// the sampler takes one last reading at once. Stopping drops the stream, which aborts the plan's
+/// tasks.
 ///
 /// A shadow probe instead records what [`throughput_probe::would_stop`] decides after each
 /// reading, and runs the plan to completion. Its decision is the one the rule makes after the last
@@ -187,8 +189,8 @@ pub struct ProbedSink {
 /// # Errors
 ///
 /// Returns an error if the poll period is zero, the session has no IO runtime, the plan cannot be
-/// built or executed, the sink has no single input, or that input reports no output rows or ends
-/// without a finished partition.
+/// built or executed, the sink has no single input, or that input ends without a finished
+/// partition.
 pub async fn probe(
     frame: DataFrame,
     settings: &ProbeSettings,
@@ -250,10 +252,6 @@ pub async fn probe(
                             feeding.name()
                         )))?;
                 };
-                let rows = rows.ok_or_else(|| DataFusionError::Internal(format!(
-                    "{}, the operator feeding the sink, reports no output rows to sample",
-                    feeding.name()
-                )))?;
                 samples.push(ProgressSample { elapsed_ns, rows });
                 if finished && first_partition_end_ns.is_none() {
                     first_partition_end_ns = Some(elapsed_ns);
@@ -342,8 +340,9 @@ impl RuleEvaluation<'_> {
 /// One reading of the operator feeding a probed sink.
 struct Reading {
     elapsed_ns: u64,
-    /// `None` if the operator reports no output rows.
-    rows: Option<u64>,
+    /// The operator's output rows: 0 until a partition of it has executed and registered its
+    /// count.
+    rows: u64,
     /// Whether any partition of the operator has an end timestamp.
     finished: bool,
 }
@@ -372,7 +371,7 @@ async fn sample(
             rows: metrics
                 .as_ref()
                 .and_then(MetricsSet::output_rows)
-                .map(to_u64),
+                .map_or(0, to_u64),
             finished: metrics.iter().flat_map(MetricsSet::iter).any(|metric| {
                 matches!(metric.value(), MetricValue::EndTimestamp(end) if end.value().is_some())
             }),
