@@ -1,5 +1,5 @@
 use crate::{
-    tests::support::{noisy_series, recorded_would_stop},
+    testing::probe_series::{noisy_series, recorded_would_stop},
     throughput_probe::{self, Decision, ProbeSettings, ProgressSample, StopReason, TightnessCheck},
 };
 

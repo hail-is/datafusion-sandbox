@@ -21,14 +21,14 @@ use super::{expected_groups, formulations, formulations_over, reference_formulat
 use crate::formulation::Formulation;
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
 use crate::ordered_frame::OrderedFrame;
-use crate::testing::fixture::{self, FixtureFormat, SAMPLES, SampleRow, block_on};
-use crate::tests::{
+use crate::testing::{
+    fixture::{self, FixtureFormat, SAMPLES, SampleRow, block_on},
     formulation_plans::{
         FORMATS, FixtureDataset, REPRESENTATIONS, collected_batches, dataset, planned,
         shared_datasets, sink_plan,
     },
     plan_shape::PlanShape,
-    support::hostile_config,
+    session::hostile_config,
 };
 
 use datafusion::{logical_expr::Expr, physical_plan::ExecutionPlan};

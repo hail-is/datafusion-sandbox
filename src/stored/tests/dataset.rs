@@ -6,8 +6,8 @@
 use crate::testing::{
     fixture::{self, block_on},
     memory_store::MemoryStore,
+    plan_shape::PlanShape,
 };
-use crate::tests::plan_shape::PlanShape;
 
 use crate::{
     format::{InputFormat, OutputFormat},

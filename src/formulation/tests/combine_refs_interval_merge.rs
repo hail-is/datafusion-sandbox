@@ -11,7 +11,7 @@ use crate::formulation::combine_refs_interval_merge;
 use crate::locus::SplitPoints;
 use crate::ordered_frame::OrderedFrame;
 use crate::stored::dataset::Dataset;
-use crate::tests::{formulation_plans::PlanBuilder, support};
+use crate::testing::{formulation_plans::PlanBuilder, formulations};
 
 use datafusion::{error::Result, prelude::SessionContext};
 use futures::{FutureExt, future::BoxFuture};
@@ -34,7 +34,7 @@ impl IntervalMerge {
     /// The plan builder over the comma-separated `split_points`. An empty string means no split
     /// points and therefore one locus interval.
     fn new(split_points: &str) -> Self {
-        Self(support::split_points(split_points))
+        Self(formulations::split_points(split_points))
     }
 }
 

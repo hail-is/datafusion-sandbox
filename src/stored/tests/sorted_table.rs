@@ -5,6 +5,8 @@ mod metadata_collection;
 use crate::testing::{
     fixture::{self, DatasetFixture, FixtureFormat, block_on},
     memory_store::MemoryStore,
+    plan_shape::PlanShape,
+    session::hostile_config,
 };
 
 use crate::{
@@ -12,7 +14,6 @@ use crate::{
     pipeline::{self, PipelineOptions},
     row_ordering::RowOrdering,
     stored::sorted_table::{AttachedScalar, SortedTable},
-    tests::{plan_shape::PlanShape, support::hostile_config},
 };
 use datafusion::{
     arrow::{

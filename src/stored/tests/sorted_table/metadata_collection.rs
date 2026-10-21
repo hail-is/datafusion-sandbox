@@ -7,8 +7,8 @@ use crate::stored::sorted_table::SortedTable;
 use crate::testing::{
     fixture::{self, FixtureFormat, block_on},
     memory_store::MemoryStore,
+    plan_shape::PlanShape,
 };
-use crate::tests::plan_shape::PlanShape;
 
 use async_trait::async_trait;
 use datafusion::{

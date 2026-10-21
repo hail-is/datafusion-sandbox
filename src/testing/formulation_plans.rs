@@ -14,8 +14,10 @@ use crate::{
     row_ordering::{RowOrdering, StoredOrdering},
     sink,
     stored::dataset::Dataset,
-    testing::fixture::{self, FixtureFormat, INPUT_TABLES, Row, block_on},
-    tests::support::hostile_config,
+    testing::{
+        fixture::{self, FixtureFormat, INPUT_TABLES, Row, block_on},
+        session::hostile_config,
+    },
     write::WriteTarget,
 };
 

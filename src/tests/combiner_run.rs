@@ -1,5 +1,3 @@
-use crate::testing::{fixture, memory_store::MemoryStore};
-
 use crate::{
     combiner_run::{Action, CombinerRun, Outcome, PlanInputs},
     format::{InputFormat, OutputFormat},
@@ -9,11 +7,12 @@ use crate::{
     ordered_frame::OutputLayout,
     pipeline::{self, PipelineOptions},
     row_ordering::RowOrdering,
-    tests::{
+    testing::{
+        columns::{f64_values, string_values, timestamp_values, u64_values},
+        fixture,
+        formulations::{grouped_merge, interval_merge},
+        memory_store::MemoryStore,
         plan_shape::exec_names,
-        support::{
-            f64_values, grouped_merge, interval_merge, string_values, timestamp_values, u64_values,
-        },
     },
     throughput_probe::{self, Decision, ProbeKind, ProbeSettings, ProgressSample, StopReason},
     write::WriteTarget,

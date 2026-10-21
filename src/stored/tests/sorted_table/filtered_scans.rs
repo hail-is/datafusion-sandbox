@@ -7,13 +7,12 @@ use super::{
     scalar_table, table,
 };
 use crate::locus::{Locus, LocusInterval, LocusRepresentation};
+use crate::pipeline::{self, PipelineOptions};
 use crate::testing::{
     fixture::{self, DatasetFixture, FixtureFormat, block_on},
     memory_store::MemoryStore,
-};
-use crate::{
-    pipeline::{self, PipelineOptions},
-    tests::{plan_shape::PlanShape, support::hostile_config},
+    plan_shape::PlanShape,
+    session::hostile_config,
 };
 
 use async_trait::async_trait;

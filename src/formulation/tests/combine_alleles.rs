@@ -3,8 +3,8 @@ use crate::locus::LocusRepresentation;
 use crate::ordered_frame::OrderedFrame;
 use crate::row_ordering::RowOrdering;
 use crate::stored::dataset::Dataset;
-use crate::testing::fixture::{SAMPLES, block_on};
-use crate::tests::{
+use crate::testing::{
+    fixture::{SAMPLES, block_on},
     formulation_plans::{
         FORMATS, PlanBuilder, REPRESENTATIONS, dataset, mixed_dataset, physical_plan,
     },

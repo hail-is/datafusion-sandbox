@@ -20,15 +20,16 @@ use crate::{
     locus::LocusRepresentation,
     row_ordering::RowOrdering,
     stored::dataset::InputTable,
-    testing::fixture::{FixtureFormat, block_on},
-    tests::{
+    testing::{
+        fixture::{FixtureFormat, block_on},
         formulation_plans::{
             FORMATS, FixtureDataset, REPRESENTATIONS, dataset, dataset_with_ordering,
             drained_plan_and_ordering, file_sink_plan, physical_plan, physical_plan_with_target,
             planned, shared_datasets,
         },
+        formulations::{grouped_merge, interval_merge},
         plan_shape::PlanShape,
-        support::{grouped_merge, hostile_config, interval_merge},
+        session::hostile_config,
     },
 };
 use datafusion::{

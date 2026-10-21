@@ -7,13 +7,12 @@ use crate::{
     pipeline::{self, PipelineOptions},
     sink::{self, CollectingSink, DataSinkTarget},
     testing::{
+        columns::{f64_values, string_values, timestamp_values, u64_values},
         fixture::{self, RecordedRun},
         generated::make_range_table,
         memory_store::MemoryStore,
-    },
-    tests::support::{
-        f64_values, noisy_series, recorded_would_stop, run_record, string_values, timestamp_values,
-        u64_values,
+        probe_series::{noisy_series, recorded_would_stop},
+        run_records::run_record,
     },
     throughput_probe::{self, ProbeSettings, ProbedKind, ProgressSample},
 };
