@@ -1,13 +1,13 @@
 use super::{IntervalMerge, THREE_INTERVALS, WITH_AN_EMPTY_INTERVAL};
 use crate::formulation::Formulation;
 use crate::pipeline::{self, PipelineOptions};
-use crate::testing::fixture::{self, Row, SAMPLES};
-use crate::tests::{
+use crate::testing::{
+    fixture::{self, Row, SAMPLES},
     formulation_plans::{
         FORMATS, FixtureDataset, PlanBuilder, REPRESENTATIONS, collected_rows, dataset, loci,
         output_format, output_path, planned,
     },
-    support::hostile_config,
+    session::hostile_config,
 };
 use crate::write::WriteTarget;
 

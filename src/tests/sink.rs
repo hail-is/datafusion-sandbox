@@ -1,7 +1,7 @@
 //! The sinks an action runs its frame into, and the ordering requirement they put on the plan.
 
-use super::plan_shape::PlanShape;
 use crate::testing::fixture::{self, DatasetFixture, FixtureFormat, SAMPLES, block_on};
+use crate::testing::plan_shape::PlanShape;
 use crate::{
     formulation::Formulation,
     locus::LocusRepresentation,

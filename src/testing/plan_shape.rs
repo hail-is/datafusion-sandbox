@@ -508,7 +508,7 @@ fn is_byte_range(text: &str) -> bool {
 /// Unlike [`PlanShape::operators`], this text-side observer is flat because explain output does not
 /// expose a typed plan and may be embedded in a table.
 #[must_use]
-pub(super) fn exec_names(plan: &str) -> Vec<&str> {
+pub(crate) fn exec_names(plan: &str) -> Vec<&str> {
     plan.split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|word| word.ends_with("Exec"))
         .collect()

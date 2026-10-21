@@ -1,8 +1,8 @@
 use crate::{
     metrics_directory::replay::{self, Grid, Replay, ShadowRun},
-    tests::support::{
-        assert_columns, f64_values, first_decision, noisy_series, recorded_would_stop,
-        string_values, u64_values,
+    testing::{
+        columns::{assert_columns, f64_values, string_values, u64_values},
+        probe_series::{first_decision, noisy_series, recorded_would_stop},
     },
     throughput_probe::{self, Decision, ProbeSettings, ProgressSample, StopReason},
 };

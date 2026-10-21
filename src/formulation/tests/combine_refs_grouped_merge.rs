@@ -7,14 +7,14 @@
 use crate::formulation::{Formulation, combine_refs_grouped_merge};
 use crate::ordered_frame::OrderedFrame;
 use crate::stored::dataset::{Dataset, InputTable};
-use crate::testing::fixture::{self, SAMPLES};
-use crate::tests::{
+use crate::testing::{
+    fixture::{self, SAMPLES},
     formulation_plans::{
         FORMATS, PlanBuilder, REPRESENTATIONS, collected_rows, dataset, drained_plan,
         file_sink_plan, loci, physical_plan,
     },
     plan_shape::PlanShape,
-    support::hostile_config,
+    session::hostile_config,
 };
 
 use datafusion::{

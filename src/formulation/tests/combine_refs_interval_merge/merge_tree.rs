@@ -2,14 +2,14 @@ use super::{IntervalMerge, THREE_INTERVALS};
 use crate::locus::LocusRepresentation;
 use crate::pipeline;
 use crate::sink::PartitionedSinkExec;
-use crate::testing::fixture::{self, SAMPLES};
-use crate::tests::{
+use crate::testing::{
+    fixture::{self, SAMPLES},
     formulation_plans::{
         FORMATS, REPRESENTATIONS, dataset, drained_plan, drained_plan_and_ordering, file_sink_plan,
         mixed_dataset, shared_datasets,
     },
     plan_shape::PlanShape,
-    support::hostile_config,
+    session::hostile_config,
 };
 
 use datafusion::physical_plan::{

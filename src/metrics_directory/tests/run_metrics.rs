@@ -11,11 +11,12 @@ use crate::{
     sink::{self, CollectingSink, DataSinkTarget},
     stored::dataset::Dataset,
     testing::{
+        columns::{string_values, timestamp_values, u64_values},
         fixture::{self, FixtureFormat, SAMPLES},
+        formulations::{grouped_merge, interval_merge},
         generated::make_range_table,
         memory_store::MemoryStore,
     },
-    tests::support::{grouped_merge, interval_merge, string_values, timestamp_values, u64_values},
     write::WriteTarget,
 };
 

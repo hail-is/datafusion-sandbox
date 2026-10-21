@@ -17,6 +17,8 @@ file's suite may continue in a directory of files named for its concerns. The te
 through X's path and does not name private items of the parent, even though Rust allows a sibling to
 do so.
 
+> Superseded in part by [ADR 0020](0020-test-every-modules-interface-test-support-included.md). A test may name private items of its parent. The rest of this paragraph stands.
+
 This holds for private children too. A private child is a module whose callers are its parent's
 implementation, and it gets a suite like any other. Its tested interface lets a complex parent be
 understood through its children's interfaces, without reading their implementations. A sibling test
@@ -37,6 +39,8 @@ the tests beside them and keep the same rule, reaching tested modules through th
 no private item of the parent. Test support becomes public library code under `testing`, as `fixture`
 is, only when a crate test, benchmark, or example needs it. Nothing under `tests/`, `benches/`, or
 `examples/` observes a plan, so plan observation stays inside the library.
+
+> Superseded by [ADR 0020](0020-test-every-modules-interface-test-support-included.md). All test support lives under `testing`, `cfg(test)` unless a crate test, benchmark, or example needs it, and every support module has a suite.
 
 A crate test lives under `tests/` and is reserved for behavior that needs the built binary. The tests
 that run the CLI as a process live in `tests/cli.rs`, and every crate test is of that kind. "Module
@@ -95,3 +99,5 @@ The compiler does not fully enforce the intended sibling boundary. A sibling can
 of its parent and any `pub(crate)` item through `crate::`. Review must check that each module test
 reaches the tested module through its path. The old crate-test boundary enforced less useful access
 more strictly; this decision trades that enforcement for the visibility each module's real users have.
+
+> Since [ADR 0020](0020-test-every-modules-interface-test-support-included.md), naming a private item of the parent is allowed, so review no longer checks for it.

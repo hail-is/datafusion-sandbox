@@ -7,7 +7,11 @@ use crate::{
     metrics_directory::run_record::{
         self, FormulationRecord, ProbeRecord, RecordedProbe, RunRecord, WriteRecord,
     },
-    tests::support::{self, assert_columns, grouped_merge, interval_merge, string_values},
+    testing::{
+        columns::{assert_columns, string_values},
+        formulations::{grouped_merge, interval_merge},
+        run_records,
+    },
     throughput_probe::{Decision, ProbeKind, ProbeSettings, ProbedKind, StopReason},
     write::WriteTarget,
 };
@@ -266,9 +270,9 @@ fn unset_run_record_settings_are_null() {
         },
         write: Some(WriteRecord {
             compression: None,
-            ..support::run_record("run-1").write.unwrap()
+            ..run_records::run_record("run-1").write.unwrap()
         }),
-        ..support::run_record("run-1")
+        ..run_records::run_record("run-1")
     };
 
     let batch = run_record::run_record_batch(&record).unwrap();
@@ -322,7 +326,7 @@ fn a_drained_probe_leaves_its_write_and_missing_facts_null() {
             first_partition_end_ns: None,
             kind: ProbedKind::Probe,
         }),
-        ..support::run_record("run-1")
+        ..run_records::run_record("run-1")
     };
 
     let batch = run_record::run_record_batch(&record).unwrap();
@@ -364,7 +368,7 @@ fn a_shadow_probe_that_never_would_have_stopped_leaves_its_would_stop_columns_nu
             first_partition_end_ns: Some(1_000),
             kind: ProbedKind::Shadow { would_stop: None },
         }),
-        ..support::run_record("run-1")
+        ..run_records::run_record("run-1")
     };
 
     let batch = run_record::run_record_batch(&record).unwrap();
@@ -411,16 +415,16 @@ fn a_probe_s_run_record_reads_back_as_its_probe() {
     let records = [
         RunRecord {
             probe: Some(probe(ProbedKind::Shadow { would_stop: None })),
-            ..support::run_record("shadow")
+            ..run_records::run_record("shadow")
         },
         RunRecord {
             probe: Some(ProbeRecord {
                 first_partition_end_ns: None,
                 ..probe(ProbedKind::Probe)
             }),
-            ..support::run_record("probe")
+            ..run_records::run_record("probe")
         },
-        support::run_record("write"),
+        run_records::run_record("write"),
     ];
 
     let read_back: Vec<Option<RecordedProbe>> = records

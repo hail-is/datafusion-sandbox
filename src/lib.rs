@@ -20,9 +20,9 @@
 //! - [`throughput_probe`] holds a throughput probe's settings and progress samples, and decides
 //!   when it stops.
 //! - [`mod@write`] builds and executes file writes.
-//! - [`testing`] is public test support: dataset fixtures, the in-memory object store, and
-//!   generated tables, for module tests, crate tests, benchmarks, and examples. No module above
-//!   imports it.
+//! - [`testing`] holds all test support: dataset fixtures, the in-memory object store, and
+//!   generated tables, public for crate tests, benchmarks, and examples, and `cfg(test)` support
+//!   that only module tests use. No module above imports it.
 //!
 //! See the [project glossary](../GLOSSARY.md) for domain vocabulary.
 

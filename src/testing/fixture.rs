@@ -38,6 +38,9 @@
 //! A shared fixture's `output_root` is a directory on its store beside the dataset,
 //! where a test that writes puts its output, since discovery rejects stray entries.
 //!
+//! Module tests that plan a formulation take the shared fixtures as discovered datasets from
+//! `testing::formulation_plans`, which also restricts them to their last input tables.
+//!
 //! Everything in the in-memory inventories above is held in a [`MemoryStore`].
 //!
 //! Row helpers, for tests that filter a fixture and check what comes back:

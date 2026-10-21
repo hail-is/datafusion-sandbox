@@ -2,7 +2,7 @@
 
 use crate::{
     metrics_directory::progress_samples,
-    tests::support::{assert_columns, string_values, u64_values},
+    testing::columns::{assert_columns, string_values, u64_values},
     throughput_probe::ProgressSample,
 };
 
