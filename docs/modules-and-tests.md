@@ -101,7 +101,9 @@ and `tests/cli.rs`, which use local disk ([ADR 0010](adr/0010-keep-tests-on-in-m
 Any other test that touches the filesystem, directly or through a dependency its module hard-wires,
 carries a comment saying why that is unavoidable, so a later reader can check whether the reason
 still holds. Python tests under `python/tests` check tools that read files the Rust binary wrote,
-and may write their fixtures under pytest's `tmp_path`.
+and may write their fixtures under pytest's `tmp_path`. Where a suite needs files the Rust code
+writes, it reads a shared fixture checked in under `python/tests/fixtures/`, which a Rust module
+test keeps current ([ADR 0021](adr/0021-hold-the-rust-python-contracts-with-shared-fixtures.md)).
 
 Review check: a test outside the two disk files that reads or writes the filesystem without that
 comment is a violation. `tempdir`, `TempDir`, or a filesystem path that is opened, listed, or

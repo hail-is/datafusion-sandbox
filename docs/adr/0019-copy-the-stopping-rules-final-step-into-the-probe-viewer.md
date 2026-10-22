@@ -26,7 +26,8 @@ on 2026-09-30.
   its own rule finds under several settings, covering each edge above, and a Rust test fails if
   the checked-in fixture is stale. A Python test evaluates the page's transforms over the fixture
   with VegaFusion and compares. The Rust stop function and the page's transform each name the
-  other and the fixture.
+  other and the fixture. [ADR 0021](0021-hold-the-rust-python-contracts-with-shared-fixtures.md)
+  records this shared-fixture pattern for every contract between Rust and Python.
 - **The overview uses the real rule.** The chart of every settings combination, which is what a
   tuning decision is read from, takes its stops from Rust, not from the page's copy.
 

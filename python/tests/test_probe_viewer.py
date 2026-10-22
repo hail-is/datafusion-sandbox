@@ -3,6 +3,7 @@ import html
 import json
 import math
 import re
+from pathlib import Path
 
 import altair as alt
 import pyarrow as pa
@@ -1361,3 +1362,67 @@ def test_headline_under_a_replay_draws_a_run_that_settles_after_its_cap_and_mark
         1,
         0,
     )
+
+
+# The shared metrics directory fixture: the tables the Rust writers write from fixed synthetic
+# inputs, a measured write `write-r1` and a drained shadow probe `shadow-r1` of grouped-merge on 2
+# threads, replayed under a grid of two pairs and two values of each stop setting (ADR 0021).
+SHARED_FIXTURE = Path(__file__).parent / "fixtures" / "metrics_directory"
+
+
+def test_calibration_reads_the_shadow_probe_of_the_shared_fixture_and_leaves_its_measured_write():
+    calibration = probe_viewer.calibration(SHARED_FIXTURE)
+
+    assert calibration.runs["run_id"].to_pylist() == ["shadow-r1"]
+    assert calibration.never_settled == []
+    [run] = calibration.settled
+    assert (run.run_id, run.formulation, run.threads) == ("shadow-r1", "grouped-merge", 2)
+    assert run.band is not None
+    assert run.low < run.error < run.high
+
+
+def test_replay_reads_the_grid_and_the_recorded_settings_from_the_shared_fixture():
+    replay = probe_viewer.replay(SHARED_FIXTURE, probe_viewer.calibration(SHARED_FIXTURE))
+
+    assert replay.pairs == [(300_000_000, 5), (1_000_000_000, 5)]
+    assert replay.precisions == [0.05, 0.3]
+    assert replay.consecutive_checks == [1, 3]
+    assert replay.min_durations_ns == [0, 10_000_000_000]
+    recorded = probe_viewer.Settings(300_000_000, 5, 0.3, 1, 0)
+    assert replay.selection == recorded
+    assert replay.recorded == {recorded}
+
+
+def test_run_details_read_the_progress_samples_and_replay_of_the_shared_fixture():
+    calibration = probe_viewer.calibration(SHARED_FIXTURE)
+    replay = probe_viewer.replay(SHARED_FIXTURE, calibration)
+
+    [detail] = probe_viewer.run_details(SHARED_FIXTURE, calibration, replay)
+
+    assert (detail.run_id, detail.settled) == ("shadow-r1", True)
+    assert detail.samples
+    replayed = detail.replayed
+    assert replayed.missing == []
+    assert [
+        (baseline["batch_duration_ns"], baseline["window_groups"])
+        for baseline in replayed.baselines
+    ] == replay.pairs
+    assert {
+        (check["batch_duration_ns"], check["window_groups"]) for check in replayed.checks
+    } == set(replay.pairs)
+    assert all(check["rows"] is not None for check in replayed.checks)
+
+
+def test_page_over_the_shared_fixture_has_a_control_bar_spanning_its_grid(tmp_path):
+    page = probe_viewer.write_page(SHARED_FIXTURE, tmp_path / "probe-viewer.html").read_text()
+
+    assert {
+        param: (slider["min"], slider["max"], slider["value"])
+        for param, slider in sliders(page).items()
+    } == {
+        "precision": (0.05, 0.3, 0.3),
+        "consecutive_checks": (1, 3, 1),
+        "min_duration_ns": (0, 10, 0),
+    }
+    assert "shadow-r1" in page
+    assert "write-r1" not in page

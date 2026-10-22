@@ -21,6 +21,11 @@
 //! - `run_metrics` fills the run metrics table from an executed plan.
 //! - `replay` judges a shadow probe again under a [`Grid`], in memory, and fills the replay tables.
 //!
+//! The Python readers, `probe_viewer` and `sweep_report`, hard-code the layout and the tables'
+//! columns. The shared fixture `python/tests/fixtures/metrics_directory` holds the tables they read
+//! as these writers write them, and a module test fails when it is stale
+//! ([ADR 0021](../docs/adr/0021-hold-the-rust-python-contracts-with-shared-fixtures.md)).
+//!
 //! The tables share one way of storing values: counts and durations as saturating `UInt64`
 //! nanoseconds, timestamps as nanoseconds in UTC. The helpers at the end of this module state it.
 
