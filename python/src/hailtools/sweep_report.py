@@ -4,6 +4,10 @@ A campaign's metrics directory holds a run record for each run, and in runners/ 
 runner that ran a cell list, naming its machine type, threads per core, and the run id of each
 cell it ran. The report joins the two, and for each cell on each runner shape gives the whole-run
 and steady-state normalized throughput, and the peak RSS, of its repetitions.
+
+The run record columns it reads are those src/metrics_directory.rs writes. The shared fixture
+python/tests/fixtures/metrics_directory holds run records as Rust writes them, and this module's
+suite reads it (ADR 0021).
 """
 
 import json

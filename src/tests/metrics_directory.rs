@@ -1,5 +1,8 @@
 //! Checking and recording runs in a metrics directory on in-memory object stores, including ones
-//! that fail the writes under one of its tables.
+//! that fail the writes under one of its tables. `shared_fixture` checks the shared fixture the
+//! Python readers read.
+
+mod shared_fixture;
 
 use crate::{
     format::InputFormat,

@@ -1,5 +1,7 @@
 import json
 import math
+import shutil
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -204,3 +206,27 @@ def test_report_counts_the_recorded_runs_of_a_runner_that_recorded_no_outcomes(t
 def test_report_needs_runner_records(tmp_path):
     with pytest.raises(sweep_report.SweepReportError, match="no runner records"):
         sweep_report.report(tmp_path)
+
+
+# The shared metrics directory fixture: the tables the Rust writers write from fixed synthetic
+# inputs (ADR 0021). Its run records are a measured write `write-r1` of 1,000,000 rows from 50
+# input tables in 2 s on 2 threads with a peak RSS of 1 GiB, and a drained shadow probe
+# `shadow-r1` with the same facts but its rows, run time and steady-state estimate.
+SHARED_FIXTURE = Path(__file__).parent / "fixtures" / "metrics_directory"
+
+
+def test_report_reads_the_run_records_of_the_shared_fixture(tmp_path):
+    shutil.copytree(SHARED_FIXTURE / "runs", tmp_path / "runs")
+    write_runner(tmp_path, "r1", "c4-standard-2", 2, {"write": 0, "shadow": 0})
+
+    report = sweep_report.report(tmp_path)
+
+    assert report.failed == []
+    shadow, write = report.figures
+    assert (write.cell, [run.run_id for run in write.runs]) == ("write", ["write-r1"])
+    assert write.whole_run == pytest.approx([500_000 * math.log(50) / 2])
+    assert write.steady_state == []
+    assert write.peak_rss_bytes == 2**30
+    assert (shadow.cell, [run.run_id for run in shadow.runs]) == ("shadow", ["shadow-r1"])
+    assert len(shadow.steady_state) == 1
+    assert shadow.peak_rss_bytes == 2**30

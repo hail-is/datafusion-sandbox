@@ -4,6 +4,10 @@ It answers whether the estimate a shadow probe would have stopped with, and its 
 is calibrated against the steady-state throughput the run reaches at its end. Estimates are drawn
 relative to that end-of-run estimate, and each estimate interval as its relative half-width around
 the estimate it belongs to.
+
+The table and column names it reads are those src/metrics_directory.rs writes. The shared fixture
+python/tests/fixtures/metrics_directory holds those tables as Rust writes them, and this module's
+suite reads it (ADR 0021).
 """
 
 import html
