@@ -14,6 +14,7 @@ not depend on it.
 
 from __future__ import annotations
 
+import os
 import shutil
 
 import pytest
@@ -67,22 +68,40 @@ def cpuinfo(tmp_path):
 # -------------------------------------------------------------- rustc invocation
 
 
-def test_rustc_uses_stable_toolchain(monkeypatch):
-    commands = []
+@pytest.fixture
+def fake_rustc(tmp_path, monkeypatch):
+    """Put a `rustc` first on PATH that records its arguments and lists two CPUs.
 
-    def run(command, **kwargs):
-        commands.append((command, kwargs))
-        return gce.subprocess.CompletedProcess(command, 0, stdout="features\n")
+    known_target_cpus caches its answer, so the cache is cleared on both sides of the
+    test: before, so the fake is actually run, and after, so later tests see real rustc.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    args_path = tmp_path / "args"
+    rustc = bin_dir / "rustc"
+    rustc.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" > '{args_path}'\n"
+        "echo 'Available CPUs for this target:'\n"
+        "echo '    native      - Select the CPU of the current host.'\n"
+        "echo '    cascadelake'\n"
+        "echo '    znver3'\n"
+    )
+    rustc.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    gce.known_target_cpus.cache_clear()
+    yield args_path
+    gce.known_target_cpus.cache_clear()
 
-    monkeypatch.setattr(gce.shutil, "which", lambda command: f"/usr/bin/{command}")
-    monkeypatch.setattr(gce.subprocess, "run", run)
 
-    assert gce._rustc("--print", "cfg") == "features\n"
-    assert commands == [
-        (
-            ["rustc", "+stable", "--print", "cfg"],
-            {"capture_output": True, "text": True, "check": True},
-        )
+def test_rustc_uses_stable_toolchain(fake_rustc):
+    assert gce.known_target_cpus() == {"native", "cascadelake", "znver3"}
+    assert fake_rustc.read_text().splitlines() == [
+        "+stable",
+        "--print",
+        "target-cpus",
+        "--target",
+        gce.TARGET,
     ]
 
 
