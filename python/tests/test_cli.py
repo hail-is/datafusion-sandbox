@@ -1,4 +1,5 @@
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,10 @@ from hailtools import cli
 
 @pytest.fixture(scope="module")
 def hail_context(tmp_path_factory):
+    # Hail's Spark backend starts a JVM. Without Java, hl.init fails with JAVA_GATEWAY_EXITED
+    # and every test using this fixture errors, so skip them and say why.
+    if shutil.which("java") is None:
+        pytest.skip("Hail's Spark backend needs Java, and `java` is not on PATH")
     hl.init(
         backend="spark",
         master="local[2]",
