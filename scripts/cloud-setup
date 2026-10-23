@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Prepares a Claude Code cloud session's VM for work on this repo; see docs/cloud-sessions.md.
+# The environment's setup script runs it as root, and the SessionStart hook in
+# .claude/settings.json runs it again on every cloud session start, so it is idempotent and quick
+# when there is nothing to do:
+#
+#   scripts/cloud-setup
+#
+# Run as a SessionStart hook, it also writes the session's environment to $CLAUDE_ENV_FILE.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# The version this repo's agent instructions were written against; `outline` needs a recent one.
+ast_grep_version=0.51.0
+
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# bindgen, in a dependency's build script, needs libclang.
+if ! ldconfig -p | grep 'libclang[-.0-9]*\.so' >/dev/null; then
+    apt-get update -qq
+    apt-get install -y -qq libclang-dev
+fi
+
+# The image ships rustc and cargo, but rust-toolchain.toml needs rustup. sh.rustup.rs is not on
+# the default network allowlist, static.rust-lang.org is.
+if ! command -v rustup >/dev/null; then
+    rustup_init=$(mktemp)
+    curl --proto '=https' --tlsv1.2 -sSf -o "$rustup_init" \
+        "https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init"
+    chmod +x "$rustup_init"
+    "$rustup_init" -y --profile minimal --default-toolchain none --no-modify-path
+    rm "$rustup_init"
+fi
+# With no arguments, installs the toolchain and components pinned in rust-toolchain.toml. And
+# stable, which python/tests/test_gce.py asks for CPU feature sets.
+rustup toolchain install
+rustup toolchain install stable --profile minimal
+cargo fetch --locked
+
+if [ "$(ast-grep --version 2>/dev/null)" != "ast-grep $ast_grep_version" ]; then
+    ast_grep_dir=$(mktemp -d)
+    curl -sSfL -o "$ast_grep_dir/ast-grep.zip" \
+        "https://github.com/ast-grep/ast-grep/releases/download/$ast_grep_version/app-$(uname -m)-unknown-linux-gnu.zip"
+    python3 -m zipfile -e "$ast_grep_dir/ast-grep.zip" "$ast_grep_dir"
+    install -m 755 "$ast_grep_dir/ast-grep" /usr/local/bin/ast-grep
+    rm -r "$ast_grep_dir"
+fi
+
+uv sync --locked --directory python
+
+if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+    # RUSTFLAGS overrides `-Ctarget-cpu=native` from .cargo/config.toml, as CI does, so a build
+    # cached on one VM can't fail with SIGILL on another VM's older CPU.
+    cat >>"$CLAUDE_ENV_FILE" <<'EOF'
+export PATH="$HOME/.cargo/bin:$PATH"
+export RUSTFLAGS=""
+EOF
+fi

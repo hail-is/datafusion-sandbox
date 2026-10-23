@@ -24,8 +24,23 @@ The crate is a set of modules, each with a suite of module tests that checks the
 
 ### Builds
 
-For optimized local runs, use `--profile release-nonlto`. The fat-LTO `-r` profile runs out of memory linking in the lima sandbox; on the host it builds but links slowly, so use it there only when a run genuinely needs it.
+For optimized local runs, use `--profile release-nonlto`. The fat-LTO `-r` profile runs out of memory linking on machines with 16 GB of RAM or less, such as the lima sandbox and cloud sessions; on larger machines it builds but links slowly, so use it there only when a run genuinely needs it.
+
+### Code search
+
+`ast-grep` beats grep when a match spans lines or varies in shape:
+- a file's items: `ast-grep outline <file>`, not `grep -n '^pub\|^fn'`
+- multi-line items (`use` lists, signatures with `pub(crate)`/`async`): `ast-grep --lang rust -p 'use $P;' src`
+- call sites: `ast-grep --lang rust -p '$X.write_unordered($$$)' src`
+
+Set `--lang` to the file's language. Attributes and decorators are separate nodes, so grep for `#[cfg(test)]`. Call `ast-grep`; on Linux `sg` is a different program.
+
+### Cloud sessions
+
+In a Claude Code cloud session (`CLAUDE_CODE_REMOTE=true`), `gh issue` and `gh pr` fail; use the `gh api` REST forms instead. See `docs/cloud-sessions.md`.
 
 ### Checks
+
+While iterating, run `cargo check` and the tests you touched (`cargo test <filter>`) rather than the full check, which is slow from a cold build.
 
 Before finishing, if the change touches Rust sources (`src/`, `tests/`, `benches/`, `examples/`, `Cargo.toml`), run `cargo fmt` and then `scripts/check`, which runs the checks CI runs and treats warnings as errors, and fix what it reports. If it touches `python/`, run `uv run --directory python ruff format`, `uv run --directory python ruff check --fix`, `uv run --directory python ruff format` again, and `uv run --directory python pytest`, and fix what `ruff check` reports.
