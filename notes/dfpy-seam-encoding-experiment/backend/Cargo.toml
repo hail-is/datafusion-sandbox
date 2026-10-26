@@ -1,0 +1,16 @@
+# Throwaway: a stand-in for the Hail backend, on this crate's DataFusion (55.1),
+# a different copy from the wheel's 55.2.
+[package]
+name = "seam-backend"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+arrow = "59"
+async-trait = "0.1"
+datafusion = { version = "=55.1.0", default-features = false }
+datafusion-proto = { version = "=55.1.0", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -1,0 +1,21 @@
+# Throwaway: a stand-in for the Hail frontend cdylib, built against the same
+# DataFusion and datafusion-ffi the PyPI `datafusion` 55.0.0 wheel locks.
+[package]
+name = "seam-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+name = "seam_probe"
+crate-type = ["cdylib"]
+
+[dependencies]
+arrow = "59"
+async-trait = "0.1"
+datafusion = { version = "=55.2.0", default-features = false }
+datafusion-ffi = "=55.2.0"
+datafusion-proto = { version = "=55.2.0", default-features = false }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
