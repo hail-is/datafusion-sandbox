@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "dfpy-codec-reuse"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Reuse datafusion-python's codec from crates.io; drop default mimalloc + abi3.
+datafusion-python = { version = "=55.0.0", default-features = false }
+datafusion = { version = "55.1", default-features = false }
+datafusion-proto = "55.1"
+prost = "0.14"
+pyo3 = { version = "0.29", features = ["auto-initialize"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

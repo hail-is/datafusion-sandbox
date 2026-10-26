@@ -1,0 +1,15 @@
+# Throwaway experiment for notes/python-udfs-in-backend.md (issue #319). Its own workspace so it
+# does not join the repo's.
+[workspace]
+
+[package]
+name = "pyudf-gil-experiment"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Same arrow / pyo3 majors as datafusion-python 55 and DataFusion 55.1.
+arrow = { version = "59", default-features = false, features = ["ffi", "pyarrow"] }
+pyo3 = { version = "0.29", features = ["auto-initialize"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
