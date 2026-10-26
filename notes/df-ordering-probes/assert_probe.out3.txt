@@ -1,0 +1,25 @@
+=== L parquet out-of-order, enable_sort_pushdown=false  (target_partitions=1, prefer_existing_sort=false)
+SQL: SELECT contig, position, alleles, v FROM p
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  DataSourceExec: file_groups={1 group: [[tmp/df-ordering-probe-data/p/a.parquet, tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], file_type=parquet
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    DataSourceExec: file_groups={1 group: [[tmp/df-ordering-probe-data/p/a.parquet, tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], file_type=parquet
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+      DataSourceExec: file_groups={1 group: [[tmp/df-ordering-probe-data/p/a.parquet, tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], file_type=parquet
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+    DataSourceExec: file_groups={1 group: [[tmp/df-ordering-probe-data/p/a.parquet, tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], file_type=parquet
+
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]

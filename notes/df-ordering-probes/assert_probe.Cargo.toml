@@ -1,0 +1,22 @@
+[package]
+name = "df-ordering-probe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+datafusion = { version = "55.1.0", default-features = false, features = [
+    "nested_expressions",
+    "crypto_expressions",
+    "datetime_expressions",
+    "encoding_expressions",
+    "regex_expressions",
+    "string_expressions",
+    "unicode_expressions",
+    "parquet",
+    "recursive_protection",
+    "sql",
+] }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[profile.dev]
+debug = "line-tables-only"

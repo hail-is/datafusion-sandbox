@@ -1,0 +1,604 @@
+
+=== A plain scan  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig, position, alleles, v FROM t
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== A1 plain scan, tp=1  (target_partitions=1, prefer_existing_sort=false)
+SQL: SELECT contig, position, alleles, v FROM t
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== B position + 1  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig, position + 1 AS position, alleles FROM t
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Int64) + 1 as position, alleles@2 as alleles]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Int64) + 1 as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+      ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Int64) + 1 as position, alleles@2 as alleles]
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+    ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Int64) + 1 as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+
+=== C widening CAST  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig, CAST(position AS BIGINT) AS position, alleles FROM t
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Int64) as position, alleles@2 as alleles]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Int64) as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Int64) as position, alleles@2 as alleles]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== C2 narrowing CAST  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig, CAST(position AS SMALLINT) AS position, alleles FROM t
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Int16) as position, alleles@2 as alleles]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Int16) as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+      ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Int16) as position, alleles@2 as alleles]
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+    ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Int16) as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+
+=== C3 CAST to Utf8  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig, CAST(position AS VARCHAR) AS position, alleles FROM t
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Utf8View) as position, alleles@2 as alleles]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Utf8View) as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+      ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Utf8View) as position, alleles@2 as alleles]
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+    ProjectionExec: expr=[contig@0 as contig, CAST(position@1 AS Utf8View) as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+
+=== D aliases  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig AS c, position AS p, alleles AS a FROM t
+assert keys: ["c", "p", "a"]
+-- initial:
+AssertExec: req=[c@0, p@1, a@2]
+  ProjectionExec: expr=[contig@0 as c, position@1 as p, alleles@2 as a]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[c@0, p@1, a@2]
+    ProjectionExec: expr=[contig@0 as c, position@1 as p, alleles@2 as a]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[c@0, p@1, a@2]
+  ProjectionExec: expr=[contig@0 as c, position@1 as p, alleles@2 as a]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== E named_struct, keys via get_field  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT named_struct('contig', contig, 'position', position) AS locus, alleles FROM t
+assert keys: ["locus['contig']", "locus['position']", "alleles"]
+-- initial:
+AssertExec: req=[get_field(locus@0, contig), get_field(locus@0, position), alleles@1]
+  ProjectionExec: expr=[named_struct(contig, contig@0, position, position@1) as locus, alleles@2 as alleles]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[get_field(locus@0, contig), get_field(locus@0, position), alleles@1]
+    ProjectionExec: expr=[named_struct(contig, contig@0, position, position@1) as locus, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[get_field(locus@0, contig), get_field(locus@0, position), alleles@1]
+  ProjectionExec: expr=[named_struct(contig, contig@0, position, position@1) as locus, alleles@2 as alleles]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== E2 named_struct, key is the struct column  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT named_struct('contig', contig, 'position', position) AS locus, alleles FROM t
+assert keys: ["locus", "alleles"]
+-- initial:
+AssertExec: req=[locus@0, alleles@1]
+  ProjectionExec: expr=[named_struct(contig, contig@0, position, position@1) as locus, alleles@2 as alleles]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[locus@0, alleles@1]
+    ProjectionExec: expr=[named_struct(contig, contig@0, position, position@1) as locus, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[locus@0, alleles@1]
+    SortExec: expr=[locus@0 ASC NULLS LAST, alleles@1 ASC NULLS LAST], preserve_partitioning=[false]
+      ProjectionExec: expr=[named_struct(contig, contig@0, position, position@1) as locus, alleles@2 as alleles]
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[locus@0, alleles@1]
+  SortExec: expr=[locus@0 ASC NULLS LAST, alleles@1 ASC NULLS LAST], preserve_partitioning=[false]
+    ProjectionExec: expr=[named_struct(contig, contig@0, position, position@1) as locus, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+
+=== E3 get_field from a struct-ordered input  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT locus['contig'] AS contig, locus['position'] AS position, alleles FROM (SELECT named_struct('contig', contig, 'position', position) AS locus, alleles FROM t)
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after ProjectionPushdown:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== F concat  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT concat(contig, ':') AS contig, position, alleles FROM t
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[concat(contig@0, :) as contig, position@1 as position, alleles@2 as alleles]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[concat(contig@0, :) as contig, position@1 as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+      ProjectionExec: expr=[concat(contig@0, :) as contig, position@1 as position, alleles@2 as alleles]
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+    ProjectionExec: expr=[concat(contig@0, :) as contig, position@1 as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+
+=== F2 floor on second key  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig, floor(position) AS position, alleles FROM t
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, floor(CAST(position@1 AS Float64)) as position, alleles@2 as alleles]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[contig@0 as contig, floor(CAST(position@1 AS Float64)) as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+      ProjectionExec: expr=[contig@0 as contig, floor(CAST(position@1 AS Float64)) as position, alleles@2 as alleles]
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+    ProjectionExec: expr=[contig@0 as contig, floor(CAST(position@1 AS Float64)) as position, alleles@2 as alleles]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec"]]
+
+=== G filter on v  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig, position, alleles FROM t WHERE v > 3
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles]
+    FilterExec: v@3 > 3
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles]
+      FilterExec: v@3 > 3
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after ProjectionPushdown:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    FilterExec: v@3 > 3, projection=[contig@0, position@1, alleles@2]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  FilterExec: v@3 > 3, projection=[contig@0, position@1, alleles@2]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== G2 filter contig = lit, drop contig  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT position, alleles FROM t WHERE contig = '1'
+assert keys: ["position", "alleles"]
+-- initial:
+AssertExec: req=[position@0, alleles@1]
+  ProjectionExec: expr=[position@1 as position, alleles@2 as alleles]
+    FilterExec: contig@0 = 1
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[position@0, alleles@1]
+    ProjectionExec: expr=[position@1 as position, alleles@2 as alleles]
+      FilterExec: contig@0 = 1
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after ProjectionPushdown:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[position@0, alleles@1]
+    FilterExec: contig@0 = 1, projection=[position@1, alleles@2]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[position@0, alleles@1]
+  FilterExec: contig@0 = 1, projection=[position@1, alleles@2]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== H union all  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig, position, alleles FROM t UNION ALL SELECT contig, position, alleles FROM t2
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  UnionExec
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    UnionExec
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      UnionExec
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    UnionExec
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== H2 union all, tp=1  (target_partitions=1, prefer_existing_sort=false)
+SQL: SELECT contig, position, alleles FROM t UNION ALL SELECT contig, position, alleles FROM t2
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  UnionExec
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    UnionExec
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      UnionExec
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    UnionExec
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== I group by keys  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig, position, alleles, sum(v) AS s FROM t GROUP BY contig, position, alleles
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(t.v)@3 as s]
+    AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+      AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(t.v)@3 as s]
+      AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+        AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+          DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(t.v)@3 as s]
+        AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+          RepartitionExec: partitioning=Hash([contig@0, position@1, alleles@2], 4), input_partitions=1, maintains_sort_order=true
+            AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+              DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(t.v)@3 as s]
+      AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=Hash([contig@0, position@1, alleles@2], 4), input_partitions=1, maintains_sort_order=true
+          AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+            DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== I2 group by keys, prefer_existing_sort  (target_partitions=4, prefer_existing_sort=true)
+SQL: SELECT contig, position, alleles, sum(v) AS s FROM t GROUP BY contig, position, alleles
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(t.v)@3 as s]
+    AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+      AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(t.v)@3 as s]
+      AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+        AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+          DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(t.v)@3 as s]
+        AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+          RepartitionExec: partitioning=Hash([contig@0, position@1, alleles@2], 4), input_partitions=1, maintains_sort_order=true
+            AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+              DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(t.v)@3 as s]
+      AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=Hash([contig@0, position@1, alleles@2], 4), input_partitions=1, maintains_sort_order=true
+          AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(t.v)], ordering_mode=Sorted
+            DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== J parquet, files listed out of key order  (target_partitions=1, prefer_existing_sort=false)
+SQL: SELECT contig, position, alleles, v FROM p
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  DataSourceExec: file_groups={1 group: [[tmp/df-ordering-probe-data/p/a.parquet, tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], file_type=parquet
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    DataSourceExec: file_groups={1 group: [[tmp/df-ordering-probe-data/p/a.parquet, tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], file_type=parquet
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+      DataSourceExec: file_groups={1 group: [[tmp/df-ordering-probe-data/p/a.parquet, tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], file_type=parquet
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+    DataSourceExec: file_groups={1 group: [[tmp/df-ordering-probe-data/p/a.parquet, tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], file_type=parquet
+
+-- after PushdownSort:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  DataSourceExec: file_groups={1 group: [[tmp/df-ordering-probe-data/p/b.parquet, tmp/df-ordering-probe-data/p/a.parquet]]}, projection=[contig, position, alleles, v], output_ordering=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], file_type=parquet
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== J2 parquet, files listed out of key order, tp=4  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig, position, alleles, v FROM p
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  DataSourceExec: file_groups={2 groups: [[tmp/df-ordering-probe-data/p/a.parquet], [tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], output_ordering=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], file_type=parquet
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    DataSourceExec: file_groups={2 groups: [[tmp/df-ordering-probe-data/p/a.parquet], [tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], output_ordering=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], file_type=parquet
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      DataSourceExec: file_groups={2 groups: [[tmp/df-ordering-probe-data/p/a.parquet], [tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], output_ordering=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], file_type=parquet
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    DataSourceExec: file_groups={2 groups: [[tmp/df-ordering-probe-data/p/a.parquet], [tmp/df-ordering-probe-data/p/b.parquet]]}, projection=[contig, position, alleles, v], output_ordering=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], file_type=parquet
+
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+
+=== K ORDER BY v LIMIT under the assertion  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT * FROM (SELECT contig, position, alleles, v FROM t ORDER BY v LIMIT 10)
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortExec: TopK(fetch=10), expr=[v@3 ASC NULLS LAST], preserve_partitioning=[false]
+    DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortExec: TopK(fetch=10), expr=[v@3 ASC NULLS LAST], preserve_partitioning=[false]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after EnsureRequirements:
+OutputRequirementExec: order_by=[], dist_by=Unspecified
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+      SortExec: TopK(fetch=10), expr=[v@3 ASC NULLS LAST], preserve_partitioning=[false]
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+-- after OutputRequirements:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+    SortExec: TopK(fetch=10), expr=[v@3 ASC NULLS LAST], preserve_partitioning=[false]
+      DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec", "SortExec(TopK)"]]
+    [check_invariants(Executable) on AssertExec: sorts below = ["SortExec", "SortExec(TopK)"]]

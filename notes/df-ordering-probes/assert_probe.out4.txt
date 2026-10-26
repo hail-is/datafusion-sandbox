@@ -1,0 +1,66 @@
+=== I3 big group by keys  (target_partitions=4, prefer_existing_sort=false)
+SQL: SELECT contig, position, alleles, sum(v) AS s FROM big GROUP BY contig, position, alleles
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(big.v)@3 as s]
+    AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+      AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(big.v)@3 as s]
+      AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+        AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+          DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+-- after EnsureRequirements:
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(big.v)@3 as s]
+        AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+          RepartitionExec: partitioning=Hash([contig@0, position@1, alleles@2], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+            AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+              RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+                DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(big.v)@3 as s]
+      AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=Hash([contig@0, position@1, alleles@2], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+          AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+            RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+              DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+=== I4 big group by keys, prefer_existing_sort  (target_partitions=4, prefer_existing_sort=true)
+SQL: SELECT contig, position, alleles, sum(v) AS s FROM big GROUP BY contig, position, alleles
+assert keys: ["contig", "position", "alleles"]
+-- initial:
+AssertExec: req=[contig@0, position@1, alleles@2]
+  ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(big.v)@3 as s]
+    AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+      AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+        DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(big.v)@3 as s]
+      AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+        AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+          DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+-- after EnsureRequirements:
+  AssertExec: req=[contig@0, position@1, alleles@2]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(big.v)@3 as s]
+        AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+          RepartitionExec: partitioning=Hash([contig@0, position@1, alleles@2], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+            AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+              RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+                DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+AssertExec: req=[contig@0, position@1, alleles@2]
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    ProjectionExec: expr=[contig@0 as contig, position@1 as position, alleles@2 as alleles, sum(big.v)@3 as s]
+      AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=Hash([contig@0, position@1, alleles@2], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+          AggregateExec: mode=Partial, gby=[contig@0 as contig, position@1 as position, alleles@2 as alleles], aggr=[sum(big.v)], ordering_mode=Sorted
+            RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+              DataSourceExec: partitions=1, partition_sizes=[1], output_ordering=contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST
+    [check_invariants(Executable) on AssertExec: sorts below = []]
+    [check_invariants(Executable) on AssertExec: sorts below = []]

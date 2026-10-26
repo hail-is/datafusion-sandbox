@@ -1,0 +1,955 @@
+=== inner equi-join on full key [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos = b.pos
+HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(contig@0, contig@0), (pos@1, pos@1)], projection=[contig@0, pos@1, v@2, w@5]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== inner equi-join, ORDER BY key above [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY a.contig, a.pos
+HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(contig@0, contig@0), (pos@1, pos@1)], projection=[contig@0, pos@1, v@2, w@5]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== inner equi-join, keys written in permuted order [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.pos = b.pos AND a.contig = b.contig ORDER BY a.contig, a.pos
+HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(pos@1, pos@1), (contig@0, contig@0)], projection=[contig@0, pos@1, v@2, w@5]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== left join, ORDER BY left key [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a LEFT JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY a.contig, a.pos
+SortExec: expr=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[false]
+  HashJoinExec: mode=CollectLeft, join_type=Left, on=[(contig@0, contig@0), (pos@1, pos@1)], projection=[contig@0, pos@1, v@2, w@5]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== right join, ORDER BY right key [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT b.contig, b.pos, v, w FROM a RIGHT JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY b.contig, b.pos
+HashJoinExec: mode=CollectLeft, join_type=Right, on=[(contig@0, contig@0), (pos@1, pos@1)], projection=[contig@3, pos@4, v@2, w@5]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== full join, ORDER BY coalesced key [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT coalesce(a.contig, b.contig) c, coalesce(a.pos, b.pos) p, v, w FROM a FULL JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY c, p
+SortExec: expr=[c@0 ASC NULLS LAST, p@1 ASC NULLS LAST], preserve_partitioning=[false]
+  ProjectionExec: expr=[CASE WHEN contig@0 IS NOT NULL THEN contig@0 ELSE contig@3 END as c, CASE WHEN pos@1 IS NOT NULL THEN pos@1 ELSE pos@4 END as p, v@2 as v, w@5 as w]
+    HashJoinExec: mode=CollectLeft, join_type=Full, on=[(contig@0, contig@0), (pos@1, pos@1)]
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== left semi join (IN), ORDER BY key [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, v FROM a WHERE EXISTS (SELECT 1 FROM b WHERE a.contig = b.contig AND a.pos = b.pos) ORDER BY contig, pos
+SortExec: expr=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[false]
+  HashJoinExec: mode=CollectLeft, join_type=LeftSemi, on=[(contig@0, contig@0), (pos@1, pos@1)]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== equi-join on key prefix (contig) with residual filter [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos < b.pos ORDER BY a.contig, a.pos
+SortExec: expr=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[false]
+  HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(contig@0, contig@0)], filter=pos@0 < pos@1, projection=[contig@0, pos@1, v@2, w@5]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== interval join: contig equality plus range [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, label FROM a JOIN i ON a.contig = i.contig AND a.pos >= i.start_pos AND a.pos < i.end_pos ORDER BY a.contig, a.pos
+SortExec: expr=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[false]
+  HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(contig@0, contig@0)], filter=pos@0 >= start_pos@1 AND pos@0 < end_pos@2, projection=[contig@0, pos@1, v@2, label@6]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[contig, start_pos, end_pos, label], output_ordering=[contig@0 ASC NULLS LAST, start_pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== range-only join (no equality) [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.pos, v, label FROM a JOIN i ON a.pos >= i.start_pos AND a.pos < i.end_pos ORDER BY a.pos
+SortExec: expr=[pos@0 ASC NULLS LAST], preserve_partitioning=[false]
+  NestedLoopJoinExec: join_type=Inner, filter=pos@0 >= start_pos@1 AND pos@0 < end_pos@2, projection=[pos@0, v@1, label@4]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[pos, v], file_type=csv, has_header=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[start_pos, end_pos, label], file_type=csv, has_header=true
+
+=== single range predicate join [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.pos, v, label FROM a JOIN i ON a.pos >= i.start_pos ORDER BY a.pos
+SortExec: expr=[pos@0 ASC NULLS LAST], preserve_partitioning=[false]
+  NestedLoopJoinExec: join_type=Inner, filter=pos@0 >= start_pos@1, projection=[pos@0, v@1, label@3]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[pos, v], file_type=csv, has_header=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[start_pos, label], file_type=csv, has_header=true
+
+=== aggregate on full key, ORDER BY key [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) FROM a GROUP BY contig, pos ORDER BY contig, pos
+AggregateExec: mode=Single, gby=[contig@0 as contig, pos@1 as pos], aggr=[sum(a.v)], ordering_mode=Sorted
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key prefix [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, sum(v) FROM a GROUP BY contig ORDER BY contig
+AggregateExec: mode=Single, gby=[contig@0 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, v], output_ordering=[contig@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key in permuted order [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT pos, contig, sum(v) FROM a GROUP BY pos, contig ORDER BY contig, pos
+AggregateExec: mode=Single, gby=[pos@1 as pos, contig@0 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key plus extra column (partially sorted) [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, v, count(*) FROM a GROUP BY contig, v
+ProjectionExec: expr=[contig@0 as contig, v@1 as v, count(Int64(1))@2 as count(*)]
+  AggregateExec: mode=Single, gby=[contig@0 as contig, v@1 as v], aggr=[count(Int64(1))], ordering_mode=PartiallySorted([0])
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, v], output_ordering=[contig@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== ordered aggregate first_value ORDER BY pos [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, first_value(v ORDER BY pos) FROM a GROUP BY contig
+AggregateExec: mode=Single, gby=[contig@0 as contig], aggr=[first_value(a.v) ORDER BY [a.pos ASC NULLS LAST]], ordering_mode=Sorted
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: running sum partition by contig order by pos [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (PARTITION BY contig ORDER BY pos ROWS UNBOUNDED PRECEDING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@3 as sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]
+  BoundedWindowAggExec: wdw=[sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": nullable Int64 }, frame: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: order by full key, range frame [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (ORDER BY contig, pos) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@3 as sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]
+  BoundedWindowAggExec: wdw=[sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": nullable Int64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: descending order (reverse of input) [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (ORDER BY contig DESC, pos DESC ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING@3 as sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING]
+  BoundedWindowAggExec: wdw=[sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING: Field { "sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING": nullable Int64 }, frame: ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING], mode=[Sorted]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: unbounded following frame [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (PARTITION BY contig ORDER BY pos ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING@3 as sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING]
+  WindowAggExec: wdw=[sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING: Ok(Field { name: "sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING", data_type: Int64, nullable: true }), frame: WindowFrame { units: Rows, start_bound: CurrentRow, end_bound: Following(UInt64(NULL)), is_causal: false }]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: pos + 1 [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos + 1 AS p FROM a ORDER BY contig, p
+SortExec: expr=[contig@0 ASC NULLS LAST, p@1 ASC NULLS LAST], preserve_partitioning=[false]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos@1 + 1 as p], output_ordering=[contig@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: CAST(pos AS DOUBLE) [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, CAST(pos AS DOUBLE) AS p FROM a ORDER BY contig, p
+DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, CAST(pos@1 AS Float64) as p], output_ordering=[contig@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: pos * -1 (antitone) [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos * -1 AS p FROM a ORDER BY contig, p DESC
+SortExec: expr=[contig@0 ASC NULLS LAST, p@1 DESC], preserve_partitioning=[false]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos@1 * -1 as p], output_ordering=[contig@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: concat(contig, ':') (not monotone) [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT concat(contig, ':') AS c, pos FROM a ORDER BY c, pos
+SortExec: expr=[c@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[false]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[concat(contig@0, :) as c, pos], file_type=csv, has_header=true
+
+=== projection: struct key, ORDER BY field [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT k['contig'] AS c, k['pos'] AS p FROM (SELECT named_struct('contig', contig, 'pos', pos) AS k FROM a) ORDER BY c, p
+DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig@0 as c, pos@1 as p], file_type=csv, has_header=true
+
+=== projection: ORDER BY struct column [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT k FROM (SELECT named_struct('contig', contig, 'pos', pos) AS k FROM a) ORDER BY k
+SortExec: expr=[k@0 ASC NULLS LAST], preserve_partitioning=[false]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[named_struct(contig, contig@0, pos, pos@1) as k], file_type=csv, has_header=true
+
+=== filter keeps order [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos FROM a WHERE v > 3 ORDER BY contig, pos
+FilterExec: v@2 > 3, projection=[contig@0, pos@1]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== filter contig = const, ORDER BY pos [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT pos FROM a WHERE contig = '1' ORDER BY pos
+FilterExec: contig@0 = 1, projection=[pos@1]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== union all, ORDER BY key [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos FROM a UNION ALL SELECT contig, pos FROM b ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  UnionExec
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== union all, no ORDER BY [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos FROM a UNION ALL SELECT contig, pos FROM b
+UnionExec
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== limit on ordered table [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos FROM a ORDER BY contig, pos LIMIT 5
+DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], limit=5, output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== ORDER BY that contradicts the declared order [target_partitions=1, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos FROM a ORDER BY pos
+SortExec: expr=[pos@1 ASC NULLS LAST], preserve_partitioning=[false]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== inner equi-join on full key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos = b.pos
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, w@5 as w]
+  SortMergeJoinExec: join_type=Inner, on=[(contig@0, contig@0), (pos@1, pos@1)]
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== inner equi-join, ORDER BY key above [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, w@5 as w]
+    SortMergeJoinExec: join_type=Inner, on=[(contig@0, contig@0), (pos@1, pos@1)]
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== inner equi-join, keys written in permuted order [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.pos = b.pos AND a.contig = b.contig ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  SortExec: expr=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, w@5 as w]
+      SortMergeJoinExec: join_type=Inner, on=[(pos@1, pos@1), (contig@0, contig@0)]
+        SortExec: expr=[pos@1 ASC, contig@0 ASC], preserve_partitioning=[true]
+          RepartitionExec: partitioning=Hash([pos@1, contig@0], 4), input_partitions=1, maintains_sort_order=true
+            DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+        SortExec: expr=[pos@1 ASC, contig@0 ASC], preserve_partitioning=[true]
+          RepartitionExec: partitioning=Hash([pos@1, contig@0], 4), input_partitions=1, maintains_sort_order=true
+            DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== left join, ORDER BY left key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a LEFT JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, w@5 as w]
+    SortMergeJoinExec: join_type=Left, on=[(contig@0, contig@0), (pos@1, pos@1)]
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== right join, ORDER BY right key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT b.contig, b.pos, v, w FROM a RIGHT JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY b.contig, b.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@3 as contig, pos@4 as pos, v@2 as v, w@5 as w]
+    SortMergeJoinExec: join_type=Right, on=[(contig@0, contig@0), (pos@1, pos@1)]
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== full join, ORDER BY coalesced key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT coalesce(a.contig, b.contig) c, coalesce(a.pos, b.pos) p, v, w FROM a FULL JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY c, p
+SortPreservingMergeExec: [c@0 ASC NULLS LAST, p@1 ASC NULLS LAST]
+  SortExec: expr=[c@0 ASC NULLS LAST, p@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[CASE WHEN contig@0 IS NOT NULL THEN contig@0 ELSE contig@3 END as c, CASE WHEN pos@1 IS NOT NULL THEN pos@1 ELSE pos@4 END as p, v@2 as v, w@5 as w]
+      SortMergeJoinExec: join_type=Full, on=[(contig@0, contig@0), (pos@1, pos@1)]
+        RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+        RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== left semi join (IN), ORDER BY key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, v FROM a WHERE EXISTS (SELECT 1 FROM b WHERE a.contig = b.contig AND a.pos = b.pos) ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  SortMergeJoinExec: join_type=LeftSemi, on=[(contig@0, contig@0), (pos@1, pos@1)]
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== equi-join on key prefix (contig) with residual filter [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos < b.pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, w@5 as w]
+    SortMergeJoinExec: join_type=Inner, on=[(contig@0, contig@0)], filter=pos@0 < pos@1
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== interval join: contig equality plus range [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, label FROM a JOIN i ON a.contig = i.contig AND a.pos >= i.start_pos AND a.pos < i.end_pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, label@6 as label]
+    SortMergeJoinExec: join_type=Inner, on=[(contig@0, contig@0)], filter=pos@0 >= start_pos@1 AND pos@0 < end_pos@2
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[contig, start_pos, end_pos, label], output_ordering=[contig@0 ASC NULLS LAST, start_pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== range-only join (no equality) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.pos, v, label FROM a JOIN i ON a.pos >= i.start_pos AND a.pos < i.end_pos ORDER BY a.pos
+SortPreservingMergeExec: [pos@0 ASC NULLS LAST]
+  SortExec: expr=[pos@0 ASC NULLS LAST], preserve_partitioning=[true]
+    NestedLoopJoinExec: join_type=Inner, filter=pos@0 >= start_pos@1 AND pos@0 < end_pos@2, projection=[pos@0, v@1, label@4]
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[pos, v], file_type=csv, has_header=true
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[start_pos, end_pos, label], file_type=csv, has_header=true
+
+=== single range predicate join [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT a.pos, v, label FROM a JOIN i ON a.pos >= i.start_pos ORDER BY a.pos
+SortPreservingMergeExec: [pos@0 ASC NULLS LAST]
+  SortExec: expr=[pos@0 ASC NULLS LAST], preserve_partitioning=[true]
+    NestedLoopJoinExec: join_type=Inner, filter=pos@0 >= start_pos@1, projection=[pos@0, v@1, label@3]
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[pos, v], file_type=csv, has_header=true
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[start_pos, label], file_type=csv, has_header=true
+
+=== aggregate on full key, ORDER BY key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) FROM a GROUP BY contig, pos ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, pos@1 as pos], aggr=[sum(a.v)], ordering_mode=Sorted
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[contig@0 as contig, pos@1 as pos], aggr=[sum(a.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key prefix [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, sum(v) FROM a GROUP BY contig ORDER BY contig
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST]
+  AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+    RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[contig@0 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, v], output_ordering=[contig@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key in permuted order [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT pos, contig, sum(v) FROM a GROUP BY pos, contig ORDER BY contig, pos
+SortPreservingMergeExec: [contig@1 ASC NULLS LAST, pos@0 ASC NULLS LAST]
+  AggregateExec: mode=FinalPartitioned, gby=[pos@0 as pos, contig@1 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+    RepartitionExec: partitioning=Hash([pos@0, contig@1], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@1 ASC NULLS LAST, pos@0 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[pos@1 as pos, contig@0 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key plus extra column (partially sorted) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, v, count(*) FROM a GROUP BY contig, v
+ProjectionExec: expr=[contig@0 as contig, v@1 as v, count(Int64(1))@2 as count(*)]
+  AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, v@1 as v], aggr=[count(Int64(1))], ordering_mode=PartiallySorted([0])
+    RepartitionExec: partitioning=Hash([contig@0, v@1], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[contig@0 as contig, v@1 as v], aggr=[count(Int64(1))], ordering_mode=PartiallySorted([0])
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, v], output_ordering=[contig@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== ordered aggregate first_value ORDER BY pos [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, first_value(v ORDER BY pos) FROM a GROUP BY contig
+AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig], aggr=[first_value(a.v) ORDER BY [a.pos ASC NULLS LAST]], ordering_mode=Sorted
+  RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST
+    AggregateExec: mode=Partial, gby=[contig@0 as contig], aggr=[first_value(a.v) ORDER BY [a.pos ASC NULLS LAST]], ordering_mode=Sorted
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: running sum partition by contig order by pos [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (PARTITION BY contig ORDER BY pos ROWS UNBOUNDED PRECEDING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@3 as sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]
+  BoundedWindowAggExec: wdw=[sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": nullable Int64 }, frame: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+    RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: order by full key, range frame [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (ORDER BY contig, pos) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@3 as sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]
+  BoundedWindowAggExec: wdw=[sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": nullable Int64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: descending order (reverse of input) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (ORDER BY contig DESC, pos DESC ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING@3 as sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING]
+  BoundedWindowAggExec: wdw=[sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING: Field { "sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING": nullable Int64 }, frame: ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING], mode=[Sorted]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: unbounded following frame [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (PARTITION BY contig ORDER BY pos ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING@3 as sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING]
+  WindowAggExec: wdw=[sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING: Ok(Field { name: "sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING", data_type: Int64, nullable: true }), frame: WindowFrame { units: Rows, start_bound: CurrentRow, end_bound: Following(UInt64(NULL)), is_causal: false }]
+    RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: pos + 1 [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos + 1 AS p FROM a ORDER BY contig, p
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, p@1 ASC NULLS LAST]
+  SortExec: expr=[contig@0 ASC NULLS LAST, p@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[contig@0 as contig, pos@1 + 1 as p]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: CAST(pos AS DOUBLE) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, CAST(pos AS DOUBLE) AS p FROM a ORDER BY contig, p
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, p@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, CAST(pos@1 AS Float64) as p]
+    RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: pos * -1 (antitone) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos * -1 AS p FROM a ORDER BY contig, p DESC
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, p@1 DESC]
+  SortExec: expr=[contig@0 ASC NULLS LAST, p@1 DESC], preserve_partitioning=[true]
+    ProjectionExec: expr=[contig@0 as contig, pos@1 * -1 as p]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: concat(contig, ':') (not monotone) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT concat(contig, ':') AS c, pos FROM a ORDER BY c, pos
+SortPreservingMergeExec: [c@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  SortExec: expr=[c@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[concat(contig@0, :) as c, pos@1 as pos]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: struct key, ORDER BY field [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT k['contig'] AS c, k['pos'] AS p FROM (SELECT named_struct('contig', contig, 'pos', pos) AS k FROM a) ORDER BY c, p
+DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig@0 as c, pos@1 as p], file_type=csv, has_header=true
+
+=== projection: ORDER BY struct column [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT k FROM (SELECT named_struct('contig', contig, 'pos', pos) AS k FROM a) ORDER BY k
+SortPreservingMergeExec: [k@0 ASC NULLS LAST]
+  SortExec: expr=[k@0 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[named_struct(contig, contig@0, pos, pos@1) as k]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== filter keeps order [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos FROM a WHERE v > 3 ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  FilterExec: v@2 > 3, projection=[contig@0, pos@1]
+    RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== filter contig = const, ORDER BY pos [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT pos FROM a WHERE contig = '1' ORDER BY pos
+SortPreservingMergeExec: [pos@0 ASC NULLS LAST]
+  FilterExec: contig@0 = 1, projection=[pos@1]
+    RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== union all, ORDER BY key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos FROM a UNION ALL SELECT contig, pos FROM b ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  UnionExec
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== union all, no ORDER BY [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos FROM a UNION ALL SELECT contig, pos FROM b
+UnionExec
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== limit on ordered table [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos FROM a ORDER BY contig, pos LIMIT 5
+DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], limit=5, output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== ORDER BY that contradicts the declared order [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=true]
+SELECT contig, pos FROM a ORDER BY pos
+SortExec: expr=[pos@1 ASC NULLS LAST], preserve_partitioning=[false]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== inner equi-join on full key [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos = b.pos
+HashJoinExec: mode=Partitioned, join_type=Inner, on=[(contig@0, contig@0), (pos@1, pos@1)], projection=[contig@0, pos@1, v@2, w@5]
+  RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+  RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== inner equi-join, ORDER BY key above [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  HashJoinExec: mode=Partitioned, join_type=Inner, on=[(contig@0, contig@0), (pos@1, pos@1)], projection=[contig@0, pos@1, v@2, w@5]
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== inner equi-join, keys written in permuted order [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.pos = b.pos AND a.contig = b.contig ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  HashJoinExec: mode=Partitioned, join_type=Inner, on=[(pos@1, pos@1), (contig@0, contig@0)], projection=[contig@0, pos@1, v@2, w@5]
+    RepartitionExec: partitioning=Hash([pos@1, contig@0], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    RepartitionExec: partitioning=Hash([pos@1, contig@0], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== left join, ORDER BY left key [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a LEFT JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  SortExec: expr=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[true]
+    HashJoinExec: mode=Partitioned, join_type=Left, on=[(contig@0, contig@0), (pos@1, pos@1)], projection=[contig@0, pos@1, v@2, w@5]
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== right join, ORDER BY right key [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT b.contig, b.pos, v, w FROM a RIGHT JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY b.contig, b.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  HashJoinExec: mode=Partitioned, join_type=Right, on=[(contig@0, contig@0), (pos@1, pos@1)], projection=[contig@3, pos@4, v@2, w@5]
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== full join, ORDER BY coalesced key [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT coalesce(a.contig, b.contig) c, coalesce(a.pos, b.pos) p, v, w FROM a FULL JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY c, p
+SortPreservingMergeExec: [c@0 ASC NULLS LAST, p@1 ASC NULLS LAST]
+  SortExec: expr=[c@0 ASC NULLS LAST, p@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[CASE WHEN contig@0 IS NOT NULL THEN contig@0 ELSE contig@3 END as c, CASE WHEN pos@1 IS NOT NULL THEN pos@1 ELSE pos@4 END as p, v@2 as v, w@5 as w]
+      HashJoinExec: mode=Partitioned, join_type=Full, on=[(contig@0, contig@0), (pos@1, pos@1)]
+        RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+        RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== left semi join (IN), ORDER BY key [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos, v FROM a WHERE EXISTS (SELECT 1 FROM b WHERE a.contig = b.contig AND a.pos = b.pos) ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  SortExec: expr=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[true]
+    HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(contig@0, contig@0), (pos@1, pos@1)]
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== equi-join on key prefix (contig) with residual filter [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos < b.pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  SortExec: expr=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[true]
+    HashJoinExec: mode=Partitioned, join_type=Inner, on=[(contig@0, contig@0)], filter=pos@0 < pos@1, projection=[contig@0, pos@1, v@2, w@5]
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== interval join: contig equality plus range [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT a.contig, a.pos, v, label FROM a JOIN i ON a.contig = i.contig AND a.pos >= i.start_pos AND a.pos < i.end_pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  SortExec: expr=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[true]
+    HashJoinExec: mode=Partitioned, join_type=Inner, on=[(contig@0, contig@0)], filter=pos@0 >= start_pos@1 AND pos@0 < end_pos@2, projection=[contig@0, pos@1, v@2, label@6]
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[contig, start_pos, end_pos, label], output_ordering=[contig@0 ASC NULLS LAST, start_pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== range-only join (no equality) [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT a.pos, v, label FROM a JOIN i ON a.pos >= i.start_pos AND a.pos < i.end_pos ORDER BY a.pos
+SortPreservingMergeExec: [pos@0 ASC NULLS LAST]
+  SortExec: expr=[pos@0 ASC NULLS LAST], preserve_partitioning=[true]
+    NestedLoopJoinExec: join_type=Inner, filter=pos@0 >= start_pos@1 AND pos@0 < end_pos@2, projection=[pos@0, v@1, label@4]
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[pos, v], file_type=csv, has_header=true
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[start_pos, end_pos, label], file_type=csv, has_header=true
+
+=== single range predicate join [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT a.pos, v, label FROM a JOIN i ON a.pos >= i.start_pos ORDER BY a.pos
+SortPreservingMergeExec: [pos@0 ASC NULLS LAST]
+  SortExec: expr=[pos@0 ASC NULLS LAST], preserve_partitioning=[true]
+    NestedLoopJoinExec: join_type=Inner, filter=pos@0 >= start_pos@1, projection=[pos@0, v@1, label@3]
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[pos, v], file_type=csv, has_header=true
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[start_pos, label], file_type=csv, has_header=true
+
+=== aggregate on full key, ORDER BY key [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) FROM a GROUP BY contig, pos ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, pos@1 as pos], aggr=[sum(a.v)], ordering_mode=Sorted
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[contig@0 as contig, pos@1 as pos], aggr=[sum(a.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key prefix [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, sum(v) FROM a GROUP BY contig ORDER BY contig
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST]
+  AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+    RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[contig@0 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, v], output_ordering=[contig@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key in permuted order [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT pos, contig, sum(v) FROM a GROUP BY pos, contig ORDER BY contig, pos
+SortPreservingMergeExec: [contig@1 ASC NULLS LAST, pos@0 ASC NULLS LAST]
+  AggregateExec: mode=FinalPartitioned, gby=[pos@0 as pos, contig@1 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+    RepartitionExec: partitioning=Hash([pos@0, contig@1], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@1 ASC NULLS LAST, pos@0 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[pos@1 as pos, contig@0 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key plus extra column (partially sorted) [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, v, count(*) FROM a GROUP BY contig, v
+ProjectionExec: expr=[contig@0 as contig, v@1 as v, count(Int64(1))@2 as count(*)]
+  AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, v@1 as v], aggr=[count(Int64(1))], ordering_mode=PartiallySorted([0])
+    RepartitionExec: partitioning=Hash([contig@0, v@1], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[contig@0 as contig, v@1 as v], aggr=[count(Int64(1))], ordering_mode=PartiallySorted([0])
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, v], output_ordering=[contig@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== ordered aggregate first_value ORDER BY pos [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, first_value(v ORDER BY pos) FROM a GROUP BY contig
+AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig], aggr=[first_value(a.v) ORDER BY [a.pos ASC NULLS LAST]], ordering_mode=Sorted
+  RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST
+    AggregateExec: mode=Partial, gby=[contig@0 as contig], aggr=[first_value(a.v) ORDER BY [a.pos ASC NULLS LAST]], ordering_mode=Sorted
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: running sum partition by contig order by pos [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (PARTITION BY contig ORDER BY pos ROWS UNBOUNDED PRECEDING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@3 as sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]
+  BoundedWindowAggExec: wdw=[sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": nullable Int64 }, frame: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+    RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: order by full key, range frame [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (ORDER BY contig, pos) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@3 as sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]
+  BoundedWindowAggExec: wdw=[sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": nullable Int64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: descending order (reverse of input) [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (ORDER BY contig DESC, pos DESC ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING@3 as sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING]
+  BoundedWindowAggExec: wdw=[sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING: Field { "sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING": nullable Int64 }, frame: ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING], mode=[Sorted]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: unbounded following frame [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos, sum(v) OVER (PARTITION BY contig ORDER BY pos ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING@3 as sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING]
+  WindowAggExec: wdw=[sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING: Ok(Field { name: "sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING", data_type: Int64, nullable: true }), frame: WindowFrame { units: Rows, start_bound: CurrentRow, end_bound: Following(UInt64(NULL)), is_causal: false }]
+    RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: pos + 1 [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos + 1 AS p FROM a ORDER BY contig, p
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, p@1 ASC NULLS LAST]
+  SortExec: expr=[contig@0 ASC NULLS LAST, p@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[contig@0 as contig, pos@1 + 1 as p]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: CAST(pos AS DOUBLE) [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, CAST(pos AS DOUBLE) AS p FROM a ORDER BY contig, p
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, p@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, CAST(pos@1 AS Float64) as p]
+    RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: pos * -1 (antitone) [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos * -1 AS p FROM a ORDER BY contig, p DESC
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, p@1 DESC]
+  SortExec: expr=[contig@0 ASC NULLS LAST, p@1 DESC], preserve_partitioning=[true]
+    ProjectionExec: expr=[contig@0 as contig, pos@1 * -1 as p]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: concat(contig, ':') (not monotone) [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT concat(contig, ':') AS c, pos FROM a ORDER BY c, pos
+SortPreservingMergeExec: [c@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  SortExec: expr=[c@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[concat(contig@0, :) as c, pos@1 as pos]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: struct key, ORDER BY field [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT k['contig'] AS c, k['pos'] AS p FROM (SELECT named_struct('contig', contig, 'pos', pos) AS k FROM a) ORDER BY c, p
+DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig@0 as c, pos@1 as p], file_type=csv, has_header=true
+
+=== projection: ORDER BY struct column [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT k FROM (SELECT named_struct('contig', contig, 'pos', pos) AS k FROM a) ORDER BY k
+SortPreservingMergeExec: [k@0 ASC NULLS LAST]
+  SortExec: expr=[k@0 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[named_struct(contig, contig@0, pos, pos@1) as k]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== filter keeps order [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos FROM a WHERE v > 3 ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  FilterExec: v@2 > 3, projection=[contig@0, pos@1]
+    RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== filter contig = const, ORDER BY pos [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT pos FROM a WHERE contig = '1' ORDER BY pos
+SortPreservingMergeExec: [pos@0 ASC NULLS LAST]
+  FilterExec: contig@0 = 1, projection=[pos@1]
+    RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== union all, ORDER BY key [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos FROM a UNION ALL SELECT contig, pos FROM b ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  UnionExec
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== union all, no ORDER BY [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos FROM a UNION ALL SELECT contig, pos FROM b
+UnionExec
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== limit on ordered table [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos FROM a ORDER BY contig, pos LIMIT 5
+DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], limit=5, output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== ORDER BY that contradicts the declared order [target_partitions=4, prefer_hash_join=true, prefer_existing_sort=true]
+SELECT contig, pos FROM a ORDER BY pos
+SortExec: expr=[pos@1 ASC NULLS LAST], preserve_partitioning=[false]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== inner equi-join on full key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos = b.pos
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, w@5 as w]
+  SortMergeJoinExec: join_type=Inner, on=[(contig@0, contig@0), (pos@1, pos@1)]
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== inner equi-join, ORDER BY key above [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, w@5 as w]
+    SortMergeJoinExec: join_type=Inner, on=[(contig@0, contig@0), (pos@1, pos@1)]
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== inner equi-join, keys written in permuted order [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.pos = b.pos AND a.contig = b.contig ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  SortExec: expr=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, w@5 as w]
+      SortMergeJoinExec: join_type=Inner, on=[(pos@1, pos@1), (contig@0, contig@0)]
+        SortExec: expr=[pos@1 ASC, contig@0 ASC], preserve_partitioning=[true]
+          RepartitionExec: partitioning=Hash([pos@1, contig@0], 4), input_partitions=1, maintains_sort_order=true
+            DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+        SortExec: expr=[pos@1 ASC, contig@0 ASC], preserve_partitioning=[true]
+          RepartitionExec: partitioning=Hash([pos@1, contig@0], 4), input_partitions=1, maintains_sort_order=true
+            DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== left join, ORDER BY left key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT a.contig, a.pos, v, w FROM a LEFT JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, w@5 as w]
+    SortMergeJoinExec: join_type=Left, on=[(contig@0, contig@0), (pos@1, pos@1)]
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== right join, ORDER BY right key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT b.contig, b.pos, v, w FROM a RIGHT JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY b.contig, b.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@3 as contig, pos@4 as pos, v@2 as v, w@5 as w]
+    SortMergeJoinExec: join_type=Right, on=[(contig@0, contig@0), (pos@1, pos@1)]
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== full join, ORDER BY coalesced key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT coalesce(a.contig, b.contig) c, coalesce(a.pos, b.pos) p, v, w FROM a FULL JOIN b ON a.contig = b.contig AND a.pos = b.pos ORDER BY c, p
+SortPreservingMergeExec: [c@0 ASC NULLS LAST, p@1 ASC NULLS LAST]
+  SortExec: expr=[c@0 ASC NULLS LAST, p@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[CASE WHEN contig@0 IS NOT NULL THEN contig@0 ELSE contig@3 END as c, CASE WHEN pos@1 IS NOT NULL THEN pos@1 ELSE pos@4 END as p, v@2 as v, w@5 as w]
+      SortMergeJoinExec: join_type=Full, on=[(contig@0, contig@0), (pos@1, pos@1)]
+        RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+        RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== left semi join (IN), ORDER BY key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos, v FROM a WHERE EXISTS (SELECT 1 FROM b WHERE a.contig = b.contig AND a.pos = b.pos) ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  SortMergeJoinExec: join_type=LeftSemi, on=[(contig@0, contig@0), (pos@1, pos@1)]
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== equi-join on key prefix (contig) with residual filter [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT a.contig, a.pos, v, w FROM a JOIN b ON a.contig = b.contig AND a.pos < b.pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, w@5 as w]
+    SortMergeJoinExec: join_type=Inner, on=[(contig@0, contig@0)], filter=pos@0 < pos@1
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos, w], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== interval join: contig equality plus range [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT a.contig, a.pos, v, label FROM a JOIN i ON a.contig = i.contig AND a.pos >= i.start_pos AND a.pos < i.end_pos ORDER BY a.contig, a.pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, v@2 as v, label@6 as label]
+    SortMergeJoinExec: join_type=Inner, on=[(contig@0, contig@0)], filter=pos@0 >= start_pos@1 AND pos@0 < end_pos@2
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+      RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[contig, start_pos, end_pos, label], output_ordering=[contig@0 ASC NULLS LAST, start_pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== range-only join (no equality) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT a.pos, v, label FROM a JOIN i ON a.pos >= i.start_pos AND a.pos < i.end_pos ORDER BY a.pos
+SortPreservingMergeExec: [pos@0 ASC NULLS LAST]
+  SortExec: expr=[pos@0 ASC NULLS LAST], preserve_partitioning=[true]
+    NestedLoopJoinExec: join_type=Inner, filter=pos@0 >= start_pos@1 AND pos@0 < end_pos@2, projection=[pos@0, v@1, label@4]
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[pos, v], file_type=csv, has_header=true
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[start_pos, end_pos, label], file_type=csv, has_header=true
+
+=== single range predicate join [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT a.pos, v, label FROM a JOIN i ON a.pos >= i.start_pos ORDER BY a.pos
+SortPreservingMergeExec: [pos@0 ASC NULLS LAST]
+  SortExec: expr=[pos@0 ASC NULLS LAST], preserve_partitioning=[true]
+    NestedLoopJoinExec: join_type=Inner, filter=pos@0 >= start_pos@1, projection=[pos@0, v@1, label@3]
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[pos, v], file_type=csv, has_header=true
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/i.csv]]}, projection=[start_pos, label], file_type=csv, has_header=true
+
+=== aggregate on full key, ORDER BY key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos, sum(v) FROM a GROUP BY contig, pos ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, pos@1 as pos], aggr=[sum(a.v)], ordering_mode=Sorted
+    RepartitionExec: partitioning=Hash([contig@0, pos@1], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[contig@0 as contig, pos@1 as pos], aggr=[sum(a.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key prefix [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, sum(v) FROM a GROUP BY contig ORDER BY contig
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST]
+  AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+    RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[contig@0 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, v], output_ordering=[contig@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key in permuted order [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT pos, contig, sum(v) FROM a GROUP BY pos, contig ORDER BY contig, pos
+SortPreservingMergeExec: [contig@1 ASC NULLS LAST, pos@0 ASC NULLS LAST]
+  AggregateExec: mode=FinalPartitioned, gby=[pos@0 as pos, contig@1 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+    RepartitionExec: partitioning=Hash([pos@0, contig@1], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@1 ASC NULLS LAST, pos@0 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[pos@1 as pos, contig@0 as contig], aggr=[sum(a.v)], ordering_mode=Sorted
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== aggregate on key plus extra column (partially sorted) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, v, count(*) FROM a GROUP BY contig, v
+ProjectionExec: expr=[contig@0 as contig, v@1 as v, count(Int64(1))@2 as count(*)]
+  AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig, v@1 as v], aggr=[count(Int64(1))], ordering_mode=PartiallySorted([0])
+    RepartitionExec: partitioning=Hash([contig@0, v@1], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST
+      AggregateExec: mode=Partial, gby=[contig@0 as contig, v@1 as v], aggr=[count(Int64(1))], ordering_mode=PartiallySorted([0])
+        RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+          DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, v], output_ordering=[contig@0 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== ordered aggregate first_value ORDER BY pos [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, first_value(v ORDER BY pos) FROM a GROUP BY contig
+AggregateExec: mode=FinalPartitioned, gby=[contig@0 as contig], aggr=[first_value(a.v) ORDER BY [a.pos ASC NULLS LAST]], ordering_mode=Sorted
+  RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=4, preserve_order=true, sort_exprs=contig@0 ASC NULLS LAST
+    AggregateExec: mode=Partial, gby=[contig@0 as contig], aggr=[first_value(a.v) ORDER BY [a.pos ASC NULLS LAST]], ordering_mode=Sorted
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: running sum partition by contig order by pos [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos, sum(v) OVER (PARTITION BY contig ORDER BY pos ROWS UNBOUNDED PRECEDING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@3 as sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]
+  BoundedWindowAggExec: wdw=[sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": nullable Int64 }, frame: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+    RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: order by full key, range frame [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos, sum(v) OVER (ORDER BY contig, pos) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@3 as sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]
+  BoundedWindowAggExec: wdw=[sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "sum(a.v) ORDER BY [a.contig ASC NULLS LAST, a.pos ASC NULLS LAST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": nullable Int64 }, frame: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: descending order (reverse of input) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos, sum(v) OVER (ORDER BY contig DESC, pos DESC ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING@3 as sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING]
+  BoundedWindowAggExec: wdw=[sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING: Field { "sum(a.v) ORDER BY [a.contig DESC NULLS FIRST, a.pos DESC NULLS FIRST] ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING": nullable Int64 }, frame: ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING], mode=[Sorted]
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== window: unbounded following frame [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos, sum(v) OVER (PARTITION BY contig ORDER BY pos ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM a
+ProjectionExec: expr=[contig@0 as contig, pos@1 as pos, sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING@3 as sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING]
+  WindowAggExec: wdw=[sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING: Ok(Field { name: "sum(a.v) PARTITION BY [a.contig] ORDER BY [a.pos ASC NULLS LAST] ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING", data_type: Int64, nullable: true }), frame: WindowFrame { units: Rows, start_bound: CurrentRow, end_bound: Following(UInt64(NULL)), is_causal: false }]
+    RepartitionExec: partitioning=Hash([contig@0], 4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: pos + 1 [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos + 1 AS p FROM a ORDER BY contig, p
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, p@1 ASC NULLS LAST]
+  SortExec: expr=[contig@0 ASC NULLS LAST, p@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[contig@0 as contig, pos@1 + 1 as p]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: CAST(pos AS DOUBLE) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, CAST(pos AS DOUBLE) AS p FROM a ORDER BY contig, p
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, p@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, CAST(pos@1 AS Float64) as p]
+    RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: pos * -1 (antitone) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos * -1 AS p FROM a ORDER BY contig, p DESC
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, p@1 DESC]
+  SortExec: expr=[contig@0 ASC NULLS LAST, p@1 DESC], preserve_partitioning=[true]
+    ProjectionExec: expr=[contig@0 as contig, pos@1 * -1 as p]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: concat(contig, ':') (not monotone) [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT concat(contig, ':') AS c, pos FROM a ORDER BY c, pos
+SortPreservingMergeExec: [c@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  SortExec: expr=[c@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[concat(contig@0, :) as c, pos@1 as pos]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== projection: struct key, ORDER BY field [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT k['contig'] AS c, k['pos'] AS p FROM (SELECT named_struct('contig', contig, 'pos', pos) AS k FROM a) ORDER BY c, p
+DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig@0 as c, pos@1 as p], file_type=csv, has_header=true
+
+=== projection: ORDER BY struct column [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT k FROM (SELECT named_struct('contig', contig, 'pos', pos) AS k FROM a) ORDER BY k
+SortPreservingMergeExec: [k@0 ASC NULLS LAST]
+  SortExec: expr=[k@0 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[named_struct(contig, contig@0, pos, pos@1) as k]
+      RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+        DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== filter keeps order [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos FROM a WHERE v > 3 ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  FilterExec: v@2 > 3, projection=[contig@0, pos@1]
+    RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos, v], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== filter contig = const, ORDER BY pos [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT pos FROM a WHERE contig = '1' ORDER BY pos
+SortPreservingMergeExec: [pos@0 ASC NULLS LAST]
+  FilterExec: contig@0 = 1, projection=[pos@1]
+    RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1, maintains_sort_order=true
+      DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== union all, ORDER BY key [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos FROM a UNION ALL SELECT contig, pos FROM b ORDER BY contig, pos
+SortPreservingMergeExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST]
+  UnionExec
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+    DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== union all, no ORDER BY [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos FROM a UNION ALL SELECT contig, pos FROM b
+UnionExec
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/b.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== limit on ordered table [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos FROM a ORDER BY contig, pos LIMIT 5
+DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], limit=5, output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
+=== ORDER BY that contradicts the declared order [target_partitions=4, prefer_hash_join=false, prefer_existing_sort=false]
+SELECT contig, pos FROM a ORDER BY pos
+SortExec: expr=[pos@1 ASC NULLS LAST], preserve_partitioning=[false]
+  DataSourceExec: file_groups={1 group: [[tmp/.tmpmoPxXf/a.csv]]}, projection=[contig, pos], output_ordering=[contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST], file_type=csv, has_header=true
+
