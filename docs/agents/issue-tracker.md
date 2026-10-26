@@ -13,6 +13,13 @@ Issues and PRDs for this repo live as GitHub issues on `hail-is/datafusion-sandb
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
+Where GraphQL is blocked, as in a [cloud session](../cloud-sessions.md), `gh issue` and `gh pr` fail; use the REST API through `gh api`:
+
+- **Read an issue**: `gh api repos/hail-is/datafusion-sandbox/issues/<number> --jq '{title, body, labels: [.labels[].name]}'` and `gh api repos/hail-is/datafusion-sandbox/issues/<number>/comments --jq '.[].body'`
+- **Comment**: `gh api repos/hail-is/datafusion-sandbox/issues/<number>/comments -f body="..."`
+- **Apply / remove labels**: `gh api repos/hail-is/datafusion-sandbox/issues/<number>/labels -f "labels[]=..."` / `gh api -X DELETE repos/hail-is/datafusion-sandbox/issues/<number>/labels/<label>`
+- **Open a pull request**: `gh api repos/hail-is/datafusion-sandbox/pulls -f title="..." -f head="<branch>" -f base=main -F draft=true -f body="..."`
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** This repo is public but has no external contributors, so open PRs are in-flight work rather than incoming requests. `/triage` reads only issues.
@@ -40,7 +47,7 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
 - **Child ticket**: an issue linked to the map as a GitHub sub-issue with `scripts/gh-link sub <map> <child>...`. Where sub-issues aren't enabled, add the child to a task list in the map body and put `Part of #<map>` at the top of the child body. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`), plus `wayfinder:claimed` once claimed.
 - **Blocking**: native issue relationships where available, recorded with `scripts/gh-link blocked-by <issue> <blocker>...`; otherwise a `Blocked by: #<n>, #<n>` line at the top of the child body. A ticket is unblocked when every issue it lists is closed.
-- **Frontier query**: with native relationships, `gh api --paginate "repos/{owner}/{repo}/issues/<map>/sub_issues" --jq '.[] | select(.state == "open" and .issue_dependencies_summary.blocked_by == 0 and all(.labels[]; .name != "wayfinder:claimed")) | .number'` prints the frontier in map order (`blocked_by` counts only open blockers); the first wins. Otherwise, read the child numbers and their order from the map's task list, check each with `gh issue view <n> --json state,labels,body`, and drop any that is closed, has an open `Blocked by` issue, or has the `wayfinder:claimed` label; the first remaining child in task-list order wins.
+- **Frontier query**: with native relationships, `gh api --paginate "repos/hail-is/datafusion-sandbox/issues/<map>/sub_issues" --jq '.[] | select(.state == "open" and .issue_dependencies_summary.blocked_by == 0 and all(.labels[]; .name != "wayfinder:claimed")) | .number'` prints the frontier in map order (`blocked_by` counts only open blockers); the first wins. Otherwise, read the child numbers and their order from the map's task list, check each with `gh issue view <n> --json state,labels,body`, and drop any that is closed, has an open `Blocked by` issue, or has the `wayfinder:claimed` label; the first remaining child in task-list order wins.
 - **Claim**: `gh issue edit <n> --add-label wayfinder:claimed` — the session's first write.
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
 
