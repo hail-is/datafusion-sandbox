@@ -1,0 +1,128 @@
+datafusion wheel 55.0.0
+
+##### parquet: /tmp/parquet-contig-position-wWzcPl/samples
+input tables: ['s=HG00308', 's=HG00592', 's=HG02230', 's=NA18534']
+ordering: [('contig', True, False), ('position', True, False), ('alleles', True, False)]
+--- default groups=1 explain: 854 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- default groups=1 write: 854 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- default groups=2 explain: 922 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+decoded logical plan (backend side, before reopening scans):
+Union
+  Sort: contig ASC NULLS LAST, position ASC NULLS LAST, alleles ASC NULLS LAST
+    Union
+      TableScan: ?table?
+      TableScan: ?table?
+  Sort: contig ASC NULLS LAST, position ASC NULLS LAST, alleles ASC NULLS LAST
+    Union
+      TableScan: ?table?
+      TableScan: ?table?
+physical plan from the Python-built frame:
+DataSinkExec: sink=ParquetSink(file_groups=[])
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    UnionExec
+      SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        UnionExec
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-wWzcPl/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-wWzcPl/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+      SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        UnionExec
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-wWzcPl/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-wWzcPl/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-wWzcPl/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+--- default groups=2 write: 922 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+--- default groups=3 explain: 1056 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- default groups=3 write: 1056 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- default groups=8 explain: 1190 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- default groups=8 write: 1190 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- one-partition groups=1 explain: 854 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- one-partition groups=1 write: 854 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- one-partition groups=2 explain: 922 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+--- one-partition groups=2 write: 922 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+--- one-partition groups=3 explain: 1056 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- one-partition groups=3 write: 1056 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- one-partition groups=8 explain: 1190 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- one-partition groups=8 write: 1190 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- hostile groups=1 explain: 854 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- hostile groups=1 write: 854 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- hostile groups=2 explain: 922 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+--- hostile groups=2 write: 922 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+--- hostile groups=3 explain: 1056 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- hostile groups=3 write: 1056 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- hostile groups=8 explain: 1190 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- hostile groups=8 write: 1190 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+
+##### vortex: /tmp/vortex-contig-position-M6Djic/samples
+input tables: ['s=HG00308', 's=HG00592', 's=HG02230', 's=NA18534']
+ordering: [('contig', True, False), ('position', True, False), ('alleles', True, False)]
+--- default groups=1 explain: 846 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- default groups=1 write: 846 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- default groups=2 explain: 914 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+decoded logical plan (backend side, before reopening scans):
+Union
+  Sort: contig ASC NULLS LAST, position ASC NULLS LAST, alleles ASC NULLS LAST
+    Union
+      TableScan: ?table?
+      TableScan: ?table?
+  Sort: contig ASC NULLS LAST, position ASC NULLS LAST, alleles ASC NULLS LAST
+    Union
+      TableScan: ?table?
+      TableScan: ?table?
+physical plan from the Python-built frame:
+DataSinkExec: sink=VortexSink(file_groups=[])
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    UnionExec
+      SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        UnionExec
+          DataSourceExec: file_groups={1 group: [[tmp/vortex-contig-position-M6Djic/samples/s=HG00308/d.vortex, tmp/vortex-contig-position-M6Djic/samples/s=HG00308/c.vortex, tmp/vortex-contig-position-M6Djic/samples/s=HG00308/b.vortex, tmp/vortex-contig-position-M6Djic/samples/s=HG00308/a.vortex]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=vortex
+          DataSourceExec: file_groups={1 group: [[tmp/vortex-contig-position-M6Djic/samples/s=HG00592/d.vortex, tmp/vortex-contig-position-M6Djic/samples/s=HG00592/c.vortex, tmp/vortex-contig-position-M6Djic/samples/s=HG00592/b.vortex, tmp/vortex-contig-position-M6Djic/samples/s=HG00592/a.vortex]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=vortex
+      SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        UnionExec
+          DataSourceExec: file_groups={1 group: [[tmp/vortex-contig-position-M6Djic/samples/s=HG02230/d.vortex, tmp/vortex-contig-position-M6Djic/samples/s=HG02230/c.vortex, tmp/vortex-contig-position-M6Djic/samples/s=HG02230/b.vortex, tmp/vortex-contig-position-M6Djic/samples/s=HG02230/a.vortex]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=vortex
+          DataSourceExec: file_groups={1 group: [[tmp/vortex-contig-position-M6Djic/samples/s=NA18534/d.vortex, tmp/vortex-contig-position-M6Djic/samples/s=NA18534/c.vortex, tmp/vortex-contig-position-M6Djic/samples/s=NA18534/b.vortex, tmp/vortex-contig-position-M6Djic/samples/s=NA18534/a.vortex]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=vortex
+
+--- default groups=2 write: 914 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+--- default groups=3 explain: 1048 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- default groups=3 write: 1048 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- default groups=8 explain: 1182 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- default groups=8 write: 1182 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- one-partition groups=1 explain: 846 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- one-partition groups=1 write: 846 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- one-partition groups=2 explain: 914 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+--- one-partition groups=2 write: 914 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+--- one-partition groups=3 explain: 1048 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- one-partition groups=3 write: 1048 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- one-partition groups=8 explain: 1182 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- one-partition groups=8 write: 1182 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- hostile groups=1 explain: 846 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- hostile groups=1 write: 846 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- hostile groups=2 explain: 914 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+--- hostile groups=2 write: 914 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=3
+--- hostile groups=3 explain: 1048 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- hostile groups=3 write: 1048 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=2
+--- hostile groups=8 explain: 1182 plan bytes; plans identical: True; rows py=None rust=None; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+--- hostile groups=8 write: 1182 plan bytes; plans identical: True; rows py=32 rust=32; output files identical: True; SortExec=0 SortPreservingMergeExec=1
+
+ALL MATCH
+
+##### controls
+final sort above the union of groups -> SortPreservingMergeExec count: 0
+DataSinkExec: sink=ParquetSink(file_groups=[])
+  SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+    CoalescePartitionsExec
+      UnionExec
+        UnionExec
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-6CKTAi/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-6CKTAi/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        CoalescePartitionsExec
+          UnionExec
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-6CKTAi/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-6CKTAi/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-6CKTAi/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+short Action ordering: Execution error: the Action's ordering [("contig", true, false), ("position", true, false)] is not the datasets' [("contig", true, false), ("position", true, false), ("alleles", true, false)]
+unknown setting: Error setting config datafusion.no_such_key
+caused by
+Invalid or Unsupported Configuration: Config value "no_such_key" not found on ConfigOptions
+wheel collect: Exception DataFusion error: FFI error: Execution error: the scan of input table 's=NA18534' is a description; only the backend opens it
+to_bytes without the codec: Exception DataFusion error: Error serializing custom table at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/datafusion-proto-55.2.0/src/logical_plan/mod.rs:1534
+caused by
+This feature is not implemented: LogicalExtensionCodec is not provided
