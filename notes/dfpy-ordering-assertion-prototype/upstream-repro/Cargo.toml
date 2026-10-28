@@ -1,0 +1,14 @@
+# PROTOTYPE, throwaway: a standalone reproduction for an upstream report (hail-is/datafusion-sandbox#322).
+# A sort above a custom node is pushed beneath it although the node requires a different order,
+# whenever the two orders share a key at the same position.
+[package]
+name = "pushdown-guard-repro"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+datafusion = "=55.1.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

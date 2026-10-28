@@ -1,0 +1,304 @@
+datafusion wheel 55.0.0
+
+########## 1. shape: assertions in place of sorts, against the Rust plan builder
+
+##### parquet: ordering [('contig', True, False), ('position', True, False), ('alleles', True, False)]
+--- per-group assert, sink require, 2 groups, physical plan:
+DataSinkExec: sink=ParquetSink(file_groups=[])
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    UnionExec
+      OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          UnionExec
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+      OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          UnionExec
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+per-group assert, sink require: 24/24 cases match the Rust plan builder (assertion and sink nodes aside), no SortExec, same rows; 12/12 written files byte-identical
+--- per-group assert, sink assert, 2 groups, physical plan:
+OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    UnionExec
+      OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          UnionExec
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+      OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          UnionExec
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+per-group assert, sink assert: 24/24 cases match the Rust plan builder (assertion and sink nodes aside), no SortExec, same rows; 0/12 written files byte-identical
+--- per-group sort, sink assert, 2 groups, physical plan:
+OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+  SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    UnionExec
+      EstablishedOrderExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          UnionExec
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+      EstablishedOrderExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          UnionExec
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+per-group sort, sink assert: 24/24 cases match the Rust plan builder (assertion and sink nodes aside), no SortExec, same rows; 0/12 written files byte-identical
+--- per-group sort+final, sink require, 2 groups, physical plan:
+DataSinkExec: sink=ParquetSink(file_groups=[])
+  EstablishedOrderExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      UnionExec
+        OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+            UnionExec
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+            UnionExec
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+per-group sort+final, sink require: 24/24 cases match the Rust plan builder (assertion and sink nodes aside), no SortExec, same rows; 12/12 written files byte-identical
+--- per-group sort+final, sink assert, 2 groups, physical plan:
+OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+  EstablishedOrderExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      UnionExec
+        OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+            UnionExec
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+            UnionExec
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-HM29ub/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-HM29ub/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+per-group sort+final, sink assert: 24/24 cases match the Rust plan builder (assertion and sink nodes aside), no SortExec, same rows; 0/12 written files byte-identical
+
+##### vortex: ordering [('contig', True, False), ('position', True, False), ('alleles', True, False)]
+per-group assert, sink require: 24/24 cases match the Rust plan builder (assertion and sink nodes aside), no SortExec, same rows; 12/12 written files byte-identical
+per-group assert, sink assert: 24/24 cases match the Rust plan builder (assertion and sink nodes aside), no SortExec, same rows; 12/12 written files byte-identical
+per-group sort, sink assert: 24/24 cases match the Rust plan builder (assertion and sink nodes aside), no SortExec, same rows; 12/12 written files byte-identical
+per-group sort+final, sink require: 24/24 cases match the Rust plan builder (assertion and sink nodes aside), no SortExec, same rows; 12/12 written files byte-identical
+per-group sort+final, sink assert: 24/24 cases match the Rust plan builder (assertion and sink nodes aside), no SortExec, same rows; 12/12 written files byte-identical
+
+ALL MATCH
+
+########## 2. cases
+
+--- an order the data lacks: (position, contig, alleles)
+FAILED, RuntimeError:
+SanityCheckPlan
+caused by
+Error during planning: ordering assertion [position@1 ASC NULLS LAST, contig@0 ASC NULLS LAST, alleles@2 ASC NULLS LAST] failed: the plan can only meet it by sorting.
+  sorted by: SortExec: expr=[position@1 ASC NULLS LAST, contig@0 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+  path: OrderingAssertionExec -> SortExec
+
+--- two contradicting assertions: (position, contig, alleles) inside, the Action's key order at the root
+FAILED, RuntimeError:
+SanityCheckPlan
+caused by
+Error during planning: Plan: ["OrderingAssertionExec: [position@1 ASC NULLS LAST, contig@0 ASC NULLS LAST, alleles@2 ASC NULLS LAST]", "  SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]", "    SortExec: expr=[position@1 ASC NULLS LAST, contig@0 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]", "      DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet, sort_order_for_reorder=[position@1 ASC NULLS LAST, contig@0 ASC NULLS LAST, alleles@2 ASC NULLS LAST]"] does not satisfy order requirements: [position@1 ASC NULLS LAST, contig@0 ASC NULLS LAST, alleles@2 ASC NULLS LAST]. Child-0 order: [[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]]
+
+--- a computed key: position + 1, asserted in key order
+FAILED, RuntimeError:
+SanityCheckPlan
+caused by
+Error during planning: ordering assertion [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST] failed: the plan can only meet it by sorting.
+  sorted by: SortExec: expr=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+  path: OrderingAssertionExec -> SortExec
+
+--- a renamed key: position AS pos
+HELD: SortExec=0 rows=None
+OrderingAssertionExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+  OrderingAssertionExec: [contig@0 ASC NULLS LAST, pos@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/a.parquet]]}, projection=[contig, position@1 as pos, alleles, s], output_ordering=[contig@0 ASC NULLS LAST], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+
+--- a hash repartition on contig (4 partitions) under the assertion, default settings
+HELD: SortExec=0 rows=None
+OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+  OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      UnionExec
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+
+--- a hash repartition on contig (4 partitions) under the assertion, one-partition settings
+HELD: SortExec=0 rows=None
+OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+  OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      UnionExec
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+
+--- a hash repartition on contig (4 partitions) under the assertion, hostile settings
+HELD: SortExec=0 rows=None
+OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+  OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      UnionExec
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+
+--- a frontend sort by the key order beneath the assertion (data already ordered)
+HELD: SortExec=0 rows=None
+OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+  OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    EstablishedOrderExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        UnionExec
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+
+--- a frontend sort by (s, key) beneath an assertion of (s, key): a sort the frontend asked for, accepted
+HELD: SortExec=4 rows=None
+OrderingAssertionExec: [s@3 ASC NULLS LAST, contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+  OrderingAssertionExec: [s@3 ASC NULLS LAST, contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    EstablishedOrderExec: [s@3 ASC NULLS LAST, contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      SortPreservingMergeExec: [s@3 ASC NULLS LAST, contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        UnionExec
+          SortExec: expr=[s@3 ASC NULLS LAST, contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          SortExec: expr=[s@3 ASC NULLS LAST, contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          SortExec: expr=[s@3 ASC NULLS LAST, contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          SortExec: expr=[s@3 ASC NULLS LAST, contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], preserve_partitioning=[false]
+            DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+
+--- a frontend sort by (s, key), then a computed key, then an assertion: a sort the backend inserted
+FAILED, RuntimeError:
+SanityCheckPlan
+caused by
+Error during planning: ordering assertion [s@0 ASC NULLS LAST, contig@1 ASC NULLS LAST, position@2 ASC NULLS LAST, alleles@3 ASC NULLS LAST] failed: the plan can only meet it by sorting.
+  sorted by: SortExec: expr=[s@0 ASC NULLS LAST, contig@1 ASC NULLS LAST, position@2 ASC NULLS LAST, alleles@3 ASC NULLS LAST], preserve_partitioning=[true]
+  path: OrderingAssertionExec -> SortPreservingMergeExec -> SortExec
+
+--- #321's final logical sort, sink ordering as a requirement
+HELD: SortExec=0 rows=None
+DataSinkExec: sink=ParquetSink(file_groups=[])
+  EstablishedOrderExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      UnionExec
+        EstablishedOrderExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+            UnionExec
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        EstablishedOrderExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+            UnionExec
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+
+--- #321's final logical sort, sink ordering as an assertion
+HELD: SortExec=0 rows=None
+OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+  EstablishedOrderExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      UnionExec
+        EstablishedOrderExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+            UnionExec
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        EstablishedOrderExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+            UnionExec
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+              DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles, s], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+
+--- the marker inside a larger predicate
+FAILED, RuntimeError:
+Error during planning: assert_ordered outside a filter of its own: assert_ordered(contig, Utf8View("ASC NULLS LAST")) AND position > Int64(0)
+
+--- a filter above the assertion
+HELD: SortExec=0 rows=None
+OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+  OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+    SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      UnionExec
+        OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+            UnionExec
+              DataSourceExec: file_groups={1 group: [[]]}, projection=[contig, position, alleles, s], output_ordering=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], output_partitioning=UnknownPartitioning(1), file_type=parquet, predicate=position@1 > 5, pruning_predicate=position_null_count@1 != row_count@2 AND position_max@0 > 5, required_guarantees=[]
+              DataSourceExec: file_groups={1 group: [[]]}, projection=[contig, position, alleles, s], output_ordering=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], output_partitioning=UnknownPartitioning(1), file_type=parquet, predicate=position@1 > 5, pruning_predicate=position_null_count@1 != row_count@2 AND position_max@0 > 5, required_guarantees=[]
+        OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+          SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+            UnionExec
+              DataSourceExec: file_groups={1 group: [[]]}, projection=[contig, position, alleles, s], output_ordering=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], output_partitioning=UnknownPartitioning(1), file_type=parquet, predicate=position@1 > 5, pruning_predicate=position_null_count@1 != row_count@2 AND position_max@0 > 5, required_guarantees=[]
+              DataSourceExec: file_groups={1 group: [[]]}, projection=[contig, position, alleles, s], output_ordering=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST], output_partitioning=UnknownPartitioning(1), file_type=parquet, predicate=position@1 > 5, pruning_predicate=position_null_count@1 != row_count@2 AND position_max@0 > 5, required_guarantees=[]
+
+
+--- a projection above the assertion that drops alleles and s
+HELD: SortExec=0 rows=None
+OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST]
+  ProjectionExec: expr=[contig@0 as contig, position@1 as position]
+    OrderingAssertionExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+      SortPreservingMergeExec: [contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST, alleles@2 ASC NULLS LAST]
+        UnionExec
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00308/a.parquet]]}, projection=[contig, position, alleles], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG00592/a.parquet]]}, projection=[contig, position, alleles], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=HG02230/a.parquet]]}, projection=[contig, position, alleles], output_partitioning=UnknownPartitioning(1), file_type=parquet
+          DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/d.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/c.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/b.parquet, tmp/parquet-contig-position-Pbem6R/samples/s=NA18534/a.parquet]]}, projection=[contig, position, alleles], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+
+########## 3. a lie: sort-merge join with a repeated left key (apache/datafusion#25052)
+
+--- assert (contig, r_position, r_alleles) NULLS LAST over the join, write
+HELD: SortExec=0 rows=34
+DataSinkExec: sink=ParquetSink(file_groups=[])
+  OrderingAssertionExec: [contig@0 ASC NULLS LAST, r_position@3 ASC NULLS LAST, r_alleles@4 ASC NULLS LAST]
+    OrderingAssertionExec: [contig@0 ASC NULLS LAST, r_position@3 ASC NULLS LAST, r_alleles@4 ASC NULLS LAST]
+      SortMergeJoinExec: join_type=Inner, on=[(contig@0, r_contig@0)]
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-XRZr39/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00308/a.parquet]]}, projection=[contig, s], output_ordering=[contig@0 ASC NULLS LAST], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-XRZr39/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00592/a.parquet]]}, projection=[contig@0 as r_contig, position@1 as r_position, alleles@2 as r_alleles], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+rows actually in that order: False
+
+--- the same, with verify_order=True
+FAILED, RuntimeError:
+Execution error: ordering assertion [contig@0 ASC NULLS LAST, r_position@3 ASC NULLS LAST, r_alleles@4 ASC NULLS LAST] failed at run time: row 5 is out of order
+
+--- assert (contig, r_position, r_alleles) NULLS FIRST over the join, write
+HELD: SortExec=0 rows=34
+DataSinkExec: sink=ParquetSink(file_groups=[])
+  OrderingAssertionExec: [contig@0 ASC, r_position@3 ASC, r_alleles@4 ASC]
+    OrderingAssertionExec: [contig@0 ASC, r_position@3 ASC, r_alleles@4 ASC]
+      SortMergeJoinExec: join_type=Inner, on=[(contig@0, r_contig@0)]
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-XRZr39/samples/s=HG00308/d.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00308/c.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00308/b.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00308/a.parquet]]}, projection=[contig, s], output_ordering=[contig@0 ASC NULLS LAST], output_partitioning=UnknownPartitioning(1), file_type=parquet
+        DataSourceExec: file_groups={1 group: [[tmp/parquet-contig-position-XRZr39/samples/s=HG00592/d.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00592/c.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00592/b.parquet, tmp/parquet-contig-position-XRZr39/samples/s=HG00592/a.parquet]]}, projection=[contig@0 as r_contig, position@1 as r_position, alleles@2 as r_alleles], output_partitioning=UnknownPartitioning(1), file_type=parquet
+
+rows actually in that order: False
+
+--- the same, with verify_order=True
+FAILED, RuntimeError:
+Execution error: ordering assertion [contig@0 ASC, r_position@3 ASC, r_alleles@4 ASC] failed at run time: row 5 is out of order

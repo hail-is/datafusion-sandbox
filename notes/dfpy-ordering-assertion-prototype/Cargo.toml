@@ -1,0 +1,27 @@
+# PROTOTYPE, throwaway: answers "Can an ordering assertion hold a key order through the backend and
+# fail when it can't?" (hail-is/datafusion-sandbox#322), on the #321 prototype. Not the MVP.
+#
+# One cdylib holds both halves of the seam, as the shipped client would: the frontend pieces the
+# stock `datafusion` wheel loads (codec, schema-only scans) and an in-process backend over this
+# crate. Its own workspace, so the main crate's build and checks never see it.
+[package]
+name = "hail-proto"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+name = "hail_proto"
+crate-type = ["cdylib"]
+
+[dependencies]
+async-trait = "0.1"
+datafusion = { version = "=55.1.0", default-features = false }
+datafusion-ffi = "=55.1.0"
+datafusion-proto = { version = "=55.1.0", default-features = false }
+datafusion-sandbox = { path = "../.." }
+datafusion-session = "=55.1.0"
+futures = "0.3"
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
