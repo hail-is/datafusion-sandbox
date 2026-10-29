@@ -140,6 +140,25 @@ _Avoid_: worker pool, executor, thread pool
 The Tokio runtime object store requests run on.
 _Avoid_: network runtime, blocking pool (Tokio's own, separate, thing)
 
+### Frontend and backend
+
+**Frontend**:
+The Python library a Hail user calls, and the plans it builds by lowering Hail operations to
+DataFusion logical plans. It never executes a plan. See
+[ADR 0022](docs/adr/0022-build-hail-plans-with-datafusion-python-and-run-them-in-our-backend.md).
+_Avoid_: client, plan builder (a formulation's, a separate term)
+
+**Backend**:
+The Rust side that takes a frontend's plan and an Action and runs it: its own session, optimizers,
+runtimes and sinks. In-process first, remote later. The same sense as Hail's own "backend".
+_Avoid_: engine, server, executor
+
+**Ordering assertion**:
+A point in a frontend plan stating that its rows already arrive sorted by given columns. The
+backend requires that order at that point and fails before execution if it can only meet it by
+inserting a sort. A sort the frontend wrote beneath it is not a failure.
+_Avoid_: sort hint, assumed ordering
+
 ### Data
 
 **Sample**:
