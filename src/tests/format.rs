@@ -1,5 +1,5 @@
 use crate::{
-    format::OutputFormat,
+    format::{InputFormat, OutputFormat},
     pipeline::{self, PipelineOptions},
     testing::{generated::make_range_table, memory_store::MemoryStore},
     write::WriteTarget,
@@ -24,6 +24,24 @@ use vortex::{
     VortexSessionDefault, array::stream::ArrayStreamExt, file::OpenOptionsSessionExt,
     session::VortexSession,
 };
+
+#[test]
+fn an_input_format_parses_from_its_name() {
+    for format in [InputFormat::PARQUET, InputFormat::VORTEX] {
+        assert_eq!(format.name().parse::<InputFormat>().unwrap(), format);
+    }
+}
+
+#[test]
+fn parsing_an_unknown_input_format_name_names_the_supported_ones() {
+    let message = "csv".parse::<InputFormat>().unwrap_err().to_string();
+
+    assert!(message.contains("'csv'"), "{message}");
+    assert!(
+        message.contains("parquet") && message.contains("vortex"),
+        "{message}"
+    );
+}
 
 /// A Parquet file records each column chunk's codec but not its level, so the claim is that the
 /// file is written with the codec its compression mode names.

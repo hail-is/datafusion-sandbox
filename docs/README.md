@@ -15,6 +15,8 @@ Each usage doc covers one subsystem. Read the one for what you are about to run 
 - [Alternate allocator (snmalloc)](snmalloc.md): the `snmalloc` feature and its `CXXFLAGS`.
 - [Cloud sessions](cloud-sessions.md): running an agent on this repo in a Claude Code cloud session:
   the VM, the environment and its setup script, and GitHub access from the session.
+- [`hail_df`](hail_df.md): the Python frontend over the in-process backend: building it, opening a
+  dataset, and reading its input tables into a plan.
 - [`hailtools`](../python/README.md): converting Hail data to Parquet and Vortex.
 - [What the run metrics measure](../notes/datafusion-metrics.md): each column of the metrics table,
   read from the DataFusion source.

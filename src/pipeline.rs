@@ -24,7 +24,7 @@ use datafusion::{
     common::runtime::JoinSet,
     error::{DataFusionError, Result},
     execution::object_store::ObjectStoreUrl,
-    object_store::{client::SpawnedReqwestConnector, gcp::GoogleCloudStorageBuilder},
+    object_store::{ObjectStore, client::SpawnedReqwestConnector, gcp::GoogleCloudStorageBuilder},
     prelude::{SessionConfig, SessionContext},
 };
 use tokio::runtime::Handle;
@@ -37,14 +37,18 @@ use std::{
 /// Everything the runner needs besides the pipeline closure itself.
 ///
 /// That is the thread count of each runtime, the object stores the session registers before the
-/// pipeline runs, and the token that cancels the run, if any.
+/// pipeline runs, those it builds and those its caller built, and the token that cancels the run,
+/// if any.
 #[derive(Debug)]
 pub struct PipelineOptions {
     /// Number of worker threads for each runtime. Independent of the session's target-partition
     /// setting.
     threads: NonZeroUsize,
-    /// The object stores to register on the session, by base URL such as `gs://my-bucket`.
+    /// The object stores to build and register on the session, by base URL such as
+    /// `gs://my-bucket`.
     object_stores: Vec<ObjectStoreUrl>,
+    /// The object stores the caller built, to register on the session as they are.
+    built_stores: Vec<(ObjectStoreUrl, Arc<dyn ObjectStore>)>,
     /// The token that cancels the run; `None` for a run nothing cancels.
     cancellation: Option<CancellationToken>,
 }
@@ -57,8 +61,17 @@ impl PipelineOptions {
         Self {
             threads,
             object_stores: Vec::new(),
+            built_stores: Vec::new(),
             cancellation: None,
         }
+    }
+
+    /// These options, for a run whose session also serves `url` from `store`, a store the caller
+    /// built, such as an in-memory one.
+    #[must_use]
+    pub fn with_object_store(mut self, url: &ObjectStoreUrl, store: Arc<dyn ObjectStore>) -> Self {
+        self.built_stores.push((url.clone(), store));
+        self
     }
 
     /// These options, for a run that cancelling `token` cancels. See [`until_cancelled`] for
@@ -99,6 +112,7 @@ impl PipelineOptions {
         Ok(Self {
             threads,
             object_stores,
+            built_stores: Vec::new(),
             cancellation: None,
         })
     }
@@ -173,6 +187,7 @@ where
     let PipelineOptions {
         threads,
         object_stores,
+        built_stores,
         cancellation,
     } = options;
     if cancellation
@@ -199,6 +214,9 @@ where
     let ctx = SessionContext::new_with_config(config);
     for url in &object_stores {
         register_object_store(&ctx, url, io_runtime.handle())?;
+    }
+    for (url, store) in built_stores {
+        ctx.register_object_store(url.as_ref(), store);
     }
 
     io_runtime.block_on(async {

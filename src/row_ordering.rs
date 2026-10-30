@@ -12,18 +12,18 @@ use datafusion::{
     logical_expr::{Expr, SortExpr},
     prelude::col,
 };
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 /// One component of a row ordering: the locus, which expands under the locus representation, or a
 /// field that names itself.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum Component {
     Locus,
     Field(String),
 }
 
 /// A nonempty ordering declared in row components rather than stored field names.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RowOrdering(Vec<Component>);
 
 impl RowOrdering {
@@ -197,5 +197,25 @@ impl fmt::Display for RowOrdering {
             }
         }
         Ok(())
+    }
+}
+
+/// Parses the name a supported row ordering displays as: `locus`, `locus,alleles` or `locus,s`.
+impl FromStr for RowOrdering {
+    type Err = DataFusionError;
+
+    fn from_str(name: &str) -> Result<Self> {
+        [
+            Self::locus(),
+            Self::locus_then_alleles(),
+            Self::locus_then_sample(),
+        ]
+        .into_iter()
+        .find(|ordering| ordering.to_string() == name)
+        .ok_or_else(|| {
+            DataFusionError::Configuration(format!(
+                "unknown row ordering '{name}': expected locus, locus,alleles or locus,s"
+            ))
+        })
     }
 }

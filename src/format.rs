@@ -9,14 +9,14 @@ use datafusion::{
     },
     error::{DataFusionError, Result},
 };
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{collections::HashMap, fmt, str::FromStr, sync::Arc};
 use vortex::{VortexSessionDefault, session::VortexSession};
 use vortex_datafusion::{VortexFormat, VortexFormatFactory};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct InputFormat(InputRepr);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum InputRepr {
     Parquet,
     Vortex,
@@ -41,6 +41,21 @@ impl InputFormat {
         match self.0 {
             InputRepr::Parquet => Arc::new(ParquetFormat::default()),
             InputRepr::Vortex => Arc::new(VortexFormat::new(VortexSession::default())),
+        }
+    }
+}
+
+/// Parses an input format from its [name](InputFormat::name).
+impl FromStr for InputFormat {
+    type Err = DataFusionError;
+
+    fn from_str(name: &str) -> Result<Self> {
+        match name {
+            "parquet" => Ok(Self::PARQUET),
+            "vortex" => Ok(Self::VORTEX),
+            _ => Err(DataFusionError::Configuration(format!(
+                "unknown input format '{name}': expected parquet or vortex"
+            ))),
         }
     }
 }

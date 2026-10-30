@@ -1,6 +1,8 @@
 //! Prototypes and benchmarks for comparing `DataFusion` formulations of Hail-style genomics
 //! pipelines.
 //!
+//! - [`backend`] opens datasets for a frontend to plan against, handing out a scan description per
+//!   input table, and reads the scan descriptions back from the plan bytes a frontend encodes.
 //! - [`combiner_run`] resolves and executes one combiner run.
 //! - [`mod@format`] describes supported input and output file formats.
 //! - [`formulation`] builds the alternative combiner plans under comparison.
@@ -47,6 +49,7 @@
 #[global_allocator]
 static ALLOCATOR: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
+pub mod backend;
 pub mod combiner_run;
 pub mod format;
 pub mod formulation;

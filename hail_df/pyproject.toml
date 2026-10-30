@@ -1,0 +1,45 @@
+[project]
+name = "hail_df"
+version = "0.1.0"
+description = "A Hail frontend on datafusion-python, over the in-process Rust backend"
+authors = [
+    { name = "patrick-schultz", email = "pschultz@broadinstitute.org" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    # Lockstep with the backend's DataFusion major (ADR 0022).
+    "datafusion==55.0.0",
+    "pyarrow>=25.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.9,<2",
+    "pytest>=8",
+    "ruff>=0.17.1",
+    "vortex-data==0.86.1",
+]
+
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "python"
+module-name = "hail_df._native"
+# The fat-LTO `release` profile runs out of memory linking on 16 GB machines; see AGENTS.md.
+profile = "release-nonlto"
+
+[tool.uv]
+# `maturin develop` builds and installs the package into the project's environment; uv only
+# installs its dependencies.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["E501", "I"]
