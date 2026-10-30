@@ -76,7 +76,8 @@ fn a_group_of_one_sample_feeds_the_final_merge_directly() {
     }
 }
 
-/// One group, as many groups as samples, or more, is the union formulation's plan.
+/// One group, as many groups as samples, or more, is the union formulation's plan, but for where
+/// the plan builders' sorts put their established orders.
 #[test]
 fn one_group_or_one_sample_per_group_plans_as_the_union_formulation() {
     for format in FORMATS {
@@ -88,8 +89,8 @@ fn one_group_or_one_sample_per_group_plans_as_the_union_formulation() {
                 let grouped_shape = PlanShape::of(&grouped);
                 let union_shape = PlanShape::of(&union);
                 assert_eq!(
-                    grouped_shape.operators(),
-                    union_shape.operators(),
+                    grouped_shape.operators_without_established_orders(),
+                    union_shape.operators_without_established_orders(),
                     "{format:?} {representation:?} {groups} groups:\n{grouped_shape}\n{union_shape}",
                 );
             }

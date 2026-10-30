@@ -64,6 +64,13 @@ with the flag above it merges without re-sorting. Without the flag, ties on a lo
 any order. The run record names the row ordering in its `row_ordering` column, `locus` or
 `locus,s`.
 
+A run holds its rows in the row ordering with an ordering assertion at the root of the plan, so a
+rendered plan ends in the sink over `OrderingAssertionExec: order=[...]`, with `each partition`
+added for a write of one file per partition. Each sort a formulation writes shows as an
+`EstablishedOrderExec` above it, often over the merge that replaced the sort. A plan that could
+keep the ordering only by a sort DataFusion inserted fails before it runs, naming the sort. A
+Parquet write records the row ordering as each file's sorting columns.
+
 ## Outputs and sample annotation tables
 
 A reference combiner write, measured or not, ends by writing a sample annotation table beside its

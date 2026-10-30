@@ -70,6 +70,27 @@ impl PlanShape {
             .collect()
     }
 
+    /// The operators as [`PlanShape::operators`] renders them, with every established order left
+    /// out and the nodes beneath one indented as if it were not there: the merge tree whatever
+    /// sorts the plan builder wrote.
+    #[must_use]
+    pub fn operators_without_established_orders(&self) -> Vec<String> {
+        fn visit(node: &Arc<dyn ExecutionPlan>, depth: usize, operators: &mut Vec<String>) {
+            let depth = if node.name() == "EstablishedOrderExec" {
+                depth
+            } else {
+                operators.push(format!("{}{}", "  ".repeat(depth), node.name()));
+                depth.saturating_add(1)
+            };
+            for child in node.children() {
+                visit(child, depth, operators);
+            }
+        }
+        let mut operators = Vec::new();
+        visit(&self.plan, 0, &mut operators);
+        operators
+    }
+
     /// The object-store paths read by each scan, with scans and files in plan order.
     ///
     /// This reads each scan's verbose rendering, which lists every file of every group.
@@ -109,7 +130,8 @@ impl PlanShape {
     ///
     /// One group is a flat union of one single-partition input per input table beneath one
     /// sort-preserving merge. Several groups add an outer union with one single-partition input
-    /// per group. A group of one input table is its scan; a larger group is a flat merge. A
+    /// per group. A group of one input table is its scan, beneath the established order of the
+    /// plan builder's sort if it has one; a larger group is a flat merge. A
     /// formulation may merge once more after parallel operators above the outer union. No sort
     /// may appear.
     pub fn assert_merge_tree(&self, groups: &[usize]) {
@@ -139,7 +161,7 @@ impl PlanShape {
             );
             if n_input_tables == 1 {
                 assert!(
-                    input.is::<DataSourceExec>(),
+                    beneath_established_order(input).is::<DataSourceExec>(),
                     "expected a group of one input table to be its scan:\n{}",
                     self.context(input)
                 );
@@ -368,22 +390,33 @@ impl PlanShape {
         }
     }
 
-    /// Asserts that the root is a file or partitioned sink requiring `ordering`.
+    /// Asserts that the root is a file or partitioned sink requiring no ordering, over an ordering
+    /// assertion requiring `ordering`.
     ///
     /// Only column names are compared. Every stored ordering in these tests uses the same direction
     /// and null placement.
-    pub fn assert_ends_in_sink_requiring(&self, ordering: &StoredOrdering) {
+    pub fn assert_ends_in_sink_over_assertion_of(&self, ordering: &StoredOrdering) {
         assert!(
             self.plan.is::<DataSinkExec>() || self.plan.is::<PartitionedSinkExec>(),
             "expected the plan to end in DataSinkExec or PartitionedSinkExec:\n{self}"
         );
-        let required = self
-            .plan
+        assert!(
+            self.plan
+                .required_input_ordering()
+                .iter()
+                .all(Option::is_none),
+            "expected the sink to require no ordering:\n{self}"
+        );
+        let assertion = match self.plan.children().as_slice() {
+            [assertion] if assertion.name() == "OrderingAssertionExec" => Arc::clone(assertion),
+            _ => panic!("expected the sink's only input to be an ordering assertion:\n{self}"),
+        };
+        let required = assertion
             .required_input_ordering()
             .into_iter()
             .next()
             .flatten()
-            .unwrap_or_else(|| panic!("expected the sink to require an ordering:\n{self}"))
+            .unwrap_or_else(|| panic!("expected the assertion to require an ordering:\n{self}"))
             .into_single();
         let required: Vec<String> = required
             .iter()
@@ -397,7 +430,7 @@ impl PlanShape {
         assert_eq!(
             required,
             ordering.column_names(),
-            "expected the sink to require the stored ordering:\n{self}"
+            "expected the assertion to require the stored ordering:\n{self}"
         );
     }
 
@@ -501,6 +534,14 @@ fn is_byte_range(text: &str) -> bool {
         |bound: &str| !bound.is_empty() && bound.bytes().all(|byte| byte.is_ascii_digit());
     text.split_once("..")
         .is_some_and(|(start, end)| is_offset(start) && is_offset(end))
+}
+
+/// The node beneath `node` if `node` is an established order, and otherwise `node`.
+fn beneath_established_order(node: &Arc<dyn ExecutionPlan>) -> &Arc<dyn ExecutionPlan> {
+    match node.children().as_slice() {
+        [input] if node.name() == "EstablishedOrderExec" => input,
+        _ => node,
+    }
 }
 
 /// Operator names from rendered explain text, in display order.

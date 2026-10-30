@@ -70,8 +70,8 @@ fn rejects_a_dataset_with_an_insufficient_row_ordering() {
 }
 
 /// Over every shared dataset, each formulation merges each input table as one ordered partition,
-/// grouped-merge forms its groups from input tables, and the draining sink requires the
-/// formulation's ordering.
+/// grouped-merge forms its groups from input tables, and the draining sink is over the root
+/// assertion of the formulation's ordering.
 #[test]
 fn formulations_keep_their_plan_shape_under_a_hostile_session() {
     for format in FORMATS {
@@ -85,15 +85,15 @@ fn formulations_keep_their_plan_shape_under_a_hostile_session() {
                         formulation,
                         dataset.input_tables.len(),
                     ));
-                    shape.assert_ends_in_sink_requiring(&ordering);
+                    shape.assert_ends_in_sink_over_assertion_of(&ordering);
                 }
             }
         }
     }
 }
 
-/// The file sink holds the same merge tree as the draining sink, and requires the formulation's
-/// ordering in the dataset's representation, in both output formats.
+/// The file sink ends the same merge tree as the draining sink, over the root assertion of the
+/// formulation's ordering in the dataset's representation, in both output formats.
 #[test]
 fn formulations_keep_their_plan_shape_through_the_file_sink() {
     for format in FORMATS {
@@ -108,7 +108,7 @@ fn formulations_keep_their_plan_shape_through_the_file_sink() {
                         formulation,
                         dataset.input_tables.len(),
                     ));
-                    shape.assert_ends_in_sink_requiring(&ordering);
+                    shape.assert_ends_in_sink_over_assertion_of(&ordering);
                 }
             }
         }

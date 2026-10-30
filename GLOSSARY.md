@@ -73,10 +73,11 @@ _Avoid_: metrics path, output metrics, results directory
 **Sink**:
 The operator a combiner run's rows end in, and the plan's only consumer: a file sink when the
 action writes, a partitioned file sink when it writes one file per locus interval, a collecting
-sink when it collects, a draining sink when it only analyzes. The action chooses the sink; the sink
-requires the combiner's ordering. See
-[ADR 0014](docs/adr/0014-hold-the-merge-tree-with-the-sinks-ordering-requirement.md) and
-[ADR 0015](docs/adr/0015-write-one-file-per-partition-through-a-partitioned-sink.md).
+sink when it collects, a draining sink when it only analyzes. The action chooses the sink. The sink
+requires no ordering; the ordering assertion at the plan's root holds the combiner's ordering. See
+[ADR 0014](docs/adr/0014-hold-the-merge-tree-with-the-sinks-ordering-requirement.md),
+[ADR 0015](docs/adr/0015-write-one-file-per-partition-through-a-partitioned-sink.md) and
+[ADR 0022](docs/adr/0022-build-hail-plans-with-datafusion-python-and-run-them-in-our-backend.md).
 _Avoid_: consumer, writer, terminal, output
 
 **Combiner**:
@@ -97,8 +98,8 @@ _Avoid_: query builder, factory
 
 **Ordered frame**:
 What a plan builder returns: the combiner's rows as deferred work, paired with the stored ordering
-a sink must require of them and the output layout a write gives them. A run sinks an ordered frame,
-never a bare frame.
+a run holds them in and the output layout a write gives them. A run sinks an ordered frame, never a
+bare frame.
 _Avoid_: frame (unqualified), sorted frame (a sort is one way to satisfy the ordering; a merge tree
 is another), combined table
 
@@ -164,6 +165,13 @@ A point in a frontend plan stating that its rows already arrive sorted by given 
 backend requires that order at that point and fails before execution if it can only meet it by
 inserting a sort. A sort the frontend wrote beneath it is not a failure.
 _Avoid_: sort hint, assumed ordering
+
+**Established order**:
+The key order a sort in a plan puts its rows in, holding from that sort on. Beside an ordering
+assertion, it is the other way a plan states order: an assertion states an order the rows already
+arrive in, an established order one the plan sorts them into. Every sort in a frontend plan or a
+plan builder's frame establishes one.
+_Avoid_: frontend sort, explicit sort
 
 ### Data
 

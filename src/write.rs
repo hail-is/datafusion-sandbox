@@ -1,8 +1,11 @@
 //! File writes, their targets, sink frames, and execution.
 //!
-//! A write target pairs an output path with an output format. An ordered write takes its output
-//! layout from the ordered frame and selects the matching file sink. Validating an output path's
-//! extension against the format and layout remains the CLI's responsibility.
+//! A write target pairs an output path with an output format. A write takes the rows, the
+//! ordering they arrive in as a plain sort list, and their output layout, and selects the file
+//! sink for the layout. The sink records the ordering in each file's metadata, where the format
+//! has a place for it, and requires none: the caller holds the rows in it, with an ordering
+//! assertion at the root of the frame. Validating an output path's extension against the format
+//! and layout remains the CLI's responsibility.
 //!
 //! A throughput probe that writes never keeps its output, so it writes only to a [`VacantTarget`]:
 //! a target with nothing at its output path when checked, whose probe removes everything under
@@ -10,8 +13,8 @@
 
 use crate::{
     format::OutputFormat,
-    ordered_frame::{OrderedFrame, OutputLayout},
-    row_ordering::StoredOrdering,
+    ordered_frame::OutputLayout,
+    row_ordering::SortColumn,
     sink::{self, ExecutedSink, PartitionedSinkExec, ProbedSink, SinkTarget},
     throughput_probe::{ProbeKind, ProbeSettings},
 };
@@ -20,13 +23,19 @@ use datafusion::{
     arrow::datatypes::SchemaRef,
     catalog::Session,
     datasource::{
-        file_format::FileFormat, listing::ListingTableUrl, physical_plan::FileSinkConfig,
+        file_format::{
+            FileFormat,
+            parquet::{ParquetFormat, ParquetSink},
+        },
+        listing::ListingTableUrl,
+        physical_plan::FileSinkConfig,
+        sink::DataSinkExec,
     },
     error::{DataFusionError, Result},
     execution::object_store::ObjectStoreUrl,
     logical_expr::dml::InsertOp,
     object_store::{self, ObjectStore, ObjectStoreExt, path::Path as ObjectPath},
-    physical_expr::LexRequirement,
+    parquet::file::metadata::SortingColumn,
     physical_plan::ExecutionPlan,
     prelude::{DataFrame, SessionContext},
 };
@@ -42,48 +51,20 @@ pub struct WriteTarget {
 }
 
 impl WriteTarget {
-    /// The frame that writes `ordered` to this target when executed.
+    /// The frame that writes `frame`, whose rows arrive in `ordering`, to this target in `layout`
+    /// when executed.
     ///
-    /// The ordered frame chooses whether the output path names one file or a directory containing
-    /// one file per partition.
+    /// The layout chooses whether the output path names one file or a directory containing one
+    /// file per partition. Each file records `ordering` in its metadata where its format has a
+    /// place for it; the write requires no ordering of `frame`.
     ///
     /// # Errors
     ///
     /// Returns an error if the write plan cannot be built.
-    pub fn sink_frame(&self, ordered: OrderedFrame) -> Result<DataFrame> {
-        let OrderedFrame {
-            frame,
-            ordering,
-            layout,
-        } = ordered;
-        self.sink_frame_with(frame, Some(&ordering), layout)
-    }
-
-    /// Writes an ordered frame and returns the sink execution.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the write plan cannot be built or executed, or if the execution result
-    /// does not contain the expected row counts.
-    pub async fn write(&self, ordered: OrderedFrame) -> Result<ExecutedSink> {
-        sink::execute_and_retain(self.sink_frame(ordered)?).await
-    }
-
-    /// Writes one file of unordered rows and returns the sink execution.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the write plan cannot be built or executed, or if the execution result
-    /// does not contain the expected row counts.
-    pub async fn write_unordered(&self, frame: DataFrame) -> Result<ExecutedSink> {
-        let frame = self.sink_frame_with(frame, None, OutputLayout::SingleFile)?;
-        sink::execute_and_retain(frame).await
-    }
-
-    fn sink_frame_with(
+    pub fn sink_frame(
         &self,
         frame: DataFrame,
-        ordering: Option<&StoredOrdering>,
+        ordering: &[SortColumn],
         layout: OutputLayout,
     ) -> Result<DataFrame> {
         let target: Arc<dyn SinkTarget> = match layout {
@@ -97,6 +78,32 @@ impl WriteTarget {
             }),
         };
         sink::run_into(frame, &self.output_path, ordering, target)
+    }
+
+    /// Writes `frame`, whose rows arrive in `ordering`, in `layout`, as [`WriteTarget::sink_frame`]
+    /// plans it, and returns the sink execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write plan cannot be built or executed, or if the execution result
+    /// does not contain the expected row counts.
+    pub async fn write(
+        &self,
+        frame: DataFrame,
+        ordering: &[SortColumn],
+        layout: OutputLayout,
+    ) -> Result<ExecutedSink> {
+        sink::execute_and_retain(self.sink_frame(frame, ordering, layout)?).await
+    }
+
+    /// Writes one file of unordered rows and returns the sink execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write plan cannot be built or executed, or if the execution result
+    /// does not contain the expected row counts.
+    pub async fn write_unordered(&self, frame: DataFrame) -> Result<ExecutedSink> {
+        self.write(frame, &[], OutputLayout::SingleFile).await
     }
 }
 
@@ -247,9 +254,10 @@ impl VacantTarget {
         Ok(url.object_store() == self.store_url && url.prefix().prefix_matches(&self.location))
     }
 
-    /// Probes the write of `ordered` to this target with a probe of `kind` and `settings`, through
-    /// the sink a plain write chooses for the frame's output layout, and then removes everything
-    /// under the output path, whether the probe stopped, completed or failed.
+    /// Probes the write of `frame`, whose rows arrive in `ordering`, to this target in `layout`
+    /// with a probe of `kind` and `settings`, through the sink a plain write chooses for the
+    /// layout, and then removes everything under the output path, whether the probe stopped,
+    /// completed or failed.
     ///
     /// The removal deletes every object under the output path and lists it again after a pause,
     /// until a listing finds nothing and a local directory it is to remove is gone, for at most
@@ -262,11 +270,13 @@ impl VacantTarget {
     /// Returns an error if the probe fails, or if its output cannot be removed.
     pub async fn probe(
         &self,
-        ordered: OrderedFrame,
+        frame: DataFrame,
+        ordering: &[SortColumn],
+        layout: OutputLayout,
         settings: &ProbeSettings,
         kind: ProbeKind,
     ) -> Result<ProbedSink> {
-        let probed = match self.target.sink_frame(ordered) {
+        let probed = match self.target.sink_frame(frame, ordering, layout) {
             Ok(frame) => sink::probe(frame, settings, kind).await,
             Err(error) => Err(error),
         };
@@ -342,7 +352,8 @@ async fn objects_under(store: &dyn ObjectStore, location: &ObjectPath) -> Result
 }
 
 /// A format's file sink at a path, built the way `COPY TO` builds it except that the caller
-/// supplies the ordering requirement instead of the planner deriving one from the input.
+/// supplies the ordering the file records instead of the planner deriving one from the input, and
+/// the sink requires none.
 #[derive(Debug)]
 struct FileSinkTarget {
     output: OutputFormat,
@@ -355,7 +366,7 @@ impl SinkTarget for FileSinkTarget {
         &self,
         state: &dyn Session,
         input: Arc<dyn ExecutionPlan>,
-        ordering: Option<LexRequirement>,
+        ordering: &[SortColumn],
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let format = self.output.write_format(state)?;
         file_sink_plan(state, format.as_ref(), &self.path, input, ordering).await
@@ -375,7 +386,7 @@ impl SinkTarget for DirectoryFileSinkTarget {
         &self,
         state: &dyn Session,
         input: Arc<dyn ExecutionPlan>,
-        ordering: Option<LexRequirement>,
+        ordering: &[SortColumn],
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let format = self.output.write_format(state)?;
         let partition = |index: usize, count: usize| -> Arc<dyn SinkTarget> {
@@ -405,24 +416,68 @@ impl SinkTarget for PartitionFileSinkTarget {
         &self,
         state: &dyn Session,
         input: Arc<dyn ExecutionPlan>,
-        ordering: Option<LexRequirement>,
+        ordering: &[SortColumn],
     ) -> Result<Arc<dyn ExecutionPlan>> {
         file_sink_plan(state, self.format.as_ref(), &self.path, input, ordering).await
     }
 }
 
-/// The plan writing `input` into one file of `format` at `path`, requiring `ordering` of it.
+/// The plan writing `input`, whose rows arrive in `ordering`, into one file of `format` at `path`,
+/// requiring no ordering of it.
+///
+/// A Parquet file records `ordering` as its sorting columns. A format's own writer plan would also
+/// require the ordering it records, so the Parquet sink is built here as `ParquetFormat` builds it,
+/// without the requirement. Every other format records no ordering, and plans its writer with
+/// none.
 async fn file_sink_plan(
     state: &dyn Session,
     format: &dyn FileFormat,
     path: &str,
     input: Arc<dyn ExecutionPlan>,
-    ordering: Option<LexRequirement>,
+    ordering: &[SortColumn],
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let config = single_file_sink_config(state, format, path, input.schema())?;
-    format
-        .create_writer_physical_plan(input, state, config, ordering)
-        .await
+    match format.downcast_ref::<ParquetFormat>() {
+        Some(parquet) => {
+            let sorting_columns = sorting_columns(ordering, config.output_schema())?;
+            let sink = ParquetSink::new(config, parquet.options().clone())
+                .with_sorting_columns(sorting_columns);
+            Ok(Arc::new(DataSinkExec::new(input, Arc::new(sink), None)))
+        }
+        None => {
+            format
+                .create_writer_physical_plan(input, state, config, None)
+                .await
+        }
+    }
+}
+
+/// `ordering` as the sorting columns of a Parquet file of `schema`, or `None` if it is empty.
+///
+/// # Errors
+///
+/// Returns a planning error if a column of `ordering` is not in `schema`.
+fn sorting_columns(
+    ordering: &[SortColumn],
+    schema: &SchemaRef,
+) -> Result<Option<Vec<SortingColumn>>> {
+    let columns = ordering
+        .iter()
+        .map(|sort| {
+            let index = schema.index_of(&sort.column)?;
+            Ok(SortingColumn {
+                column_idx: i32::try_from(index).map_err(|error| {
+                    DataFusionError::Plan(format!(
+                        "column {index} is past the last a Parquet sorting column can name: \
+                         {error}"
+                    ))
+                })?,
+                descending: !sort.ascending,
+                nulls_first: sort.nulls_first,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((!columns.is_empty()).then_some(columns))
 }
 
 /// The sink configuration writing one file of `format` at exactly `path`, as `COPY TO` configures

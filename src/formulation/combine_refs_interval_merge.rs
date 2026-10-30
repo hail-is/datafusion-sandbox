@@ -19,11 +19,12 @@ pub(super) const fn output_layout() -> OutputLayout {
 /// a `SortPreservingMergeExec` that merges only that interval's rows, and the `j` merges feed the
 /// outer `UnionExec` as one partition each.
 ///
-/// Nothing above the outer union orders the intervals; the sink every action runs the frame into
-/// does. A partitioned file sink requires the ordering of each partition and writes each interval
-/// merge to its own file, so the `j` merges run alongside each other (ADR 0015). A single-partition
-/// sink requires the ordering of the whole and gets one more merge over the interval merges, so
-/// collect and explain see the rows in global locus order (ADR 0014).
+/// Nothing above the outer union orders the intervals; the ordering assertion every run places at
+/// the frame's root does. Beneath a write of one file per partition it holds the ordering within
+/// each partition, and the partitioned file sink writes each interval merge to its own file, so
+/// the `j` merges run alongside each other (ADR 0015). Beneath a single-partition sink it holds
+/// the ordering of the whole and gets one more merge over the interval merges, so collect and
+/// explain see the rows in global locus order (ADR 0014, ADR 0022).
 ///
 /// With no split points the one interval has no filter and the plan is the union formulation's.
 pub(super) async fn plan(

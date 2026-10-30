@@ -1,4 +1,4 @@
-//! The sinks an action runs its frame into, and the ordering requirement they put on the plan.
+//! The sinks an action runs its frame into, which require no ordering of it.
 
 use crate::testing::fixture::{self, DatasetFixture, FixtureFormat, SAMPLES, block_on};
 use crate::testing::plan_shape::PlanShape;
@@ -6,7 +6,9 @@ use crate::{
     formulation::Formulation,
     locus::LocusRepresentation,
     ordered_frame::{OrderedFrame, OutputLayout},
+    ordering_assertion::AssertionScope,
     pipeline::{self, PipelineOptions},
+    row_ordering::SortColumn,
     sink::{
         self, CollectingSink, DataSinkTarget, DrainingSink, PartitionedSinkExec, ProbedSink,
         SinkTarget,
@@ -27,7 +29,7 @@ use datafusion::{
     datasource::sink::DataSinkExec,
     error::{DataFusionError, Result},
     execution::{SendableRecordBatchStream, TaskContext},
-    physical_expr::{LexRequirement, PhysicalExpr},
+    physical_expr::PhysicalExpr,
     physical_plan::{
         ChildrenPropertiesMode, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan,
         ExecutionPlanProperties, PlanProperties, ReplaceChildrenOptions,
@@ -68,7 +70,7 @@ fn executing_a_sink_frame_retains_the_plan_it_ran() {
             let sink = Arc::new(CollectingSink::new(Arc::clone(frame.schema().inner())));
             let target = Arc::new(DataSinkTarget::new(sink.clone()));
             let executed =
-                sink::execute_and_retain(sink::run_into(frame, "collect", None, target)?).await?;
+                sink::execute_and_retain(sink::run_into(frame, "collect", &[], target)?).await?;
             Ok((executed, sink.take()))
         },
         PipelineOptions::single_threaded(),
@@ -103,7 +105,7 @@ fn the_drained_frame_returns_the_row_count() {
     let batches = pipeline::run(
         move |_| async move {
             let (_ctx, frame) = flat_read(fixture).await;
-            sink::drain(frame)?.collect().await
+            sink::drain(frame.frame)?.collect().await
         },
         PipelineOptions::single_threaded(),
     )
@@ -121,13 +123,16 @@ fn the_drained_frame_returns_the_row_count() {
     assert_eq!(count.value(0), u64::try_from(FIXTURE_ROWS).unwrap());
 }
 
+/// The collecting sink keeps the rows in the order they arrive: over a frame held in its ordering
+/// over one partition, that order.
 #[test]
-fn the_collecting_sink_keeps_the_rows_in_the_required_order() {
+fn the_collecting_sink_keeps_the_rows_in_the_order_they_arrive() {
     for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
         let fixture = fixture_of(format);
         let (count, batches) = pipeline::run(
             move |_| async move {
                 let (_ctx, frame) = flat_read(fixture).await;
+                let (frame, _) = frame.hold(AssertionScope::OnePartition)?;
                 let (frame, collected) = sink::collect(frame)?;
                 let count = frame.collect().await?;
                 Ok((count, collected.take()))
@@ -152,6 +157,7 @@ fn taking_the_collected_batches_empties_the_sink() {
     let (first, second) = pipeline::run(
         move |_| async move {
             let (_ctx, frame) = flat_read(fixture).await;
+            let (frame, _) = frame.hold(AssertionScope::OnePartition)?;
             let (frame, collected) = sink::collect(frame)?;
             frame.collect().await?;
             Ok((collected.take(), collected.take()))
@@ -164,15 +170,57 @@ fn taking_the_collected_batches_empties_the_sink() {
     assert_eq!(second.len(), 0, "{second:?}");
 }
 
-/// The sink's requirement is what turns an unordered union of ordered scans into a merge: no
-/// sort appears above the frame, and the plan ends in the sink.
+/// A sink requires one partition and no ordering, even one it is handed to record: over an
+/// unordered union of ordered scans, the optimizer coalesces the scans rather than merging them.
 #[test]
-fn the_sink_requires_the_ordering_and_the_optimizer_merges_to_meet_it() {
+fn a_sink_requires_no_ordering_of_its_own() {
+    for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
+        let fixture = fixture_of(format);
+        let plan = block_on(async {
+            let (_ctx, frame) = flat_read(fixture).await;
+            let sink = Arc::new(DrainingSink::new(Arc::clone(frame.frame.schema().inner())));
+            sink::run_into(
+                frame.frame,
+                "drain",
+                &frame.ordering.sort_columns(),
+                Arc::new(DataSinkTarget::new(sink)),
+            )
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap()
+        });
+
+        let shape = PlanShape::of(&plan);
+        assert!(plan.is::<DataSinkExec>(), "{format:?}:\n{shape}");
+        assert_eq!(
+            plan.required_input_ordering(),
+            [None],
+            "{format:?}:\n{shape}"
+        );
+        assert_eq!(
+            shape.nodes_of::<CoalescePartitionsExec>().len(),
+            1,
+            "{format:?}:\n{shape}"
+        );
+        assert!(
+            shape.nodes_of::<SortPreservingMergeExec>().is_empty()
+                && shape.nodes_of::<SortExec>().is_empty(),
+            "{format:?}:\n{shape}"
+        );
+    }
+}
+
+/// Over a frame held in its ordering over one partition, the sink ends a merge tree, the
+/// assertion beneath it holding the order.
+#[test]
+fn a_sink_over_a_held_frame_ends_its_merge_tree() {
     for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
         let fixture = fixture_of(format);
         let (plan, ordering) = block_on(async {
             let (_ctx, frame) = flat_read(fixture).await;
             let ordering = frame.ordering.clone();
+            let (frame, _) = frame.hold(AssertionScope::OnePartition).unwrap();
             let plan = sink::drain(frame)
                 .unwrap()
                 .create_physical_plan()
@@ -182,8 +230,7 @@ fn the_sink_requires_the_ordering_and_the_optimizer_merges_to_meet_it() {
         });
 
         let shape = PlanShape::of(&plan);
-        assert!(plan.is::<DataSinkExec>(), "{format:?}:\n{shape}");
-        shape.assert_ends_in_sink_requiring(&ordering);
+        shape.assert_ends_in_sink_over_assertion_of(&ordering);
         shape.assert_merge_tree(&[SAMPLES.len()]);
     }
 }
@@ -193,17 +240,12 @@ fn each_sink_displays_its_own_name() {
     let fixture = fixture_of(FixtureFormat::Vortex);
     let (drained, collected) = block_on(async {
         let (_ctx, frame) = flat_read(fixture).await;
-        let collected_frame = OrderedFrame {
-            frame: frame.frame.clone(),
-            ordering: frame.ordering.clone(),
-            layout: frame.layout,
-        };
-        let drained = sink::drain(frame)
+        let drained = sink::drain(frame.frame.clone())
             .unwrap()
             .create_physical_plan()
             .await
             .unwrap();
-        let (frame, _) = sink::collect(collected_frame).unwrap();
+        let (frame, _) = sink::collect(frame.frame).unwrap();
         let collected = frame.create_physical_plan().await.unwrap();
         (drained, collected)
     });
@@ -237,7 +279,8 @@ fn the_partitioned_sink_writes_each_partition_to_its_own_sink() {
             pipeline::run(
                 move |_| async move {
                     let (_ctx, frame) = flat_read(fixture).await;
-                    sink::run_into(frame.frame, "partitions", Some(&frame.ordering), target)?
+                    let (frame, ordering) = frame.hold(AssertionScope::EachPartition)?;
+                    sink::run_into(frame, "partitions", &ordering, target)?
                         .collect()
                         .await
                 },
@@ -282,19 +325,21 @@ fn the_partitioned_sink_writes_each_partition_to_its_own_sink() {
     }
 }
 
-/// The partitioned sink keeps its input's partitions, requires the ordering of each, and asks for
-/// neither a distribution nor more partitions, so the optimizer adds no merge or coalesce
-/// beneath it. It displays the sink it holds.
+/// The partitioned sink keeps its input's partitions, and asks for neither an ordering, a
+/// distribution nor more partitions, so the optimizer adds no merge or coalesce beneath it. Over a
+/// frame held in its ordering within each partition, the assertion beneath it holds the order. It
+/// displays the sink it holds.
 #[test]
-fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partitions() {
+fn the_partitioned_sink_requires_nothing_and_keeps_the_partitions() {
     let fixture = fixture_of(FixtureFormat::Vortex);
     let (plan, ordering) = block_on(async {
         let (_ctx, frame) = flat_read(fixture).await;
         let ordering = frame.ordering.clone();
+        let (frame, sort_columns) = frame.hold(AssertionScope::EachPartition).unwrap();
         let plan = sink::run_into(
-            frame.frame,
+            frame,
             "partitions",
-            Some(&frame.ordering),
+            &sort_columns,
             Arc::new(CollectingPartitions::default()),
         )
         .unwrap()
@@ -305,10 +350,9 @@ fn the_partitioned_sink_requires_the_ordering_per_partition_and_keeps_the_partit
     });
 
     let shape = PlanShape::of(&plan);
-    shape.assert_ends_in_sink_requiring(&ordering);
+    shape.assert_ends_in_sink_over_assertion_of(&ordering);
     assert_eq!(plan.output_partitioning().partition_count(), SAMPLES.len());
-    assert_eq!(plan.required_input_ordering().len(), 1);
-    assert!(plan.required_input_ordering()[0].is_some());
+    assert_eq!(plan.required_input_ordering(), [None]);
     assert_eq!(plan.benefits_from_input_partitioning(), [false]);
     assert_eq!(plan.maintains_input_order(), [true]);
     assert!(matches!(
@@ -344,7 +388,7 @@ fn the_partitioned_sink_rejects_a_target_that_does_not_yield_counts() {
 
         let unwritten: Arc<dyn SinkTarget> = Arc::new(PlanAsGiven);
         let not_the_count_schema =
-            PartitionedSinkExec::plan(&state, Arc::clone(&input), None, &|_, _| {
+            PartitionedSinkExec::plan(&state, Arc::clone(&input), &[], &|_, _| {
                 Arc::clone(&unwritten)
             })
             .await;
@@ -352,7 +396,7 @@ fn the_partitioned_sink_rejects_a_target_that_does_not_yield_counts() {
 
         let two_sinks: Arc<dyn SinkTarget> = Arc::new(PlanInstead(counts_of_two_sinks(&input)));
         let more_than_one_partition =
-            PartitionedSinkExec::plan(&state, Arc::clone(&input), None, &|_, _| {
+            PartitionedSinkExec::plan(&state, Arc::clone(&input), &[], &|_, _| {
                 Arc::clone(&two_sinks)
             })
             .await;
@@ -395,7 +439,7 @@ fn the_partitioned_sink_refuses_to_execute_when_its_input_partitions_change() {
         let (ctx, frame) = flat_read(fixture).await;
         let input = frame.frame.create_physical_plan().await.unwrap();
         let planned = CollectingPartitions::default()
-            .plan(&ctx.state(), Arc::clone(&input), None)
+            .plan(&ctx.state(), Arc::clone(&input), &[])
             .await
             .unwrap();
         assert_eq!(
@@ -430,7 +474,7 @@ impl SinkTarget for PlanAsGiven {
         &self,
         _: &dyn Session,
         input: Arc<dyn ExecutionPlan>,
-        _: Option<LexRequirement>,
+        _: &[SortColumn],
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(input)
     }
@@ -446,7 +490,7 @@ impl SinkTarget for PlanInstead {
         &self,
         _: &dyn Session,
         _: Arc<dyn ExecutionPlan>,
-        _: Option<LexRequirement>,
+        _: &[SortColumn],
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(Arc::clone(&self.0))
     }
@@ -474,7 +518,7 @@ impl SinkTarget for CollectingPartitions {
         &self,
         state: &dyn Session,
         input: Arc<dyn ExecutionPlan>,
-        ordering: Option<LexRequirement>,
+        ordering: &[SortColumn],
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let count = input.output_partitioning().partition_count();
         let sinks: Vec<Arc<CollectingSink>> = (0..count)
@@ -588,7 +632,7 @@ impl SinkTarget for PlanBehindExecuteOnPoll {
         &self,
         state: &dyn Session,
         input: Arc<dyn ExecutionPlan>,
-        ordering: Option<LexRequirement>,
+        ordering: &[SortColumn],
     ) -> Result<Arc<dyn ExecutionPlan>> {
         self.0
             .plan(state, Arc::new(ExecuteOnPoll(input)), ordering)
@@ -841,7 +885,7 @@ fn shadow_probe_paced(settings: ProbeSettings, partitions: Vec<PacedStream>) -> 
                 .filter(col("idx").gt_eq(lit(0)))?;
             let target = Arc::new(CollectingPartitions::default());
             sink::probe(
-                sink::run_into(frame, "paced", None, target)?,
+                sink::run_into(frame, "paced", &[], target)?,
                 &settings,
                 ProbeKind::Shadow,
             )
@@ -885,7 +929,7 @@ fn try_probe_generated(
             let sink = Arc::new(DrainingSink::new(Arc::clone(frame.schema().inner())));
             let target = target(DataSinkTarget::new(sink));
             let probed = sink::probe(
-                sink::run_into(frame, "drain", None, target)?,
+                sink::run_into(frame, "drain", &[], target)?,
                 &settings,
                 ProbeKind::Probe,
             )

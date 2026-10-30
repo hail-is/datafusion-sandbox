@@ -615,9 +615,10 @@ fn write_formulation(
                 None,
             )
             .await?;
-            let executed = target
-                .write(formulation.plan(&ctx, &dataset).await?)
-                .await?;
+            let ordered = formulation.plan(&ctx, &dataset).await?;
+            let layout = ordered.layout;
+            let (frame, ordering) = ordered.hold(layout.assertion_scope())?;
+            let executed = target.write(frame, &ordering, layout).await?;
             let file_size = match object_path {
                 Some(path) => Some(output.store().head(&path).await?.size),
                 None => None,
@@ -642,7 +643,7 @@ fn execute(
             let frame = build(&ctx)?;
             let collecting = Arc::new(CollectingSink::new(Arc::clone(frame.schema().inner())));
             let target = Arc::new(DataSinkTarget::new(collecting));
-            sink::execute_and_retain(sink::run_into(frame, "collect", None, target)?).await
+            sink::execute_and_retain(sink::run_into(frame, "collect", &[], target)?).await
         },
         PipelineOptions::single_threaded(),
     )

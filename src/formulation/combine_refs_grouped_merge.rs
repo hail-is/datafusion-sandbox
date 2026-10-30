@@ -41,10 +41,11 @@ pub(super) const fn output_layout() -> OutputLayout {
 /// final merge.
 ///
 /// The frame ends in the union of groups with no sort above it. The final merge comes from the
-/// sink every action runs the frame into: its ordering requirement over the union of ordered
-/// groups becomes the outer merge, and the group sorts become the inner ones. A final logical
-/// sort here would instead have the optimizer replace every group merge with a coalesce and
-/// delete the group sorts as redundant beneath it, leaving one flat merge. See ADR 0014.
+/// ordering assertion every run places at the frame's root: its requirement over the union of
+/// ordered groups becomes the outer merge, and the group sorts, each an established order, become
+/// the inner ones. Under a sink's requirement, before established orders, a final logical sort
+/// here had the optimizer replace every group merge with a coalesce and delete the group sorts as
+/// redundant beneath it, leaving one flat merge. See ADR 0014 and ADR 0022.
 ///
 /// With one group, or one input table per group, the plan is the union formulation's.
 ///

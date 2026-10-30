@@ -7,6 +7,8 @@
 //! - [`locus`] describes the supported stored locus representations, split points, and locus
 //!   intervals.
 //! - [`ordered_frame`] carries a formulation's deferred rows, ordering, and output layout.
+//! - [`ordering_assertion`] holds a frame in its key order with an assertion at its root and an
+//!   established order at every sort, and fails planning when only an inserted sort could meet it.
 //! - [`metrics_directory`] lays out the run tables under a metrics directory, fills and records a
 //!   run's run record, run metrics and progress samples there, and replays the shadow probes it
 //!   holds.
@@ -14,8 +16,8 @@
 //! - [`row_ordering`] declares row orderings in row components and expands them into stored fields
 //!   under a locus representation.
 //! - [`sample`] defines the field that carries each row's sample id.
-//! - [`sink`] ends a plan in a sink that requires the combiner's ordering, of the whole or of every
-//!   partition.
+//! - [`sink`] ends a plan in a sink, over one partition or every partition, which records the
+//!   combiner's ordering but requires none.
 //! - [`stored`] reads stored tables under a row ordering: datasets and locus-sorted tables.
 //! - [`throughput_probe`] holds a throughput probe's settings and progress samples, and decides
 //!   when it stops.
@@ -51,6 +53,7 @@ pub mod formulation;
 pub mod locus;
 pub mod metrics_directory;
 pub mod ordered_frame;
+pub mod ordering_assertion;
 pub mod pipeline;
 pub mod row_ordering;
 pub mod sample;

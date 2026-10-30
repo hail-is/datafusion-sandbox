@@ -4,7 +4,9 @@ use crate::{
     format::OutputFormat,
     formulation::Formulation,
     locus::LocusRepresentation,
+    ordered_frame::OutputLayout,
     pipeline::{self, PipelineOptions},
+    row_ordering::SortColumn,
     stored::dataset::Dataset,
     testing::{
         fixture::{self, FixtureFormat},
@@ -17,7 +19,9 @@ use crate::{
 use datafusion::{
     arrow::{array::Int32Array, compute::concat_batches},
     datasource::listing::ListingTableUrl,
-    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder,
+    parquet::{
+        arrow::arrow_reader::ParquetRecordBatchReaderBuilder, file::metadata::SortingColumn,
+    },
 };
 use object_store::{ObjectStoreExt, path::Path};
 use std::sync::Arc;
@@ -49,7 +53,9 @@ fn an_ordered_write_uses_its_frames_single_file_layout() {
             )
             .await?;
             let ordered = formulation.plan(&ctx, &dataset).await?;
-            let executed = target.write(ordered).await?;
+            let layout = ordered.layout;
+            let (frame, ordering) = ordered.hold(layout.assertion_scope())?;
+            let executed = target.write(frame, &ordering, layout).await?;
             let metadata = output.store().head(&Path::from("combined.parquet")).await?;
             Ok((executed, metadata))
         },
@@ -141,7 +147,9 @@ fn an_ordered_write_uses_its_frames_file_per_partition_layout() {
             )
             .await?;
             let ordered = formulation.plan(&ctx, &dataset).await?;
-            let executed = target.write(ordered).await?;
+            let layout = ordered.layout;
+            let (frame, ordering) = ordered.hold(layout.assertion_scope())?;
+            let executed = target.write(frame, &ordering, layout).await?;
             let written = output.locations_under("combined").await;
             Ok((executed, written))
         },
@@ -190,5 +198,76 @@ fn unordered_writes_return_what_they_executed() {
             metadata.size,
             "{extension}"
         );
+    }
+}
+
+/// A write records the sort list its rows arrive in as each Parquet file's sorting columns, in
+/// either layout, and its sink requires no ordering of the rows.
+#[test]
+fn a_parquet_write_records_its_ordering_as_sorting_columns_and_requires_none() {
+    for layout in [OutputLayout::SingleFile, OutputLayout::FilePerPartition] {
+        let store = MemoryStore::new("write-sorting-columns");
+        let output_path = format!("{}rows", store.url().as_str());
+        let target = WriteTarget {
+            output_path,
+            output_format: OutputFormat::PARQUET,
+        };
+        let ordering = [
+            SortColumn {
+                column: "idx".to_string(),
+                ascending: true,
+                nulls_first: false,
+            },
+            SortColumn {
+                column: "idx".to_string(),
+                ascending: false,
+                nulls_first: true,
+            },
+        ];
+
+        let (plan, files) = pipeline::run(
+            move |ctx| async move {
+                store.register(&ctx);
+                let frame = make_range_table(&ctx, 100, 32)?;
+                let executed = target.write(frame, &ordering, layout).await?;
+                let mut files = Vec::new();
+                for location in store.locations_under("").await {
+                    files.push(store.store().get(&location).await?.bytes().await?);
+                }
+                Ok((executed.plan, files))
+            },
+            PipelineOptions::single_threaded(),
+        )
+        .unwrap();
+
+        assert!(
+            plan.required_input_ordering().iter().all(Option::is_none),
+            "{layout:?}"
+        );
+        assert!(!files.is_empty(), "{layout:?}");
+        for bytes in files {
+            let metadata = ParquetRecordBatchReaderBuilder::try_new(bytes)
+                .unwrap()
+                .metadata()
+                .clone();
+            for row_group in metadata.row_groups() {
+                assert_eq!(
+                    row_group.sorting_columns(),
+                    Some(&vec![
+                        SortingColumn {
+                            column_idx: 0,
+                            descending: false,
+                            nulls_first: false,
+                        },
+                        SortingColumn {
+                            column_idx: 0,
+                            descending: true,
+                            nulls_first: true,
+                        },
+                    ]),
+                    "{layout:?}"
+                );
+            }
+        }
     }
 }

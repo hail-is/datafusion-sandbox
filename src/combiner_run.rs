@@ -15,6 +15,7 @@ use crate::{
         WriteRecord,
     },
     ordered_frame::{OrderedFrame, OutputLayout},
+    ordering_assertion::AssertionScope,
     pipeline::{self, PipelineOptions},
     row_ordering::RowOrdering,
     sink::{self, ExecutedSink},
@@ -37,10 +38,14 @@ use std::{
 
 /// What to do with the combined rows.
 ///
-/// Every action runs the rows into a sink that requires the formulation's ordering: the file
-/// sink for a write, measured, probed or not, a collecting sink for collect, and a draining sink
-/// for a throughput probe or an explain without a write. The run supplies the ordering to each.
-/// See ADR 0014 for why the plan ends in a sink rather than a sort.
+/// Every action runs the rows into a sink: the file sink for a write, measured, probed or not, a
+/// collecting sink for collect, and a draining sink for a throughput probe or an explain without a
+/// write. The run holds the rows in the formulation's ordering with an ordering assertion at the
+/// root of the frame it hands each sink, over the one partition the sink reads, or within each
+/// partition for a write of one file per partition, and hands a write's sink the ordering to
+/// record. A plan that could meet the assertion only by a sort the run inserted fails before it
+/// executes. See ADR 0014 for why the plan ends in a sink rather than a sort, and ADR 0022 for
+/// the assertion.
 #[derive(Debug)]
 pub enum Action {
     /// Write the rows to the target, then, for the reference combiner, the sample annotation table
@@ -310,7 +315,7 @@ impl StoppableAction {
             } => {
                 let target = &target;
                 rows.write_with(ctx, target, false, |ordered| async move {
-                    explain(target.sink_frame(ordered)?, true).await
+                    explain(written(target, ordered)?, true).await
                 })
                 .await
             }
@@ -420,12 +425,16 @@ impl CheckedProbe {
         let coverage = rows.coverage;
         let probed = match &write {
             Some(target) => {
-                rows.write_with(ctx, target.target(), false, |ordered| {
-                    target.probe(ordered, &settings, kind)
+                rows.write_with(ctx, target.target(), false, |ordered| async {
+                    let layout = ordered.layout;
+                    let (frame, ordering) = ordered.hold(layout.assertion_scope())?;
+                    target
+                        .probe(frame, &ordering, layout, &settings, kind)
+                        .await
                 })
                 .await?
             }
-            None => sink::probe(sink::drain(rows.ordered)?, &settings, kind).await?,
+            None => sink::probe(drained(rows.ordered)?, &settings, kind).await?,
         };
         let record = facts.record(
             run.run_id().to_string(),
@@ -452,9 +461,9 @@ impl CheckedProbe {
     }
 }
 
-/// Collects the rows in memory.
+/// Collects the rows in memory, held in their ordering over one partition.
 async fn collect_rows(ordered: OrderedFrame) -> Result<Outcome> {
-    let (frame, sink) = sink::collect(ordered)?;
+    let (frame, sink) = sink::collect(ordered.hold(AssertionScope::OnePartition)?.0)?;
     frame.collect().await?;
     Ok(Outcome::Batches(sink.take()))
 }
@@ -619,8 +628,10 @@ impl PlannedRows {
     /// sample set beside them, and returns the data write's execution. A failed data write writes
     /// no table, so the table's presence marks the data complete. See ADR 0018.
     async fn write(self, ctx: &SessionContext, target: &WriteTarget) -> Result<ExecutedSink> {
-        self.write_with(ctx, target, true, |ordered| target.write(ordered))
-            .await
+        self.write_with(ctx, target, true, |ordered| async {
+            sink::execute_and_retain(written(target, ordered)?).await
+        })
+        .await
     }
 
     /// Runs `data_write` on the rows as a write to `target`, through [`write_marked`], and returns
@@ -658,9 +669,22 @@ fn elapsed_ns(since: Instant) -> u64 {
 /// or a draining run without a write.
 fn sink_frame(ordered: OrderedFrame, write: Option<WriteTarget>) -> Result<DataFrame> {
     match write {
-        Some(target) => target.sink_frame(ordered),
-        None => sink::drain(ordered),
+        Some(target) => written(&target, ordered),
+        None => drained(ordered),
     }
+}
+
+/// The frame that writes `ordered` to `target` in its output layout, held in its ordering over the
+/// partitions the layout writes from.
+fn written(target: &WriteTarget, ordered: OrderedFrame) -> Result<DataFrame> {
+    let layout = ordered.layout;
+    let (frame, ordering) = ordered.hold(layout.assertion_scope())?;
+    target.sink_frame(frame, &ordering, layout)
+}
+
+/// The frame that drains `ordered`, held in its ordering over one partition.
+fn drained(ordered: OrderedFrame) -> Result<DataFrame> {
+    sink::drain(ordered.hold(AssertionScope::OnePartition)?.0)
 }
 
 /// The output of a probe that writes to `write`, checked vacant, and refused if it holds
@@ -684,7 +708,11 @@ async fn probe_output(
     Ok(Some(target))
 }
 
+/// Renders `frame`'s plan, executing it first when `analyze`d. The plan is built first either way,
+/// so a plan that fails planning, such as on a failed ordering assertion, fails the explain rather
+/// than rendering the failure as a plan.
 async fn explain(frame: DataFrame, analyze: bool) -> Result<Outcome> {
+    frame.clone().create_physical_plan().await?;
     let batches = frame.explain(false, analyze)?.collect().await?;
     Ok(Outcome::Plan(pretty_format_batches(&batches)?.to_string()))
 }

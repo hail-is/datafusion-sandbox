@@ -1,5 +1,7 @@
 # Write one file per partition through a partitioned sink
 
+> Superseded in part by [ADR 0022](0022-build-hail-plans-with-datafusion-python-and-run-them-in-our-backend.md), as implemented in [issue #329](https://github.com/hail-is/datafusion-sandbox/issues/329). `PartitionedSinkExec` no longer requires the ordering of each input partition: an ordering assertion at the root of the plan, held within each partition rather than over one, requires it instead, and the sink only records it in each file. The rest of this ADR stands.
+
 The interval-merge formulation of the reference combiner merges every sample within each locus
 interval and writes each interval's rows to its own file. Its plan builder returns one frame: the
 union formulation's frame filtered by each interval, the `j` branches unioned. A write runs that

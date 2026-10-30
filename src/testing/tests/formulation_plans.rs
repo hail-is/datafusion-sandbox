@@ -271,7 +271,7 @@ fn planned_returns_the_builders_error() {
 }
 
 #[test]
-fn sink_plan_ends_the_frame_in_a_draining_sink_requiring_its_ordering() {
+fn sink_plan_ends_the_frame_in_a_draining_sink_over_its_root_assertion() {
     let builder = ReadSorted::new(OutputLayout::SingleFile);
     let dataset = dataset(FixtureFormat::Parquet, LocusRepresentation::ContigPosition);
 
@@ -282,7 +282,7 @@ fn sink_plan_ends_the_frame_in_a_draining_sink_requiring_its_ordering() {
     .unwrap();
 
     let shape = PlanShape::of(&plan);
-    shape.assert_ends_in_sink_requiring(&ordering(LocusRepresentation::ContigPosition));
+    shape.assert_ends_in_sink_over_assertion_of(&ordering(LocusRepresentation::ContigPosition));
     assert!(shape.to_string().contains("DrainingSink"), "{shape}");
 }
 
@@ -309,7 +309,7 @@ fn physical_plan_plans_under_the_hostile_config_of_eight_partitions_into_a_drain
     );
     for plan in [plan, with_target] {
         let shape = PlanShape::of(&plan);
-        shape.assert_ends_in_sink_requiring(&ordering(LocusRepresentation::Packed));
+        shape.assert_ends_in_sink_over_assertion_of(&ordering(LocusRepresentation::Packed));
         assert!(shape.to_string().contains("DrainingSink"), "{shape}");
     }
 }
@@ -347,7 +347,7 @@ fn drained_plan_drains_the_builders_rows_up_to_the_limit_and_hands_back_their_or
             ordering,
             self::ordering(LocusRepresentation::ContigPosition)
         );
-        PlanShape::of(&plan).assert_ends_in_sink_requiring(&ordering);
+        PlanShape::of(&plan).assert_ends_in_sink_over_assertion_of(&ordering);
         assert_eq!(rows_written(plan, &dataset), expected, "{limit:?}");
         assert_eq!(rows_written(drained, &dataset), expected, "{limit:?}");
     }
@@ -405,7 +405,7 @@ fn file_sink_plan_writes_the_fixture_format_requiring_the_frames_ordering_up_to_
             let shape = PlanShape::of(&plan);
             let context = format!("{format:?} {layout:?}:\n{shape}");
             assert_eq!(ordering, self::ordering(LocusRepresentation::Packed));
-            shape.assert_ends_in_sink_requiring(&ordering);
+            shape.assert_ends_in_sink_over_assertion_of(&ordering);
             let sink = match format {
                 FixtureFormat::Parquet => "sink=ParquetSink",
                 FixtureFormat::Vortex => "sink=VortexSink",
@@ -432,7 +432,7 @@ fn collected_batches_executes_the_adjusted_frame_into_the_collecting_sink() {
         .collect();
     assert_eq!(rows, every_row()[..5]);
     let shape = PlanShape::of(&plan);
-    shape.assert_ends_in_sink_requiring(&ordering(LocusRepresentation::Packed));
+    shape.assert_ends_in_sink_over_assertion_of(&ordering(LocusRepresentation::Packed));
     assert!(shape.nodes_of::<DataSinkExec>().len() == 1, "{shape}");
     assert!(shape.output_rows_of::<DataSourceExec>() > 0, "{shape}");
     assert_eq!(

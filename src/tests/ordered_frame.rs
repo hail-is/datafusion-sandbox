@@ -1,9 +1,11 @@
 //! The row limit on an ordered frame, which caps its deferred rows and keeps what travels with
-//! them.
+//! them; holding an ordered frame in its ordering; and where a write in each output layout holds
+//! it.
 
 use crate::{
     locus::LocusRepresentation,
     ordered_frame::{OrderedFrame, OutputLayout},
+    ordering_assertion::AssertionScope,
     pipeline::{self, PipelineOptions},
     row_ordering::{RowOrdering, StoredOrdering},
 };
@@ -126,4 +128,56 @@ fn limit_returns_deferred_work_not_executed_rows() {
 
     let error = executed.unwrap_err();
     assert!(error.to_string().contains("Divide by zero"), "{error}");
+}
+
+/// Holding a frame places an ordering assertion of its stored ordering, over the scope asked for,
+/// at the root of its plan, and hands back that ordering as a sort list.
+#[test]
+fn hold_asserts_the_stored_ordering_at_the_root_and_returns_it_as_a_sort_list() {
+    for (scope, suffix) in [
+        (AssertionScope::OnePartition, ""),
+        (AssertionScope::EachPartition, ", each partition"),
+    ] {
+        let keyed = frame(&SessionContext::new())
+            .select(vec![
+                lit("chr01").alias("contig"),
+                col("n").alias("position"),
+                col("label").alias("s"),
+            ])
+            .unwrap();
+
+        let (held, ordering) = ordered(keyed, OutputLayout::SingleFile)
+            .hold(scope)
+            .unwrap();
+
+        assert_eq!(ordering, stored_ordering().sort_columns());
+        let plan = held.logical_plan().display_indent().to_string();
+        assert_eq!(
+            plan.lines().next(),
+            Some(
+                format!(
+                    "OrderingAssertion: contig ASC NULLS LAST, position ASC NULLS LAST, \
+                     s ASC NULLS LAST{suffix}"
+                )
+                .as_str()
+            ),
+            "{plan}"
+        );
+    }
+}
+
+#[test]
+fn a_single_file_is_written_from_one_partition_held_in_order() {
+    assert_eq!(
+        OutputLayout::SingleFile.assertion_scope(),
+        AssertionScope::OnePartition
+    );
+}
+
+#[test]
+fn a_file_per_partition_write_holds_each_partition_in_order() {
+    assert_eq!(
+        OutputLayout::FilePerPartition.assertion_scope(),
+        AssertionScope::EachPartition
+    );
 }

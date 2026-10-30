@@ -18,11 +18,12 @@ use datafusion::physical_plan::{
 
 use std::sync::Arc;
 
-/// Through the partitioned file sink, the plan is the sink over a union of one merge per
-/// interval, each merge over every input table's scan, with the sink keeping one partition per
-/// interval: no coalesce, sort, repartition, or filter operator anywhere, over every shared
-/// dataset in either format and representation, under the shared session and the hostile one.
-/// The sink requires the formulation's ordering in the dataset's representation.
+/// Through the partitioned file sink, the plan is the sink over the root assertion over a union of
+/// one merge per interval, each merge over every input table's scan, with the sink keeping one
+/// partition per interval: no coalesce, sort, repartition, or filter operator anywhere, over every
+/// shared dataset in either format and representation, under the shared session and the hostile
+/// one. The assertion holds the formulation's ordering in the dataset's representation within each
+/// partition.
 #[test]
 fn writes_through_a_partitioned_sink_over_one_merge_per_interval() {
     for format in FORMATS {
@@ -46,7 +47,7 @@ fn writes_through_a_partitioned_sink_over_one_merge_per_interval() {
                     );
                     let shape = PlanShape::of(&plan);
 
-                    shape.assert_ends_in_sink_requiring(&ordering);
+                    shape.assert_ends_in_sink_over_assertion_of(&ordering);
                     let sink_nodes = shape.nodes_of::<PartitionedSinkExec>();
                     assert_eq!(sink_nodes.len(), 1, "{context}:\n{shape}");
                     assert_eq!(
@@ -64,8 +65,9 @@ fn writes_through_a_partitioned_sink_over_one_merge_per_interval() {
                         .first()
                         .expect("the interval plan contains a union of intervals");
                     assert!(
-                        Arc::ptr_eq(plan.children()[0], outer_union),
-                        "{context}: expected the union of intervals directly beneath the sink:\n{shape}"
+                        Arc::ptr_eq(plan.children()[0].children()[0], outer_union),
+                        "{context}: expected the union of intervals directly beneath the root \
+                         assertion:\n{shape}"
                     );
                     assert!(
                         shape.nodes_of::<CoalescePartitionsExec>().is_empty(),
@@ -141,7 +143,7 @@ fn prunes_each_input_table_of_a_mixed_dataset_to_the_files_of_each_interval() {
 
 /// Through a single-partition sink, the interval merges feed one more merge above their union,
 /// so collect and explain see global locus order without a sort, over every shared dataset. The
-/// draining sink requires the formulation's ordering.
+/// draining sink is over the root assertion of the formulation's ordering.
 #[test]
 fn a_single_partition_sink_merges_the_interval_merges() {
     for format in FORMATS {
@@ -164,7 +166,7 @@ fn a_single_partition_sink_merges_the_interval_merges() {
                     let n_input_tables = dataset.input_tables.len();
                     shape.assert_merge_tree(&[n_input_tables; 3]);
                     shape.assert_one_merge_per_interval(3, n_input_tables, representation);
-                    shape.assert_ends_in_sink_requiring(&ordering);
+                    shape.assert_ends_in_sink_over_assertion_of(&ordering);
                 }
             }
         }

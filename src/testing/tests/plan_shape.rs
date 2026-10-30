@@ -8,8 +8,9 @@ use crate::{
     format::OutputFormat,
     locus::{Locus, LocusRepresentation, SplitPoints},
     ordered_frame::{OrderedFrame, OutputLayout},
+    ordering_assertion::{self, AssertionScope},
     pipeline::{self, PipelineOptions},
-    row_ordering::{RowOrdering, StoredOrdering},
+    row_ordering::{RowOrdering, SortColumn, StoredOrdering},
     sink::{self, PartitionedSinkExec},
     stored::locus_sorted_table::LocusSortedTable,
     testing::{
@@ -33,7 +34,7 @@ use datafusion::{
         source::DataSourceExec,
     },
     error::Result,
-    logical_expr::{Expr, Operator},
+    logical_expr::{Expr, LogicalPlanBuilder, Operator},
     physical_expr::{
         LexOrdering, PhysicalExpr, PhysicalSortExpr,
         expressions::{BinaryExpr, Column, lit as physical_lit},
@@ -271,6 +272,61 @@ fn operators_lists_each_rendered_line_with_its_indentation_and_without_details()
             "    DataSourceExec",
             "    DataSourceExec"
         ]
+    );
+}
+
+/// Leaving out established orders keeps every other operator, each at the depth it would have
+/// without them: two sorted frames unioned under a root assertion render as the merge over the
+/// union of their sorts.
+#[test]
+fn operators_without_established_orders_indents_as_if_they_were_not_there() {
+    let ordering = locus();
+    let plan = block_on(async {
+        let ctx = SessionContext::new();
+        let sorted = || {
+            ordered_frame(ordering.clone(), OutputLayout::SingleFile)
+                .frame
+                .into_unoptimized_plan()
+        };
+        let frame = DataFrame::new(
+            ctx.state(),
+            LogicalPlanBuilder::from(sorted())
+                .union(sorted())
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        ordering_assertion::hold(
+            frame,
+            &ordering.sort_columns(),
+            AssertionScope::OnePartition,
+        )
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap()
+    });
+    let shape = PlanShape::of(&plan);
+    assert!(
+        shape
+            .operators()
+            .iter()
+            .any(|operator| operator.trim() == "EstablishedOrderExec"),
+        "{shape}"
+    );
+
+    assert_eq!(
+        shape.operators_without_established_orders(),
+        [
+            "OrderingAssertionExec",
+            "  SortPreservingMergeExec",
+            "    UnionExec",
+            "      SortExec",
+            "        DataSourceExec",
+            "      SortExec",
+            "        DataSourceExec",
+        ],
+        "{shape}"
     );
 }
 
@@ -787,7 +843,7 @@ fn assert_one_merge_per_interval_rejects_other_shapes() {
 // Sinks.
 
 /// A frame of one row of `locus` and `s`, in a session with a memory store registered for
-/// writes, ordered by `ordering` and laid out by `layout`.
+/// writes, sorted by `ordering` and laid out by `layout`.
 fn ordered_frame(ordering: StoredOrdering, layout: OutputLayout) -> OrderedFrame {
     let ctx = SessionContext::new();
     MemoryStore::new("plan-shape-sinks").register(&ctx);
@@ -795,7 +851,11 @@ fn ordered_frame(ordering: StoredOrdering, layout: OutputLayout) -> OrderedFrame
     let sample: ArrayRef = Arc::new(StringArray::from(vec!["a"]));
     let batch = RecordBatch::try_from_iter([("locus", locus), ("s", sample)]).unwrap();
     OrderedFrame {
-        frame: ctx.read_batch(batch).unwrap(),
+        frame: ctx
+            .read_batch(batch)
+            .unwrap()
+            .sort(ordering.sort_expressions())
+            .unwrap(),
         ordering,
         layout,
     }
@@ -813,47 +873,65 @@ fn locus_then_sample() -> StoredOrdering {
     RowOrdering::locus_then_sample().expand(LocusRepresentation::Packed)
 }
 
+/// `ordered`'s frame held in its ordering over `scope`, with the plain sort list a sink records.
+fn held(ordered: OrderedFrame, scope: AssertionScope) -> (DataFrame, Vec<SortColumn>) {
+    ordered.hold(scope).unwrap()
+}
+
 #[test]
-fn assert_ends_in_sink_requiring_accepts_a_file_or_partitioned_sink_requiring_the_ordering() {
+fn assert_ends_in_sink_over_assertion_of_accepts_a_file_or_partitioned_sink_over_the_assertion() {
     for ordering in [locus(), locus_then_sample()] {
-        let drained = physical(sink::drain(ordered_frame(
-            ordering.clone(),
-            OutputLayout::SingleFile,
-        )));
+        let (frame, _) = held(
+            ordered_frame(ordering.clone(), OutputLayout::SingleFile),
+            AssertionScope::OnePartition,
+        );
+        let drained = physical(sink::drain(frame));
+        let (frame, sort_columns) = held(
+            ordered_frame(ordering.clone(), OutputLayout::FilePerPartition),
+            AssertionScope::EachPartition,
+        );
         let partitioned = physical(
             WriteTarget {
                 output_path: "memory://plan-shape-sinks/out".to_string(),
                 output_format: OutputFormat::PARQUET,
             }
-            .sink_frame(ordered_frame(
-                ordering.clone(),
-                OutputLayout::FilePerPartition,
-            )),
+            .sink_frame(frame, &sort_columns, OutputLayout::FilePerPartition),
         );
         assert!(drained.is::<DataSinkExec>());
         assert!(partitioned.is::<PartitionedSinkExec>());
 
         for plan in [drained, partitioned] {
-            PlanShape::of(&plan).assert_ends_in_sink_requiring(&ordering);
+            PlanShape::of(&plan).assert_ends_in_sink_over_assertion_of(&ordering);
         }
     }
 }
 
 #[test]
-fn assert_ends_in_sink_requiring_rejects_another_root_or_ordering() {
-    let drained = physical(sink::drain(ordered_frame(
-        locus_then_sample(),
-        OutputLayout::SingleFile,
-    )));
+fn assert_ends_in_sink_over_assertion_of_rejects_another_root_input_or_ordering() {
+    let (frame, _) = held(
+        ordered_frame(locus_then_sample(), OutputLayout::SingleFile),
+        AssertionScope::OnePartition,
+    );
+    let drained = physical(sink::drain(frame));
+    let unheld = physical(sink::drain(
+        ordered_frame(locus(), OutputLayout::SingleFile).frame,
+    ));
     for (plan, expected) in [
         (
             merge(union(vec![scan(), scan()])),
             "expected the plan to end in DataSinkExec or PartitionedSinkExec",
         ),
-        (drained, "expected the sink to require the stored ordering"),
+        (
+            unheld,
+            "expected the sink's only input to be an ordering assertion",
+        ),
+        (
+            drained,
+            "expected the assertion to require the stored ordering",
+        ),
     ] {
         let message =
-            panic_message(|| PlanShape::of(&plan).assert_ends_in_sink_requiring(&locus()));
+            panic_message(|| PlanShape::of(&plan).assert_ends_in_sink_over_assertion_of(&locus()));
 
         assert!(message.contains(expected), "{message}");
     }

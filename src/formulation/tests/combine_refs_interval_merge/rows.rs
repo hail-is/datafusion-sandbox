@@ -160,7 +160,9 @@ fn write_partitioned(
                 output_path: directory.clone(),
                 output_format,
             };
-            let rows_written = target.write(ordered).await?.rows_written;
+            let layout = ordered.layout;
+            let (frame, ordering) = ordered.hold(layout.assertion_scope())?;
+            let rows_written = target.write(frame, &ordering, layout).await?.rows_written;
 
             let paths: Vec<String> = (0..file_count)
                 .map(|index| {
