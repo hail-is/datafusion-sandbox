@@ -28,10 +28,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// The facts of one combiner run: its resolved settings and its whole-run measurements.
+/// The facts of one combiner run: how it ended, its resolved settings, and its whole-run
+/// measurements.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunRecord {
     pub run_id: String,
+    pub status: RunStatus,
     pub started_at: SystemTime,
     pub formulation: FormulationRecord,
     /// The run's row ordering, as its components joined by commas, such as `locus,s`.
@@ -41,22 +43,50 @@ pub struct RunRecord {
     /// The write the run made; `None` for a drained probe.
     pub write: Option<WriteRecord>,
     pub threads: usize,
-    /// The number of input tables the run merged, after narrowing.
-    pub input_tables: usize,
-    /// The size of the sample set the run covered, over its input tables.
-    pub samples: usize,
-    /// The rows written; for a probe, the rows the sink received before the stop.
-    pub rows_written: u64,
-    /// Wall-clock nanoseconds from resolved settings to the completed write, or a probe's stop.
+    /// The number of input tables the run merged, after narrowing; `None` for a run that ended
+    /// before it planned its rows.
+    pub input_tables: Option<usize>,
+    /// The size of the sample set the run covered, over its input tables; `None` for a run that
+    /// ended before it planned its rows.
+    pub samples: Option<usize>,
+    /// The rows written; for a probe, the rows the sink received before the stop. `None` for a
+    /// run that did not complete.
+    pub rows_written: Option<u64>,
+    /// Wall-clock nanoseconds from resolved settings to the completed write, a probe's stop, or
+    /// the end of a run that did not complete.
     pub run_ns: u64,
-    /// Wall-clock nanoseconds the physical plan's execution alone took, to a probe's stop.
-    pub execute_ns: u64,
+    /// Wall-clock nanoseconds the physical plan's execution alone took, to a probe's stop. `None`
+    /// for a run that did not complete.
+    pub execute_ns: Option<u64>,
     /// The process's peak resident set size in bytes, over its lifetime up to the plan's
     /// completion. A whole-process figure: it counts scan buffers and the pages the allocator
     /// keeps resident, whatever the allocator.
     pub peak_rss_bytes: u64,
     /// What a throughput probe decided and how it was set; `None` for a measured write.
     pub probe: Option<ProbeRecord>,
+}
+
+/// How a run ended.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunStatus {
+    /// It ran to its end: a measured write wrote its rows, or a probe stopped by its decision.
+    Completed,
+    /// It was cancelled before it completed.
+    Cancelled,
+    /// It failed before it completed.
+    Failed,
+}
+
+impl RunStatus {
+    /// The status as the run record's `status` column holds it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 /// A throughput probe's settings and the decision that stopped it, as the run record holds them.
@@ -155,6 +185,10 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
         cell: RecordCell::String(|record| &record.run_id),
     },
     RecordColumn {
+        name: "status",
+        cell: RecordCell::String(|record| record.status.name()),
+    },
+    RecordColumn {
         name: "started_at",
         cell: RecordCell::Timestamp(|record| record.started_at),
     },
@@ -206,11 +240,11 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
     },
     RecordColumn {
         name: "input_tables",
-        cell: RecordCell::UInt64(|record| to_u64(record.input_tables)),
+        cell: RecordCell::OptionalUInt64(|record| record.input_tables.map(to_u64)),
     },
     RecordColumn {
         name: "samples",
-        cell: RecordCell::UInt64(|record| to_u64(record.samples)),
+        cell: RecordCell::OptionalUInt64(|record| record.samples.map(to_u64)),
     },
     RecordColumn {
         name: "output_path",
@@ -223,7 +257,7 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
     },
     RecordColumn {
         name: "rows_written",
-        cell: RecordCell::UInt64(|record| record.rows_written),
+        cell: RecordCell::OptionalUInt64(|record| record.rows_written),
     },
     RecordColumn {
         name: "run_ns",
@@ -231,7 +265,7 @@ const RUN_RECORD_COLUMNS: &[RecordColumn] = &[
     },
     RecordColumn {
         name: "execute_ns",
-        cell: RecordCell::UInt64(|record| record.execute_ns),
+        cell: RecordCell::OptionalUInt64(|record| record.execute_ns),
     },
     RecordColumn {
         name: "peak_rss_bytes",

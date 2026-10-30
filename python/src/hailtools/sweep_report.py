@@ -103,12 +103,16 @@ class CellFigures:
 
 @dataclass(frozen=True)
 class FailedCell:
-    """A cell a runner ran that exited with a nonzero status, or recorded no run."""
+    """A cell a runner ran that exited with a nonzero status or recorded no run, or whose run
+    recorded that it did not complete."""
 
     runner: str
     cell: str
     run_id: str
-    exit_status: int
+    # None when the runner recorded no outcome for the cell.
+    exit_status: int | None
+    # The status of a run record that did not complete, such as `failed` or `cancelled`.
+    recorded_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -126,7 +130,8 @@ def report(metrics_dir: Path) -> Report:
     A runner records its cells' outcomes only when it finishes, so the join goes through each
     runner's cell order, naming each cell's run `<cell>-<runner>` as runner.sh does. A run that
     recorded itself counts even when its runner never recorded its outcome, as when the runner
-    reached its maximum run duration."""
+    reached its maximum run duration. A run record whose `status` is not `completed` makes its cell
+    failed, whatever its outcome; a record written before the column existed is completed."""
     runners = _runners(metrics_dir)
     records = _run_records(metrics_dir)
     groups: dict[tuple[str, str, int], list[Run]] = {}
@@ -137,8 +142,15 @@ def report(metrics_dir: Path) -> Report:
             run_id = f"{cell}-{runner['runner']}"
             outcome = outcomes.get(cell)
             record = records.get(run_id)
-            if outcome is not None and (outcome["exit_status"] != 0 or record is None):
-                failed.append(FailedCell(runner["runner"], cell, run_id, outcome["exit_status"]))
+            exit_status = None if outcome is None else outcome["exit_status"]
+            recorded_status = None if record is None else record.get("status")
+            if recorded_status not in (None, "completed"):
+                failed.append(
+                    FailedCell(runner["runner"], cell, run_id, exit_status, recorded_status)
+                )
+                continue
+            if outcome is not None and (exit_status != 0 or record is None):
+                failed.append(FailedCell(runner["runner"], cell, run_id, exit_status))
                 continue
             if record is None:
                 # The runner never reached this cell, or never finished it.
@@ -226,15 +238,22 @@ def render_markdown(report: Report) -> str:
             )
     if report.failed:
         lines += ["", "Failed cells:", ""]
-        lines += [
-            f"- {failed.run_id}: exit status {failed.exit_status}"
-            + ("" if failed.exit_status != 0 else ", no run record")
-            for failed in report.failed
-        ]
+        lines += [f"- {failed.run_id}: {_failure(failed)}" for failed in report.failed]
     if report.unfinished:
         lines += ["", "Unfinished runners:", ""]
         lines += [f"- {runner}: {status}" for runner, status in report.unfinished]
     return "\n".join(lines) + "\n"
+
+
+def _failure(failed: FailedCell) -> str:
+    """How a failed cell failed: its exit status, if any, then how its run record ended or that it
+    left none."""
+    parts = [] if failed.exit_status is None else [f"exit status {failed.exit_status}"]
+    if failed.recorded_status is not None:
+        parts.append(f"recorded as {failed.recorded_status}")
+    elif failed.exit_status == 0:
+        parts.append("no run record")
+    return ", ".join(parts)
 
 
 def _gib(bytes_: int | None) -> str:

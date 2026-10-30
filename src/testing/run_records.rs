@@ -1,6 +1,6 @@
 //! Run records for tests that need one but assert on none of its facts.
 
-use crate::metrics_directory::{FormulationRecord, RunRecord, WriteRecord};
+use crate::metrics_directory::{FormulationRecord, RunRecord, RunStatus, WriteRecord};
 use std::time::{Duration, SystemTime};
 
 /// A run record of `run_id` whose other fields hold plausible settings and measurements of a
@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 pub(crate) fn run_record(run_id: &str) -> RunRecord {
     RunRecord {
         run_id: run_id.to_string(),
+        status: RunStatus::Completed,
         started_at: SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_secs(1_700_000_000))
             .expect("a start time after the epoch"),
@@ -26,11 +27,11 @@ pub(crate) fn run_record(run_id: &str) -> RunRecord {
             compression: Some("snappy".to_string()),
         }),
         threads: 1,
-        input_tables: 4,
-        samples: 4,
-        rows_written: 32,
+        input_tables: Some(4),
+        samples: Some(4),
+        rows_written: Some(32),
         run_ns: 2_000,
-        execute_ns: 1_000,
+        execute_ns: Some(1_000),
         peak_rss_bytes: 1 << 20,
         probe: None,
     }

@@ -6,7 +6,7 @@ mod shared_fixture;
 
 use crate::{
     format::InputFormat,
-    metrics_directory::{Grid, MetricsDirectory, ProbeRecord, ReplayCount, RunRecord},
+    metrics_directory::{Grid, MetricsDirectory, ProbeRecord, ReplayCount, RunRecord, RunStatus},
     pipeline::{self, PipelineOptions},
     sink::{self, CollectingSink, DataSinkTarget},
     testing::{
@@ -323,6 +323,77 @@ fn a_record_of_another_run_is_refused() {
 
     let error = failed.unwrap_err().to_string();
     assert!(error.contains("run-b"), "{error}");
+    assert!(recorded.record.is_none() && recorded.metrics.is_none());
+}
+
+/// A run that failed or was cancelled is recorded by its run record alone, which names its status,
+/// and its id is then recorded: checking it again is refused.
+#[test]
+fn recording_an_unfinished_run_writes_its_run_record_alone_and_records_the_id() {
+    for (status, name) in [
+        (RunStatus::Failed, "failed"),
+        (RunStatus::Cancelled, "cancelled"),
+    ] {
+        let store = MemoryStore::new("unfinished");
+        let directory = directory(&store);
+        let record = RunRecord {
+            status,
+            rows_written: None,
+            execute_ns: None,
+            ..run_record("run-a")
+        };
+
+        let (recorded, rechecked) = on(&store, move |ctx| async move {
+            let run = directory.unrecorded(&ctx, "run-a").await?;
+            run.record_unfinished(&ctx, &record).await?;
+            Ok((
+                fixture::read_recorded_run(&ctx, &directory, "run-a").await?,
+                directory.unrecorded(&ctx, "run-a").await.map(|_| ()),
+            ))
+        });
+
+        let RecordedRun {
+            record,
+            metrics,
+            progress_samples,
+        } = recorded;
+        let record = record.unwrap();
+        assert_eq!(string_values(&record, "run_id"), ["run-a"], "{name}");
+        assert_eq!(string_values(&record, "status"), [name]);
+        assert!(metrics.is_none(), "{name}: {metrics:?}");
+        assert!(progress_samples.is_none(), "{name}: {progress_samples:?}");
+        let message = rechecked.unwrap_err().to_string();
+        assert!(message.contains("already has a run record"), "{message}");
+    }
+}
+
+/// Recording as unfinished a record whose status is completed, or that names another run than the
+/// one checked, is refused before anything is written: a completed run records its run metrics.
+#[test]
+fn recording_a_completed_or_another_run_as_unfinished_is_refused() {
+    let store = MemoryStore::new("unfinished-refused");
+    let directory = directory(&store);
+    let another = RunRecord {
+        status: RunStatus::Failed,
+        ..run_record("run-b")
+    };
+
+    let (completed, mismatched, recorded) = on(&store, move |ctx| async move {
+        let run = directory.unrecorded(&ctx, "run-a").await?;
+        let completed = run.record_unfinished(&ctx, &run_record("run-a")).await;
+        let run = directory.unrecorded(&ctx, "run-a").await?;
+        let mismatched = run.record_unfinished(&ctx, &another).await;
+        Ok((
+            completed,
+            mismatched,
+            fixture::read_recorded_run(&ctx, &directory, "run-a").await?,
+        ))
+    });
+
+    let completed = completed.unwrap_err().to_string();
+    assert!(completed.contains("completed"), "{completed}");
+    let mismatched = mismatched.unwrap_err().to_string();
+    assert!(mismatched.contains("run-b"), "{mismatched}");
     assert!(recorded.record.is_none() && recorded.metrics.is_none());
 }
 

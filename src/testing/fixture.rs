@@ -72,7 +72,7 @@ use crate::ordered_frame::OutputLayout;
 use crate::pipeline::{self, PipelineOptions};
 use crate::sample::sample_field;
 use crate::stored::dataset::sample_annotation_table::write_marked;
-use crate::testing::memory_store::MemoryStore;
+use crate::testing::memory_store::{MemoryStore, ReadGate};
 use crate::write::WriteTarget;
 use datafusion::{
     arrow::{
@@ -272,6 +272,19 @@ impl DatasetFixture {
     /// Registers the fixture's store on the session.
     pub fn register(&self, ctx: &SessionContext) {
         self.store.register(ctx);
+    }
+
+    /// Registers the fixture's store on the session as [`DatasetFixture::register`] does, but
+    /// through a view that holds every read of the dataset's files at the returned gate until it
+    /// is released, so a test can hold a run over the dataset open. Reads beside the dataset, such
+    /// as under the output root, pass.
+    #[must_use]
+    pub fn register_with_gated_reads(&self, ctx: &SessionContext) -> ReadGate {
+        let (gated, gate) = self
+            .store
+            .with_gated_reads_under(self.table_path.prefix().as_ref());
+        gated.register(ctx);
+        gate
     }
 
     /// The store holding the fixture's files.

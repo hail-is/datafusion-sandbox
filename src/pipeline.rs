@@ -6,6 +6,12 @@
 //!
 //! The CPU runtime lives on its own thread, in `cpu_runtime`, so the runner can drop it from
 //! async code.
+//!
+//! A run is cancelled through the token its options carry, and cancellation is cooperative: the
+//! pipeline stops its work with [`until_cancelled`], which drops the work, and with it any plan
+//! the work was executing, and fails with the cancelled error [`is_cancelled`] recognises. The
+//! pipeline may then do more before it ends, such as recording the run, and the run ends with
+//! what the pipeline returns. Work outside [`until_cancelled`] runs to completion.
 
 mod cpu_runtime;
 
@@ -22,11 +28,16 @@ use datafusion::{
     prelude::{SessionConfig, SessionContext},
 };
 use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
 
-use std::{future::Future, num::NonZeroUsize, sync::Arc, thread::available_parallelism};
+use std::{
+    error::Error, fmt, future::Future, num::NonZeroUsize, sync::Arc, thread::available_parallelism,
+};
 
-/// Everything the runner needs besides the pipeline closure itself: the thread count of each
-/// runtime and the object stores the session registers before the pipeline runs.
+/// Everything the runner needs besides the pipeline closure itself.
+///
+/// That is the thread count of each runtime, the object stores the session registers before the
+/// pipeline runs, and the token that cancels the run, if any.
 #[derive(Debug)]
 pub struct PipelineOptions {
     /// Number of worker threads for each runtime. Independent of the session's target-partition
@@ -34,6 +45,8 @@ pub struct PipelineOptions {
     threads: NonZeroUsize,
     /// The object stores to register on the session, by base URL such as `gs://my-bucket`.
     object_stores: Vec<ObjectStoreUrl>,
+    /// The token that cancels the run; `None` for a run nothing cancels.
+    cancellation: Option<CancellationToken>,
 }
 
 impl PipelineOptions {
@@ -44,6 +57,17 @@ impl PipelineOptions {
         Self {
             threads,
             object_stores: Vec::new(),
+            cancellation: None,
+        }
+    }
+
+    /// These options, for a run that cancelling `token` cancels. See [`until_cancelled`] for
+    /// what cancelling does.
+    #[must_use]
+    pub fn cancelled_by(self, token: CancellationToken) -> Self {
+        Self {
+            cancellation: Some(token),
+            ..self
         }
     }
 
@@ -75,6 +99,7 @@ impl PipelineOptions {
         Ok(Self {
             threads,
             object_stores,
+            cancellation: None,
         })
     }
 }
@@ -129,10 +154,14 @@ pub fn session_config() -> SessionConfig {
 /// Every `DataFusion` plan in this crate runs through here, test fixtures
 /// included. See `docs/adr/0006-run-every-plan-through-the-pipeline-runner.md`.
 ///
+/// The session carries the options' cancellation token, through which [`until_cancelled`] stops
+/// the pipeline's work. A run cancelled before it starts never calls `pipeline`.
+///
 /// # Errors
 ///
-/// Returns an error if a runtime or object store cannot be created, the pipeline fails, or its
-/// task cannot be joined.
+/// Returns the cancelled error if the run was cancelled before it started, and otherwise an error
+/// if a runtime or object store cannot be created, the pipeline fails, or its task cannot be
+/// joined.
 pub fn run<T, Fut>(
     pipeline: impl FnOnce(SessionContext) -> Fut + Send + 'static,
     options: PipelineOptions,
@@ -144,7 +173,14 @@ where
     let PipelineOptions {
         threads,
         object_stores,
+        cancellation,
     } = options;
+    if cancellation
+        .as_ref()
+        .is_some_and(CancellationToken::is_cancelled)
+    {
+        return Err(cancelled());
+    }
 
     // Multi-thread even at one worker: TLS and HTTP framing for every object store request runs
     // here, so throughput has to scale with the thread count. See
@@ -155,9 +191,12 @@ where
         .build()?;
     let cpu_runtime = CpuRuntime::try_new(threads.get())?;
 
-    let ctx = SessionContext::new_with_config(
-        session_config().with_extension(Arc::new(IoRuntime(io_runtime.handle().clone()))),
-    );
+    let mut config =
+        session_config().with_extension(Arc::new(IoRuntime(io_runtime.handle().clone())));
+    if let Some(token) = cancellation {
+        config = config.with_extension(Arc::new(Cancellation(token)));
+    }
+    let ctx = SessionContext::new_with_config(config);
     for url in &object_stores {
         register_object_store(&ctx, url, io_runtime.handle())?;
     }
@@ -198,6 +237,64 @@ pub fn io_runtime(config: &SessionConfig) -> Result<Handle> {
             )
         })
 }
+
+/// The token that cancels the run of the runner that built a session, carried in its
+/// configuration.
+#[derive(Debug)]
+struct Cancellation(CancellationToken);
+
+/// Runs `work` until it completes or the run of the pipeline `ctx` belongs to is cancelled,
+/// whichever comes first, and hands back its result.
+///
+/// On cancellation `work` is dropped, which stops any plan it was executing and leaves its
+/// unfinished writes unwritten, and the cancelled error is returned. Work started after the run
+/// is cancelled is never polled. A session the runner did not build, or built without a token,
+/// is never cancelled.
+///
+/// # Errors
+///
+/// Returns the cancelled error if the run is cancelled before `work` completes, and otherwise
+/// whatever error `work` returns.
+pub async fn until_cancelled<T>(
+    ctx: &SessionContext,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    let Some(cancellation) = ctx.state().config().get_extension::<Cancellation>() else {
+        return work.await;
+    };
+    tokio::select! {
+        biased;
+        () = cancellation.0.cancelled() => Err(cancelled()),
+        result = work => result,
+    }
+}
+
+/// Whether `error` is the cancelled error a cancelled run ends with, possibly beneath context
+/// added on its way out.
+#[must_use]
+pub fn is_cancelled(error: &DataFusionError) -> bool {
+    matches!(
+        error.find_root(),
+        DataFusionError::External(source) if source.is::<Cancelled>()
+    )
+}
+
+/// The cancelled error: what a cancelled run ends with.
+fn cancelled() -> DataFusionError {
+    DataFusionError::External(Box::new(Cancelled))
+}
+
+/// The source of the cancelled error.
+#[derive(Debug)]
+struct Cancelled;
+
+impl fmt::Display for Cancelled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the run was cancelled")
+    }
+}
+
+impl Error for Cancelled {}
 
 /// Registers the Google Cloud Storage bucket at `url`.
 fn register_object_store(

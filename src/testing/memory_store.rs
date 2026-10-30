@@ -5,6 +5,10 @@
 //! what a failed write leaves behind, which `MemoryStore::locations_under` lists.
 //! `MemoryStore::with_failing_writes_under` does the same over a store's existing objects, so a
 //! later write can fail where an earlier one succeeded.
+//!
+//! `MemoryStore::with_gated_reads_under` views a store's objects through a store that holds every
+//! read under a prefix at a [`ReadGate`] until the test releases it, so a test can hold a run open
+//! mid-execution, act on it, and then let it go on.
 
 #![expect(
     clippy::panic,
@@ -12,11 +16,15 @@
 )]
 
 mod failing_writes;
+mod gated_reads;
 
 #[cfg(test)]
 mod tests;
 
+pub use gated_reads::ReadGate;
+
 use failing_writes::FailingWrites;
+use gated_reads::GatedReads;
 
 use datafusion::{execution::object_store::ObjectStoreUrl, prelude::SessionContext};
 use futures_util::TryStreamExt;
@@ -77,6 +85,23 @@ impl MemoryStore {
                 Path::from(prefix),
             )),
         }
+    }
+
+    /// This store's objects at the same URL, through a view that holds every read under `prefix`
+    /// at the returned gate until it is released. Writes, deletes, and listings pass, and so does
+    /// every operation through this store itself.
+    #[must_use]
+    pub fn with_gated_reads_under(&self, prefix: &str) -> (Self, ReadGate) {
+        let gate = ReadGate::new();
+        let view = Self {
+            url: self.url.clone(),
+            store: Arc::new(GatedReads::new(
+                Arc::clone(&self.store),
+                Path::from(prefix),
+                gate.clone(),
+            )),
+        };
+        (view, gate)
     }
 
     fn with_store(name: &str, store: Arc<dyn ObjectStore>) -> Self {

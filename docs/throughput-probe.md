@@ -58,7 +58,8 @@ and its progress samples, one row each of run id, sample index, elapsed nanoseco
 `DIR/progress/<id>.parquet`. Replaying a shadow probe adds three more tables, again one file per
 run: its tightness checks in `DIR/checks/<id>.parquet`, its end-of-run decisions in
 `DIR/replay-baselines/<id>.parquet`, and its stops in `DIR/replays/<id>.parquet`; see
-[Replay](probe-calibration.md#replay). Its run record holds the rows received as `rows_written`, times
+[Replay](probe-calibration.md#replay). A probe is recorded only once it succeeds, so its run record's
+`status` is always `completed`; one that fails or is cancelled records nothing. Its run record holds the rows received as `rows_written`, times
 `execute_ns` to the stop, and fills the probe columns a measured write leaves empty: `action`,
 `stop_reason`, `steady_state_throughput`, `relative_half_width`, `warmup_end_ns`, `window_end_ns`,
 `window_rows`, `first_partition_end_ns`, and every setting, as `poll_period_ns`,

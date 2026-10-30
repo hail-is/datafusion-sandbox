@@ -11,7 +11,9 @@
 //! directory accumulates. A run id that already has a run record is refused: checking an id is
 //! the only way to get an [`UnrecordedRun`], and only an unrecorded run can be recorded. And the
 //! run record is written last, so its presence marks a recorded run: a failure between the
-//! writes leaves other tables' files without a record, which a retry of the id replaces.
+//! writes leaves other tables' files without a record, which a retry of the id replaces. A run
+//! that failed or was cancelled is recorded too, by a run record alone whose `status` says how it
+//! ended, and its id is then as recorded as a completed run's.
 //!
 //! The check is not a lock. Two runs sharing an id that check before either records both pass,
 //! and the later one's files replace the earlier one's.
@@ -38,7 +40,7 @@ mod run_record;
 mod tests;
 
 pub use replay::Grid;
-pub use run_record::{FormulationRecord, ProbeRecord, RunRecord, WriteRecord};
+pub use run_record::{FormulationRecord, ProbeRecord, RunRecord, RunStatus, WriteRecord};
 
 pub(crate) use progress_samples::progress_samples_schema;
 pub(crate) use run_metrics::run_metrics_schema;
@@ -332,6 +334,29 @@ impl UnrecordedRun {
         )
         .await?;
         Ok(metrics.unrecorded)
+    }
+
+    /// Records a run that did not complete: writes `record`, whose status says how the run ended,
+    /// and nothing else, since the run has no executed plan to take run metrics from.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `record` names another run id or the status completed, or if the run
+    /// record cannot be filled or written, which leaves the run unrecorded.
+    pub async fn record_unfinished(self, ctx: &SessionContext, record: &RunRecord) -> Result<()> {
+        self.check(record)?;
+        if record.status == RunStatus::Completed {
+            return Err(DataFusionError::Internal(format!(
+                "the run '{}' completed, so its run metrics must be recorded with it",
+                self.run_id
+            )));
+        }
+        write_table(
+            ctx,
+            run_record::run_record_batch(record)?,
+            self.directory.run_record_path(&self.run_id),
+        )
+        .await
     }
 
     /// Records a throughput probe: writes its progress `samples` first, and then records it as

@@ -1,7 +1,8 @@
 # Shared metrics directory fixture
 
 The tables the Rust writers in `src/metrics_directory.rs` write from fixed synthetic inputs: a
-measured write `write-r1`, and a drained shadow probe `shadow-r1` replayed under a small grid. The
+measured write `write-r1`, a drained shadow probe `shadow-r1` replayed under a small grid, and the
+run record alone of a measured write `failed-r1` whose `status` is `failed`. The
 `probe_viewer` and `sweep_report` suites read them
 ([ADR 0021](../../../../docs/adr/0021-hold-the-rust-python-contracts-with-shared-fixtures.md)).
 

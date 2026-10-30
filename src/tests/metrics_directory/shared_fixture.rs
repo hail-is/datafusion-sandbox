@@ -5,7 +5,7 @@
 
 use super::{directory, eager_settings, executed_plan, on, shadow_record};
 use crate::{
-    metrics_directory::{FormulationRecord, Grid, RunRecord, WriteRecord},
+    metrics_directory::{FormulationRecord, Grid, RunRecord, RunStatus, WriteRecord},
     testing::{memory_store::MemoryStore, probe_series::noisy_series},
 };
 
@@ -44,11 +44,15 @@ const WRITE: &str = "write-r1";
 /// The run id of the fixture's shadow probe.
 const SHADOW: &str = "shadow-r1";
 
+/// The run id of the fixture's measured write that failed.
+const FAILED: &str = "failed-r1";
+
 /// The run record of a measured write of `run_id`: 1,000,000 rows from 50 input tables in 2 s on
 /// 2 threads.
 fn fixture_record(run_id: &str) -> RunRecord {
     RunRecord {
         run_id: run_id.to_string(),
+        status: RunStatus::Completed,
         started_at: SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_secs(1_700_000_000))
             .unwrap(),
@@ -66,11 +70,11 @@ fn fixture_record(run_id: &str) -> RunRecord {
             compression: Some("zstd(3)".to_string()),
         }),
         threads: 2,
-        input_tables: 50,
-        samples: 200,
-        rows_written: 1_000_000,
+        input_tables: Some(50),
+        samples: Some(200),
+        rows_written: Some(1_000_000),
         run_ns: 2_000_000_000,
-        execute_ns: 1_500_000_000,
+        execute_ns: Some(1_500_000_000),
         peak_rss_bytes: 1 << 30,
         probe: None,
     }
@@ -90,9 +94,10 @@ fn fixture_grid() -> Grid {
 }
 
 /// The fixture's files as the writers write them, by path within the metrics directory: a
-/// measured write's run record, and the run record and progress samples of a drained shadow
-/// probe over a noisy series, replayed under [`fixture_grid`]. The shadow probe's other facts
-/// are the measured write's.
+/// measured write's run record, the run record and progress samples of a drained shadow probe
+/// over a noisy series, replayed under [`fixture_grid`], and the run record of a measured write
+/// that failed after 0.5 s. The other runs' facts are the first measured write's, but those a
+/// run that did not complete has not learned.
 fn written_fixture() -> BTreeMap<String, Bytes> {
     let store = MemoryStore::new("shared-fixture");
     let directory = directory(&store);
@@ -102,11 +107,18 @@ fn written_fixture() -> BTreeMap<String, Bytes> {
     let last = samples.last().unwrap();
     let shadow = RunRecord {
         write: None,
-        rows_written: last.rows,
+        rows_written: Some(last.rows),
         run_ns: last.elapsed_ns,
-        execute_ns: last.elapsed_ns,
+        execute_ns: Some(last.elapsed_ns),
         probe: shadow_record(SHADOW, &settings, &samples, first_partition_end_ns).probe,
         ..fixture_record(SHADOW)
+    };
+    let failed = RunRecord {
+        status: RunStatus::Failed,
+        rows_written: None,
+        run_ns: 500_000_000,
+        execute_ns: None,
+        ..fixture_record(FAILED)
     };
     let held = store.clone();
     on(&store, move |ctx| async move {
@@ -115,6 +127,8 @@ fn written_fixture() -> BTreeMap<String, Bytes> {
         run.record(&ctx, &fixture_record(WRITE), &plan).await?;
         let run = directory.unrecorded(&ctx, SHADOW).await?;
         run.record_probe(&ctx, &shadow, &plan, &samples).await?;
+        let run = directory.unrecorded(&ctx, FAILED).await?;
+        run.record_unfinished(&ctx, &failed).await?;
         directory.replay(&ctx, &fixture_grid()).await?;
         let mut files = BTreeMap::new();
         for table in TABLES {

@@ -5,7 +5,7 @@ use crate::{
     format::OutputFormat,
     formulation::Formulation,
     metrics_directory::run_record::{
-        self, FormulationRecord, ProbeRecord, RecordedProbe, RunRecord, WriteRecord,
+        self, FormulationRecord, ProbeRecord, RecordedProbe, RunRecord, RunStatus, WriteRecord,
     },
     testing::{
         columns::{assert_columns, string_values},
@@ -98,8 +98,9 @@ fn a_formulation_record_reads_each_formulation_s_settings() {
 }
 
 /// The run record table's columns, in order, with their types and whether they may be null: the
-/// settings a formulation may leave unset, the write a drained probe does not make, and the
-/// facts only a probe has are the only nullable ones.
+/// settings a formulation may leave unset, the write a drained probe does not make, the facts a
+/// run that did not complete may not have learned, and the facts only a probe has are the only
+/// nullable ones.
 #[test]
 fn the_run_record_schema_names_its_columns_in_order() {
     let schema = run_record::run_record_schema();
@@ -108,6 +109,7 @@ fn the_run_record_schema_names_its_columns_in_order() {
         &schema,
         &[
             ("run_id", DataType::Utf8, false),
+            ("status", DataType::Utf8, false),
             (
                 "started_at",
                 DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
@@ -122,12 +124,12 @@ fn the_run_record_schema_names_its_columns_in_order() {
             ("output_format", DataType::Utf8, true),
             ("compression", DataType::Utf8, true),
             ("threads", DataType::UInt64, false),
-            ("input_tables", DataType::UInt64, false),
-            ("samples", DataType::UInt64, false),
+            ("input_tables", DataType::UInt64, true),
+            ("samples", DataType::UInt64, true),
             ("output_path", DataType::Utf8, true),
-            ("rows_written", DataType::UInt64, false),
+            ("rows_written", DataType::UInt64, true),
             ("run_ns", DataType::UInt64, false),
-            ("execute_ns", DataType::UInt64, false),
+            ("execute_ns", DataType::UInt64, true),
             ("peak_rss_bytes", DataType::UInt64, false),
             ("action", DataType::Utf8, true),
             ("stop_reason", DataType::Utf8, true),
@@ -158,6 +160,7 @@ fn the_run_record_schema_names_its_columns_in_order() {
 fn each_run_record_field_lands_in_the_column_of_its_name() {
     let record = RunRecord {
         run_id: "run-1".to_string(),
+        status: RunStatus::Completed,
         started_at: SystemTime::UNIX_EPOCH + Duration::from_nanos(1_700_000_000_123_456_789),
         formulation: FormulationRecord {
             name: "grouped-merge".to_string(),
@@ -173,11 +176,11 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
             compression: Some("zstd(3)".to_string()),
         }),
         threads: 4,
-        input_tables: 7,
-        samples: 50,
-        rows_written: 123_456,
+        input_tables: Some(7),
+        samples: Some(50),
+        rows_written: Some(123_456),
         run_ns: 2_000_000_000,
-        execute_ns: 1_500_000_000,
+        execute_ns: Some(1_500_000_000),
         peak_rss_bytes: 3_221_225_472,
         probe: Some(ProbeRecord {
             settings: ProbeSettings {
@@ -217,6 +220,7 @@ fn each_run_record_field_lands_in_the_column_of_its_name() {
     assert_eq!(batch.num_rows(), 1);
     for (column, expected) in [
         ("run_id", "run-1"),
+        ("status", "completed"),
         ("started_at", "2023-11-14T22:13:20.123456789Z"),
         ("formulation", "grouped-merge"),
         ("groups", "3"),
@@ -304,6 +308,37 @@ fn unset_run_record_settings_are_null() {
         assert!(batch.column_by_name(column).unwrap().is_null(0), "{column}");
     }
     assert_eq!(string_values(&batch, "formulation"), ["union"]);
+}
+
+/// A run that failed or was cancelled names its status, and leaves null the facts it may not
+/// have learned before it ended: here, how much of the dataset it covered, the rows it wrote, and
+/// how long its plan executed.
+#[test]
+fn a_run_that_did_not_complete_names_its_status_and_leaves_its_unlearned_facts_null() {
+    for (status, name) in [
+        (RunStatus::Failed, "failed"),
+        (RunStatus::Cancelled, "cancelled"),
+    ] {
+        let record = RunRecord {
+            status,
+            input_tables: None,
+            samples: None,
+            rows_written: None,
+            execute_ns: None,
+            ..run_records::run_record("run-1")
+        };
+
+        let batch = run_record::run_record_batch(&record).unwrap();
+
+        assert_eq!(string_values(&batch, "status"), [name]);
+        for column in ["input_tables", "samples", "rows_written", "execute_ns"] {
+            assert!(
+                batch.column_by_name(column).unwrap().is_null(0),
+                "{name} {column}"
+            );
+        }
+        assert_eq!(string_values(&batch, "run_ns"), ["2000"], "{name}");
+    }
 }
 
 /// A drained probe writes nothing, so its write settings are null; a probe with no estimate, no

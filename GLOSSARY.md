@@ -49,8 +49,14 @@ text. A measured write's outcome also names what it could not record.
 _Avoid_: result (too broad), output (ambiguous with a written artifact)
 
 **Run record**:
-The row describing one combiner run: its resolved settings and its whole-run measurements.
+The row describing one combiner run: how it ended, its resolved settings, and its whole-run
+measurements.
 _Avoid_: run row, run metadata, config row
+
+**Run status**:
+How a recorded run ended: `completed`, `cancelled` or `failed`, the run record's `status`. A
+cancelled or failed run's record leaves out the measurements it never made.
+_Avoid_: result, outcome (taken by **Outcome**), state
 
 **Run metrics**:
 The per-operator, per-partition counters and timers a plan accumulated while executing, recorded

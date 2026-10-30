@@ -11,7 +11,8 @@ use crate::{
     format::InputFormat,
     formulation::Formulation,
     metrics_directory::{
-        FormulationRecord, MetricsDirectory, ProbeRecord, RunRecord, UnrecordedRun, WriteRecord,
+        FormulationRecord, MetricsDirectory, ProbeRecord, RunRecord, RunStatus, UnrecordedRun,
+        WriteRecord,
     },
     ordered_frame::{OrderedFrame, OutputLayout},
     pipeline::{self, PipelineOptions},
@@ -121,7 +122,9 @@ impl Action {
     /// anything exists at its output path.
     async fn check(self, ctx: &SessionContext, layout: OutputLayout) -> Result<CheckedAction> {
         Ok(match self {
-            Self::Write(target) => CheckedAction::Write(written_in(ctx, target, layout).await?),
+            Self::Write(target) => {
+                StoppableAction::Write(written_in(ctx, target, layout).await?).into()
+            }
             Self::MeasuredWrite {
                 write,
                 metrics_directory,
@@ -136,24 +139,27 @@ impl Action {
                 run_id,
                 settings,
                 kind,
-            } => CheckedAction::Probe(Box::new(CheckedProbe {
+            } => StoppableAction::Probe(Box::new(CheckedProbe {
                 run: metrics_directory.unrecorded(ctx, &run_id).await?,
                 write: probe_output(ctx, write, &metrics_directory).await?,
                 settings,
                 kind,
-            })),
-            Self::Collect => CheckedAction::Collect,
-            Self::Explain { write } => CheckedAction::Explain {
+            }))
+            .into(),
+            Self::Collect => StoppableAction::Collect.into(),
+            Self::Explain { write } => StoppableAction::Explain {
                 write,
                 analyze: false,
-            },
-            Self::ExplainAnalyze { write } => CheckedAction::Explain {
+            }
+            .into(),
+            Self::ExplainAnalyze { write } => StoppableAction::Explain {
                 write: match write {
                     Some(write) => Some(written_in(ctx, write, layout).await?),
                     None => None,
                 },
                 analyze: true,
-            },
+            }
+            .into(),
         })
     }
 }
@@ -204,11 +210,19 @@ impl CombinerRun {
     /// its metrics directory, a writing probe's output path already exists or holds its metrics
     /// directory, an executed write of one file per partition has something at its output path, the
     /// input dataset cannot be resolved, the formulation cannot be planned or executed, or the
-    /// requested output or its sample annotation table cannot be written. A measured write or a
-    /// probe that fails records nothing: the refusals of a repeated id and of an occupied output
-    /// path come before dataset discovery, and the run is recorded only after the data write and
-    /// its sample annotation table, or the probe, succeed. A probe also fails on a session the
-    /// pipeline runner did not build, which has no IO runtime to sample on.
+    /// requested output or its sample annotation table cannot be written. A probe also fails on a
+    /// session the pipeline runner did not build, which has no IO runtime to sample on. Returns
+    /// the cancelled error if the run is cancelled (see [`pipeline::until_cancelled`]) once its
+    /// refusals have passed.
+    ///
+    /// Neither a refused run nor a probe that fails or is cancelled records anything: the refusals
+    /// of a repeated id and of an occupied output path come before dataset discovery, and a probe
+    /// is recorded only once it succeeds. A measured write records every run its refusals let
+    /// through. One that is cancelled, or fails before its data write and sample annotation table
+    /// are written, records a run record alone, with the status `cancelled` or `failed`, before it
+    /// returns the error; a failure to record it is not reported over the run's own error. One
+    /// whose recording fails after a completed write leaves the run unrecorded, as
+    /// [`UnrecordedRun::record`] says.
     pub async fn execute_in(self, ctx: &SessionContext) -> Result<Outcome> {
         self.run(ctx, Started::now()).await
     }
@@ -226,8 +240,43 @@ impl CombinerRun {
 /// An action whose refusals before dataset discovery have all passed. [`Action::check`] is the
 /// only way to get one, and executing one is the only way a run discovers its dataset.
 enum CheckedAction {
-    Write(WriteTarget),
+    /// A measured write, which records how its run ended, cancelled or failed included.
     MeasuredWrite(CheckedMeasuredWrite),
+    /// Any other action, which the run's cancellation stops whole.
+    Stoppable(StoppableAction),
+}
+
+impl CheckedAction {
+    /// Plans the rows `inputs` describe and runs them through this action, until the run is
+    /// cancelled.
+    async fn execute(
+        self,
+        ctx: &SessionContext,
+        inputs: &PlanInputs,
+        facts: RunFacts,
+    ) -> Result<Outcome> {
+        match self {
+            Self::MeasuredWrite(measured) => measured.execute(ctx, inputs, facts).await,
+            Self::Stoppable(action) => {
+                pipeline::until_cancelled(ctx, async move {
+                    let rows = inputs.plan(ctx).await?;
+                    action.execute(ctx, rows, facts).await
+                })
+                .await
+            }
+        }
+    }
+}
+
+impl From<StoppableAction> for CheckedAction {
+    fn from(action: StoppableAction) -> Self {
+        Self::Stoppable(action)
+    }
+}
+
+/// A checked action other than a measured write.
+enum StoppableAction {
+    Write(WriteTarget),
     Probe(Box<CheckedProbe>),
     Collect,
     /// An explain, or with `analyze` an explain analyze.
@@ -237,8 +286,8 @@ enum CheckedAction {
     },
 }
 
-impl CheckedAction {
-    /// Plans the rows `inputs` describe and runs them through this action.
+impl StoppableAction {
+    /// Runs the planned `rows` through this action.
     ///
     /// An action that writes to an output path writes its rows with [`PlannedRows::write_with`],
     /// whether or not it writes a sample annotation table, so the table an earlier write left
@@ -246,15 +295,13 @@ impl CheckedAction {
     async fn execute(
         self,
         ctx: &SessionContext,
-        inputs: &PlanInputs,
+        rows: PlannedRows,
         facts: RunFacts,
     ) -> Result<Outcome> {
-        let rows = inputs.plan(ctx).await?;
         match self {
             Self::Write(target) => Ok(Outcome::RowsWritten(
                 rows.write(ctx, &target).await?.rows_written,
             )),
-            Self::MeasuredWrite(measured) => measured.execute(ctx, rows, facts).await,
             Self::Probe(probe) => probe.execute(ctx, rows, facts).await,
             Self::Collect => collect_rows(rows.ordered).await,
             Self::Explain {
@@ -294,16 +341,44 @@ struct CheckedMeasuredWrite {
 }
 
 impl CheckedMeasuredWrite {
-    /// Writes the rows and records the run.
+    /// Plans the rows `inputs` describe and writes them until the run is cancelled, then records
+    /// the run: as completed with its run metrics, or as cancelled or failed by a run record alone
+    /// before the error is returned.
     async fn execute(
         self,
         ctx: &SessionContext,
-        rows: PlannedRows,
+        inputs: &PlanInputs,
         facts: RunFacts,
     ) -> Result<Outcome> {
         let Self { write, run } = self;
-        let coverage = rows.coverage;
-        let executed = rows.write(ctx, &write).await?;
+        let mut planned_coverage = None;
+        let written = pipeline::until_cancelled(ctx, async {
+            let rows = inputs.plan(ctx).await?;
+            planned_coverage = Some(rows.coverage);
+            Ok((rows.coverage, rows.write(ctx, &write).await?))
+        })
+        .await;
+        let (coverage, executed) = match written {
+            Ok(written) => written,
+            Err(error) => {
+                let status = if pipeline::is_cancelled(&error) {
+                    RunStatus::Cancelled
+                } else {
+                    RunStatus::Failed
+                };
+                if let Ok(record) = facts.ended(
+                    run.run_id().to_string(),
+                    status,
+                    planned_coverage,
+                    Some((&write).into()),
+                ) {
+                    // The run's own error is what the caller needs; a failure to record the run
+                    // too is dropped.
+                    drop(run.record_unfinished(ctx, &record).await);
+                }
+                return Err(error);
+            }
+        };
         let record = facts.record(
             run.run_id().to_string(),
             coverage,
@@ -424,9 +499,9 @@ impl RunFacts {
         }
     }
 
-    /// The run record of `run_id`, a run over `coverage` that ends now. Its action wrote
-    /// `write`, if any, wrote `rows_written` rows, or received them for a probe, and executed for
-    /// `execute_ns`. A probe's settings and decision are `probe`.
+    /// The run record of `run_id`, a completed run over `coverage` that ends now. Its action
+    /// wrote `write`, if any, wrote `rows_written` rows, or received them for a probe, and
+    /// executed for `execute_ns`. A probe's settings and decision are `probe`.
     fn record(
         self,
         run_id: String,
@@ -437,7 +512,26 @@ impl RunFacts {
         probe: Option<ProbeRecord>,
     ) -> Result<RunRecord> {
         Ok(RunRecord {
+            rows_written: Some(rows_written),
+            execute_ns: Some(execute_ns),
+            probe,
+            ..self.ended(run_id, RunStatus::Completed, Some(coverage), write)?
+        })
+    }
+
+    /// The run record of `run_id`, a run that ends now with `status`, over `coverage` if it
+    /// planned its rows, whose action writes `write`, if any. It holds none of the facts only a
+    /// completed run has: the rows written, the execution time, and a probe's decision.
+    fn ended(
+        self,
+        run_id: String,
+        status: RunStatus,
+        coverage: Option<Coverage>,
+        write: Option<WriteRecord>,
+    ) -> Result<RunRecord> {
+        Ok(RunRecord {
             run_id,
+            status,
             started_at: self.started.at,
             formulation: self.formulation,
             row_ordering: self.row_ordering,
@@ -445,13 +539,13 @@ impl RunFacts {
             input_format: self.input_format,
             write,
             threads: self.threads,
-            input_tables: coverage.input_tables,
-            samples: coverage.samples,
-            rows_written,
+            input_tables: coverage.map(|coverage| coverage.input_tables),
+            samples: coverage.map(|coverage| coverage.samples),
+            rows_written: None,
             run_ns: elapsed_ns(self.started.instant),
-            execute_ns,
+            execute_ns: None,
             peak_rss_bytes: process::peak_rss_bytes()?,
-            probe,
+            probe: None,
         })
     }
 }

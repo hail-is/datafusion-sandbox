@@ -120,8 +120,8 @@ after the `rsync` [above](#one-runner) prints a Markdown table with a row per ce
 shape. It gives the mean over repetitions, ± half their range, of the whole-run and steady-state
 normalized throughput in millions of rows per second, their ratio, and the largest peak RSS. A
 second table gives the same figures for each repetition. It joins run records to runner records
-by run id, and lists after the tables every cell that failed or left no run record, and every
-runner whose status is not `done`. A relative path is under `data/`.
+by run id, and lists after the tables every cell that failed, left no run record, or left a run
+record whose `status` is not `completed`, and every runner whose status is not `done`. A relative path is under `data/`.
 
 ## New families
 
