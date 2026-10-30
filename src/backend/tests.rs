@@ -3,3 +3,4 @@
 
 mod codec;
 mod scan_description;
+mod scan_reopening;

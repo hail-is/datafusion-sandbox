@@ -1,9 +1,14 @@
 //! The backend's suite runs on the shared dataset fixtures' in-memory stores, which it hands the
 //! backend through its object-store resolver.
+//!
+//! The tests here open datasets and read back plan bytes' scan descriptions; `runs` starts plan
+//! bytes and waits for their Outcomes.
+
+mod runs;
 
 use crate::{
     backend::{
-        Backend, ObjectStoreResolver, OpenedDataset, ResolveFromUrls,
+        Backend, ErrorCode, ObjectStoreResolver, OpenedDataset, ResolveFromUrls, Versions,
         codec::{CODEC_ID, Codec},
         scan_description::ScanDescription,
     },
@@ -188,6 +193,7 @@ fn opening_a_dataset_whose_rows_lack_a_column_of_the_row_ordering_fails() {
             fixture.table_path().as_str(),
             fixture.input_format(),
             RowOrdering::locus_then_alleles(),
+            Versions::backend(),
         )
         .unwrap_err();
 
@@ -205,6 +211,7 @@ fn opening_a_dataset_on_a_store_the_resolver_does_not_serve_fails() {
             fixture.table_path().as_str(),
             fixture.input_format(),
             RowOrdering::locus(),
+            Versions::backend(),
         )
         .unwrap_err();
 
@@ -240,7 +247,9 @@ fn the_scan_descriptions_of_plan_bytes_are_those_their_scans_were_opened_with() 
         .unwrap();
     let bytes = wheel_bytes(&plan);
 
-    let descriptions = backend.scan_descriptions(&bytes).unwrap();
+    let descriptions = backend
+        .scan_descriptions(&bytes, Versions::backend())
+        .unwrap();
 
     assert_eq!(
         descriptions,
@@ -256,10 +265,36 @@ fn bytes_that_are_no_plan_have_no_scan_descriptions() {
     let fixture = fixture::dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::Packed);
 
     let error = backend_over(fixture)
-        .scan_descriptions(b"not a plan")
+        .scan_descriptions(b"not a plan", Versions::backend())
         .unwrap_err();
 
     assert!(error.to_string().contains("plan"), "{error}");
+}
+
+/// Opening a dataset, and reading back plan bytes, check the frontend's versions as a run does.
+#[test]
+fn every_call_refuses_versions_other_than_the_backend_s_with_the_invalid_action_code() {
+    let fixture = fixture::dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::Packed);
+    let backend = backend_over(fixture);
+    let other = Versions {
+        datafusion_major: Versions::backend().datafusion_major.saturating_add(1),
+        ..Versions::backend()
+    };
+
+    let opening = backend
+        .open_dataset(
+            fixture.table_path().as_str(),
+            fixture.input_format(),
+            RowOrdering::locus(),
+            other,
+        )
+        .unwrap_err();
+    let reading_back = backend.scan_descriptions(b"", other).unwrap_err();
+
+    for error in [opening, reading_back] {
+        assert_eq!(error.code(), ErrorCode::InvalidAction, "{error}");
+        assert!(error.message().contains("DataFusion"), "{error}");
+    }
 }
 
 /// The production resolver serves what the pipeline runner can: local paths and `gs://` URLs.
@@ -274,7 +309,7 @@ fn resolving_from_urls_refuses_a_scheme_the_pipeline_cannot_serve() {
 
 /// The adapter at the backend's object-store seam: in-memory stores by URL, whatever the paths.
 #[derive(Debug)]
-struct MemoryStores(Vec<(ObjectStoreUrl, Arc<dyn ObjectStore>)>);
+pub(super) struct MemoryStores(Vec<(ObjectStoreUrl, Arc<dyn ObjectStore>)>);
 
 impl ObjectStoreResolver for MemoryStores {
     fn pipeline_options(&self, threads: NonZeroUsize, _paths: &[&str]) -> Result<PipelineOptions> {
@@ -297,11 +332,14 @@ impl ObjectStoreResolver for NoStores {
     }
 }
 
+/// A backend over `fixture`'s store whose runs check their rows' order at run time, as ADR 0022
+/// asks of the backend's tests.
 fn backend_over(fixture: &'static Arc<DatasetFixture>) -> Backend {
     Backend::new(Arc::new(MemoryStores(vec![(
         fixture.table_path().object_store(),
         Arc::clone(fixture.store()),
     )])))
+    .verifying_order()
 }
 
 fn open(fixture: &'static Arc<DatasetFixture>, row_ordering: RowOrdering) -> OpenedDataset {
@@ -310,6 +348,7 @@ fn open(fixture: &'static Arc<DatasetFixture>, row_ordering: RowOrdering) -> Ope
             fixture.table_path().as_str(),
             fixture.input_format(),
             row_ordering,
+            Versions::backend(),
         )
         .unwrap()
 }
