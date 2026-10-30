@@ -10,6 +10,34 @@ use datafusion::{
 use std::sync::Arc;
 
 #[test]
+fn a_row_ordering_parses_from_the_name_it_displays_as() {
+    for (name, ordering) in [
+        ("locus", RowOrdering::locus()),
+        ("locus,alleles", RowOrdering::locus_then_alleles()),
+        ("locus,s", RowOrdering::locus_then_sample()),
+    ] {
+        assert_eq!(ordering.to_string(), name);
+        assert_eq!(name.parse::<RowOrdering>().unwrap(), ordering);
+    }
+}
+
+#[test]
+fn parsing_a_name_no_row_ordering_displays_as_names_the_supported_ones() {
+    for name in [
+        "",
+        "alleles",
+        "locus,position",
+        "s,locus",
+        "locus,alleles,s",
+    ] {
+        let message = name.parse::<RowOrdering>().unwrap_err().to_string();
+
+        assert!(message.contains(&format!("'{name}'")), "{message}");
+        assert!(message.contains("locus,alleles"), "{message}");
+    }
+}
+
+#[test]
 fn accepts_an_exact_row_ordering_prefix() {
     assert!(RowOrdering::locus().is_prefix_of(&RowOrdering::locus()));
 }

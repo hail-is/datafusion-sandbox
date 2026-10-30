@@ -26,4 +26,6 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo fetch --locked
-      - run: scripts/check
+      # The Rust checks only: the `hail_df` checks need uv, which this job doesn't install. Running
+      # the Python checks in CI is #294.
+      - run: scripts/check --rust

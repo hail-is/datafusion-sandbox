@@ -1,0 +1,2 @@
+# The extension `maturin develop` builds into the package.
+/python/hail_df/*.so

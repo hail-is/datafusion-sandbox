@@ -1,15 +1,38 @@
 #!/usr/bin/env bash
-# Runs the Rust checks that CI runs, stopping at the first failure:
+# Runs the Rust checks, then the `hail_df` checks, stopping at the first failure:
 #
-#   scripts/check
+#   scripts/check           # both
+#   scripts/check --rust    # the Rust checks only, what CI runs until it has uv (#294)
 set -euo pipefail
+
+rust_only=false
+case "${1-}" in
+    "") ;;
+    --rust) rust_only=true ;;
+    *)
+        echo "usage: scripts/check [--rust]" >&2
+        exit 2
+        ;;
+esac
 
 cd "$(dirname "$0")/.."
 
-cargo fmt --check || {
-    echo "scripts/check: formatting differs; run \`cargo fmt\`" >&2
+cargo fmt --all --check || {
+    echo "scripts/check: formatting differs; run \`cargo fmt --all\`" >&2
     exit 1
 }
 cargo clippy --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 cargo test
+
+if "$rust_only"; then
+    exit 0
+fi
+
+# hail_df: the bindings crate builds against its uv environment's Python, so its clippy runs under
+# `uv run` too. `maturin develop` builds the extension into that environment for pytest.
+uv run --directory hail_df cargo clippy -p hail_df --all-targets -- -D warnings
+uv run --directory hail_df maturin develop --uv
+uv run --directory hail_df ruff format --check
+uv run --directory hail_df ruff check
+uv run --directory hail_df pytest

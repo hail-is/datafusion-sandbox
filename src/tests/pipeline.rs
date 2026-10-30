@@ -11,8 +11,8 @@ use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::error::DataFusionError;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::{DataFrame, ParquetReadOptions, col, lit};
-use object_store::path::Path;
-use std::num::NonZeroUsize;
+use object_store::{ObjectStoreExt, path::Path};
+use std::{num::NonZeroUsize, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 #[test]
@@ -187,6 +187,29 @@ fn registers_a_store_for_each_gs_bucket_in_the_paths() {
         options,
     )
     .unwrap();
+}
+
+/// A store the caller built is registered as it is, so the run reaches the objects already in it.
+#[test]
+fn registers_a_store_the_caller_built_under_its_url() {
+    let store = MemoryStore::new("prebuilt");
+    let location = Path::from("data/greeting");
+    block_on(store.store().put(&location, "hello".into())).unwrap();
+    let options = PipelineOptions::new(NonZeroUsize::MIN)
+        .with_object_store(store.url(), Arc::clone(store.store()));
+
+    let read = pipeline::run(
+        move |ctx| async move {
+            let store = ctx
+                .runtime_env()
+                .object_store(ObjectStoreUrl::parse("memory://prebuilt")?)?;
+            Ok(store.get(&location).await?.bytes().await?)
+        },
+        options,
+    )
+    .unwrap();
+
+    assert_eq!(read.as_ref(), b"hello");
 }
 
 /// Thread count defaults to available parallelism.

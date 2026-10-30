@@ -1,0 +1,18 @@
+[package]
+name = "hail_df"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "hail_df"
+crate-type = ["cdylib"]
+
+[dependencies]
+datafusion = { version = "55.1.0", default-features = false }
+datafusion-ffi = "55.1.0"
+datafusion-sandbox = { path = ".." }
+pyo3 = { version = "0.30", features = ["abi3-py313"] }
+
+[lints]
+workspace = true

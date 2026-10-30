@@ -27,6 +27,7 @@
 //! - `recording_cache` is a file statistics cache adapter that records the keys read and written.
 //! - `run_records` builds run records for tests that assert on none of their facts.
 //! - `session` builds the hostile session config.
+//! - `wheel_codec` frames a logical codec's payloads as the `datafusion` Python wheel does.
 
 #[cfg(test)]
 pub(crate) mod columns;
@@ -49,6 +50,8 @@ pub(crate) mod recording_cache;
 pub(crate) mod run_records;
 #[cfg(test)]
 pub(crate) mod session;
+#[cfg(test)]
+pub(crate) mod wheel_codec;
 
 #[cfg(test)]
 mod tests;

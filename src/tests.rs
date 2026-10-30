@@ -1,5 +1,6 @@
 //! Module tests for the library root's child modules; the root itself has no parent module.
 
+mod backend;
 mod combiner_run;
 mod format;
 mod formulation;

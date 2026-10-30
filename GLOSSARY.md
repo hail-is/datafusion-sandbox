@@ -173,6 +173,12 @@ arrive in, an established order one the plan sorts them into. Every sort in a fr
 plan builder's frame establishes one.
 _Avoid_: frontend sort, explicit sort
 
+**Scan description**:
+What a frontend plan holds in place of a scan: the dataset, format, declared row ordering and input
+table the scan reads, enough for any backend process to reopen it. It names an input table's rows
+without reading them; only a backend scans.
+_Avoid_: placeholder, stub table, scan payload
+
 ### Data
 
 **Sample**:

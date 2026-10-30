@@ -1,3 +1,8 @@
+[workspace]
+# The root crate holds the library, the CLI and the backend; `hail_df` holds the Python bindings
+# over the backend. One lock and one target dir cover both.
+members = ["hail_df"]
+
 [package]
 name = "datafusion-sandbox"
 version = "0.1.0"
@@ -25,6 +30,8 @@ datafusion = { version = "55.1.0", default-features = false, features = [
     "recursive_protection",
     "sql",
 ] }
+# Plan bytes: the backend's codec and decoding plans a frontend encoded.
+datafusion-proto = { version = "55.1.0", default-features = false }
 # The `datafusion` facade does not re-export the file statistics aggregation helper.
 datafusion-datasource = { version = "55.1.0", default-features = false }
 # Held at 0.13 although 0.14 is out: `vortex-datafusion` 0.86.1 requires `^0.13.2`.
@@ -67,7 +74,10 @@ strip = false        # Retain debug info for flamegraphs
 name = "example"
 harness = false
 
-[lints.clippy]
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 # `pub(crate)` states a cross-subtree item's reach even inside a private module.

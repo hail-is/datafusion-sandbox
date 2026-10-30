@@ -13,3 +13,4 @@ mod probe_series;
 mod recording_cache;
 mod run_records;
 mod session;
+mod wheel_codec;
