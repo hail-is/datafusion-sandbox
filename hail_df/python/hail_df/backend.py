@@ -9,7 +9,7 @@ import pyarrow as pa
 
 from hail_df import _native
 from hail_df._native import BackendError, ScanDescription
-from hail_df.datafusion import DataFrame, SessionContext
+from hail_df.datafusion import DATAFUSION_MAJOR, WIRE_VERSION, DataFrame, SessionContext
 
 __all__ = ["Backend", "BackendError", "Dataset", "InputTable", "ScanDescription", "SortColumn"]
 
@@ -96,7 +96,9 @@ class Backend:
         declared in: `locus`, `locus,alleles` or `locus,s`. Raises `BackendError` if the dataset
         can't be discovered or its rows lack a column of the row ordering.
         """
-        opened = self._backend.open_dataset(path, input_format, row_ordering)
+        opened = self._backend.open_dataset(
+            path, input_format, row_ordering, DATAFUSION_MAJOR, WIRE_VERSION
+        )
         return Dataset(path, input_format, row_ordering, opened)
 
     def scan_descriptions(self, plan_bytes: bytes) -> list[ScanDescription]:
@@ -106,4 +108,4 @@ class Backend:
         Raises `BackendError` if the bytes are not a plan encoded in a `hail_df.context()`
         session.
         """
-        return self._backend.scan_descriptions(plan_bytes)
+        return self._backend.scan_descriptions(plan_bytes, DATAFUSION_MAJOR, WIRE_VERSION)
