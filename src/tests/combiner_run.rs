@@ -768,6 +768,7 @@ fn a_measured_write_writes_the_output_and_its_run_record() {
     assert_eq!(record.num_rows(), 1);
     for (column, expected) in [
         ("run_id", "run-a"),
+        ("status", "completed"),
         ("formulation", "grouped-merge"),
         ("groups", "2"),
         ("split_points", ""),
@@ -1023,16 +1024,19 @@ fn refuses_a_run_id_that_already_has_a_run_record_before_discovery() {
 }
 
 /// A measured write whose data write fails, here on a store failing every write under the output
-/// path, records nothing: neither table gets a file, so a partial run never unions into a history.
+/// path, records the run as failed before it returns the write's error. The record holds the run's
+/// settings and the coverage it planned, but no rows written or execution time, and the run has no
+/// run metrics, since its plan never completed.
 #[test]
-fn a_failed_data_write_records_nothing() {
+fn a_failed_data_write_records_a_failed_run_without_run_metrics() {
     let input = memory_dataset();
     let store = MemoryStore::failing_writes_under("failed-write", "out");
     let url = store.url().as_str().to_string();
     let metrics_directory = MetricsDirectory::new(&format!("{url}metrics"));
+    let output_path = format!("{url}out/combined.parquet");
     let run = measured_run(
         &input,
-        format!("{url}out/combined.parquet"),
+        output_path.clone(),
         metrics_directory.clone(),
         "run-a",
     );
@@ -1048,8 +1052,116 @@ fn a_failed_data_write_records_nothing() {
     let RecordedRun {
         record, metrics, ..
     } = recorded;
-    assert!(record.is_none(), "{record:?}");
+    let record = record.unwrap();
+    for (column, expected) in [
+        ("run_id", "run-a"),
+        ("status", "failed"),
+        ("formulation", "grouped-merge"),
+        ("output_path", output_path.as_str()),
+        ("input_tables", "4"),
+        ("samples", "4"),
+        ("rows_written", ""),
+        ("execute_ns", ""),
+    ] {
+        assert_eq!(string_values(&record, column), [expected], "{column}");
+    }
+    assert!(u64_values(&record, "run_ns")[0].unwrap() > 0, "{record:?}");
     assert!(metrics.is_none(), "{metrics:?}");
+}
+
+/// A measured write that fails after its refusals but before it plans its rows, here because its
+/// dataset path names no dataset, records the run as failed, with no coverage.
+#[test]
+fn a_measured_write_that_fails_before_planning_records_a_failed_run_without_coverage() {
+    let input = memory_dataset();
+    let store = MemoryStore::new("failed-discovery");
+    let url = store.url().as_str().to_string();
+    let metrics_directory = MetricsDirectory::new(&format!("{url}metrics"));
+    let mut run = measured_run(
+        &input,
+        format!("{url}out/combined.parquet"),
+        metrics_directory.clone(),
+        "run-a",
+    );
+    run.inputs.input_path = format!("{url}no-such-dataset/");
+
+    let (failed, recorded) = on_memory_stores(&input, &store, move |ctx| async move {
+        let failed = run.execute_in(&ctx).await.map(drop);
+        let recorded = fixture::read_recorded_run(&ctx, &metrics_directory, "run-a").await?;
+        Ok((failed, recorded))
+    });
+
+    let error = failed.unwrap_err();
+    assert!(!pipeline::is_cancelled(&error), "{error}");
+    let record = recorded.record.unwrap();
+    for (column, expected) in [
+        ("status", "failed"),
+        ("input_tables", ""),
+        ("samples", ""),
+        ("rows_written", ""),
+        ("execute_ns", ""),
+    ] {
+        assert_eq!(string_values(&record, column), [expected], "{column}");
+    }
+    assert!(recorded.metrics.is_none());
+}
+
+/// A measured write whose run is cancelled while its reads of the dataset are held at a gate ends
+/// with the cancelled error once the gate is released, records the run as cancelled with no rows
+/// written and no run metrics, and writes nothing to its output path.
+#[test]
+fn a_cancelled_measured_write_records_a_cancelled_run_and_writes_no_output() {
+    let input = memory_dataset();
+    let store = MemoryStore::new("cancelled-write");
+    let url = store.url().as_str().to_string();
+    let metrics_directory = MetricsDirectory::new(&format!("{url}metrics"));
+    let run = measured_run(
+        &input,
+        format!("{url}out/combined.parquet"),
+        metrics_directory.clone(),
+        "run-a",
+    );
+    let token = tokio_util::sync::CancellationToken::new();
+    let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
+    let (gated_input, run_store) = (Arc::clone(&input), store.clone());
+    let options = PipelineOptions::single_threaded().cancelled_by(token.clone());
+
+    let running = std::thread::spawn(move || {
+        pipeline::run(
+            move |ctx| async move {
+                gate_sender
+                    .send(gated_input.register_with_gated_reads(&ctx))
+                    .unwrap();
+                run_store.register(&ctx);
+                run.execute_in(&ctx).await
+            },
+            options,
+        )
+    });
+    let gate = gate_receiver.recv().unwrap();
+    fixture::block_on(gate.reached());
+    token.cancel();
+    gate.release();
+    let result = running.join().unwrap();
+
+    let error = result.unwrap_err();
+    assert!(pipeline::is_cancelled(&error), "{error}");
+    let listed = store.clone();
+    let (recorded, output) = on_memory_stores(&input, &store, move |ctx| async move {
+        let recorded = fixture::read_recorded_run(&ctx, &metrics_directory, "run-a").await?;
+        Ok((recorded, listed.locations_under("out").await))
+    });
+    let record = recorded.record.unwrap();
+    for (column, expected) in [
+        ("run_id", "run-a"),
+        ("status", "cancelled"),
+        ("rows_written", ""),
+        ("execute_ns", ""),
+    ] {
+        assert_eq!(string_values(&record, column), [expected], "{column}");
+    }
+    assert!(recorded.metrics.is_none());
+    assert_eq!(output, Vec::<ObjectPath>::new());
 }
 
 /// A write of every reference formulation, in either format and so in both output layouts, leaves

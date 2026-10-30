@@ -165,3 +165,48 @@ fn with_failing_writes_under_fails_a_later_write_where_an_earlier_one_succeeded(
     put(store.store(), "out/a", b"again").unwrap();
     assert_eq!(get(failing.store(), "out/a").unwrap(), b"again");
 }
+
+/// Reads `location` from `store` on a thread of its own, so the calling test can watch the read
+/// be held at a gate.
+fn read_on_a_thread(
+    store: &Arc<dyn ObjectStore>,
+    location: &'static str,
+) -> std::thread::JoinHandle<object_store::Result<Vec<u8>>> {
+    let store = Arc::clone(store);
+    std::thread::spawn(move || get(&store, location))
+}
+
+#[test]
+fn with_gated_reads_under_holds_reads_beneath_the_prefix_until_the_gate_is_released() {
+    let store = MemoryStore::new("gated");
+    put(store.store(), "data/a", b"a").unwrap();
+    put(store.store(), "elsewhere", b"b").unwrap();
+    let (gated, gate) = store.with_gated_reads_under("data");
+
+    let held = read_on_a_thread(gated.store(), "data/a");
+    block_on(gate.reached());
+
+    // A read outside the prefix passes while one beneath it is held.
+    assert_eq!(get(gated.store(), "elsewhere").unwrap(), b"b");
+    assert!(!held.is_finished());
+    gate.release();
+    assert_eq!(held.join().unwrap().unwrap(), b"a");
+    // The gate stays open: a later read beneath the prefix is not held.
+    assert_eq!(get(gated.store(), "data/a").unwrap(), b"a");
+}
+
+#[test]
+fn with_gated_reads_under_holds_no_write_or_listing_and_views_the_same_objects() {
+    let store = MemoryStore::new("gated-view");
+    put(store.store(), "data/a", b"before").unwrap();
+    let (gated, gate) = store.with_gated_reads_under("data");
+
+    put(gated.store(), "data/b", b"b").unwrap();
+    let listed = block_on(gated.locations_under("data"));
+
+    assert_eq!(gated.url(), store.url());
+    assert_eq!(listed, ["data/a", "data/b"].map(Path::from));
+    assert_eq!(get(store.store(), "data/b").unwrap(), b"b");
+    gate.release();
+    assert_eq!(get(gated.store(), "data/a").unwrap(), b"before");
+}

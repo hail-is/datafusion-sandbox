@@ -2,3 +2,4 @@
 //! under the `testing` module's `tests` subtree.
 
 mod failing_writes;
+mod gated_reads;

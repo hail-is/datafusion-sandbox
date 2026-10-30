@@ -5,14 +5,15 @@
 
 use crate::format::OutputFormat;
 use crate::pipeline::{self, PipelineOptions};
-use crate::testing::{generated::make_range_table, memory_store::MemoryStore};
+use crate::testing::{fixture::block_on, generated::make_range_table, memory_store::MemoryStore};
 use crate::write::WriteTarget;
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::error::DataFusionError;
 use datafusion::execution::object_store::ObjectStoreUrl;
-use datafusion::prelude::{DataFrame, col, lit};
+use datafusion::prelude::{DataFrame, ParquetReadOptions, col, lit};
 use object_store::path::Path;
 use std::num::NonZeroUsize;
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn returns_the_pipeline_result_to_the_calling_thread() {
@@ -272,4 +273,153 @@ fn vortex_target(store: &MemoryStore) -> WriteTarget {
         output_path: format!("{}out.vortex", store.url().as_str()),
         output_format: OutputFormat::VORTEX,
     }
+}
+
+/// A run cancelled while its plan's reads are held at a gate ends with the cancelled error once
+/// the gate is released, and runs no further: the copy the plan was making is never written.
+#[test]
+fn a_run_cancelled_while_its_reads_are_held_ends_cancelled_and_runs_no_further() {
+    let store = MemoryStore::new("cancelled");
+    let source = format!("{}in.parquet", store.url().as_str());
+    let copy = WriteTarget {
+        output_path: format!("{}copy.parquet", store.url().as_str()),
+        output_format: OutputFormat::PARQUET,
+    };
+    let written = store.clone();
+    let path = source.clone();
+    pipeline::run(
+        move |ctx| async move {
+            written.register(&ctx);
+            WriteTarget {
+                output_path: path,
+                output_format: OutputFormat::PARQUET,
+            }
+            .write_unordered(make_range_table(&ctx, 1000, 128)?)
+            .await
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap();
+    let (gated, gate) = store.with_gated_reads_under("in.parquet");
+    let token = CancellationToken::new();
+    let options = PipelineOptions::single_threaded().cancelled_by(token.clone());
+
+    let run = std::thread::spawn(move || {
+        pipeline::run(
+            move |ctx| async move {
+                gated.register(&ctx);
+                pipeline::until_cancelled(&ctx, async {
+                    let rows = ctx
+                        .read_parquet(source, ParquetReadOptions::default())
+                        .await?;
+                    copy.write_unordered(rows).await
+                })
+                .await
+            },
+            options,
+        )
+    });
+    block_on(gate.reached());
+    token.cancel();
+    gate.release();
+
+    let error = run.join().unwrap().unwrap_err();
+    assert!(pipeline::is_cancelled(&error), "{error}");
+    assert_eq!(error.to_string(), "External error: the run was cancelled");
+    assert_eq!(
+        block_on(store.locations_under("")),
+        [Path::from("in.parquet")]
+    );
+}
+
+#[test]
+fn a_run_cancelled_before_it_starts_ends_cancelled_without_running_its_pipeline() {
+    let token = CancellationToken::new();
+    token.cancel();
+
+    let result = pipeline::run(
+        |_ctx| async move {
+            panic!("the pipeline of a run cancelled before it started ran");
+            #[expect(unreachable_code, reason = "fixes the pipeline's result type")]
+            Ok::<_, DataFusionError>(())
+        },
+        PipelineOptions::single_threaded().cancelled_by(token),
+    );
+
+    let error = result.unwrap_err();
+    assert!(pipeline::is_cancelled(&error), "{error}");
+}
+
+/// Work a run's pipeline does until cancelled hands back its own result, success or failure, when
+/// the run is not cancelled, as it does on a session the runner did not build, which has no
+/// token to be cancelled by.
+#[test]
+fn until_cancelled_hands_back_the_work_s_own_result_when_the_run_is_not_cancelled() {
+    let options = PipelineOptions::single_threaded().cancelled_by(CancellationToken::new());
+
+    let (succeeded, failed) = pipeline::run(
+        |ctx| async move {
+            let succeeded = pipeline::until_cancelled(&ctx, async { Ok(42_u64) }).await;
+            let failed: Result<u64, _> = pipeline::until_cancelled(&ctx, async {
+                Err(DataFusionError::Execution("the work failed".to_string()))
+            })
+            .await;
+            Ok::<_, DataFusionError>((succeeded, failed))
+        },
+        options,
+    )
+    .unwrap();
+    let unbuilt = block_on(pipeline::until_cancelled(
+        &datafusion::prelude::SessionContext::new(),
+        async { Ok(7_u64) },
+    ));
+
+    assert_eq!(succeeded.unwrap(), 42);
+    let error = failed.unwrap_err();
+    assert!(!pipeline::is_cancelled(&error), "{error}");
+    assert_eq!(unbuilt.unwrap(), 7);
+}
+
+/// A pipeline that stops its work on cancellation can go on to do more before it ends, such as
+/// recording the run, and the run then ends with whatever the pipeline returns.
+#[test]
+fn a_pipeline_goes_on_after_its_work_is_cancelled_and_the_run_returns_what_it_returns() {
+    let token = CancellationToken::new();
+    let options = PipelineOptions::single_threaded().cancelled_by(token.clone());
+
+    let (stopped, after) = pipeline::run(
+        move |ctx| async move {
+            let stopped = pipeline::until_cancelled(&ctx, async {
+                token.cancel();
+                std::future::pending::<datafusion::error::Result<()>>().await
+            })
+            .await;
+            let after = pipeline::until_cancelled(&ctx, async { Ok(()) }).await;
+            Ok::<_, DataFusionError>((stopped, after))
+        },
+        options,
+    )
+    .unwrap();
+
+    assert!(pipeline::is_cancelled(&stopped.unwrap_err()));
+    // Once the run is cancelled, later work is not started.
+    assert!(pipeline::is_cancelled(&after.unwrap_err()));
+}
+
+#[test]
+fn is_cancelled_recognises_the_cancelled_error_beneath_context() {
+    let token = CancellationToken::new();
+    token.cancel();
+    let cancelled = pipeline::run(
+        |_ctx| async move { Ok::<_, DataFusionError>(()) },
+        PipelineOptions::single_threaded().cancelled_by(token),
+    )
+    .unwrap_err();
+
+    let wrapped = cancelled.context("while writing the copy");
+
+    assert!(pipeline::is_cancelled(&wrapped), "{wrapped}");
+    assert!(!pipeline::is_cancelled(&DataFusionError::Execution(
+        "the run was cancelled".to_string()
+    )));
 }

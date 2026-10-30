@@ -83,9 +83,19 @@ the run under `DIR`: one row of resolved settings, wall-clock timings, and peak 
 in `DIR/runs/<id>.parquet`, and one row per plan operator per partition of DataFusion's metrics in
 `DIR/metrics/<id>.parquet`.
 `--run-id ID` names the run; without it a UUID is generated and printed. An id that already has a
-run record under `DIR` is refused before anything is written, and a run that fails records
-nothing. Both tables are Parquet whatever the output format, and each run adds one file, so
-`DIR/runs` and `DIR/metrics` read as tables of every run with datafusion-cli, DuckDB, or pandas.
+run record under `DIR` is refused before anything is written. Both tables are Parquet whatever the
+output format, and each run adds one file, so `DIR/runs` and `DIR/metrics` read as tables of every
+run with datafusion-cli, DuckDB, or pandas.
+
+The run record's `status` says how the run ended: `completed`, `failed` or `cancelled`. A run that
+fails once its id is checked, while discovering the dataset, planning, or writing the output or its
+sample annotation table, still records a run record, with `status` `failed`, before the error is
+reported, so `DIR/runs` shows every run started. That record has the settings and `run_ns` to the
+failure, `input_tables` and `samples` once the run planned its rows, and no `rows_written` or
+`execute_ns`; the run has no run metrics. A run cancelled through its pipeline's cancellation token
+records `cancelled` the same way; the CLI never cancels one. A run whose run metrics or run record
+write fails after a completed write records nothing, and may be retried under the same id. Filter
+on `status = 'completed'` before aggregating throughput.
 See
 [ADR 0016](adr/0016-record-run-metrics-as-wide-parquet-tables.md).
 Several metric names mislead: a Parquet scan's `elapsed_compute` excludes decoding, for one.

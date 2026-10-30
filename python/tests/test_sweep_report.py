@@ -11,6 +11,7 @@ from hailtools import sweep_report
 
 RUN_RECORD_TYPES = {
     "run_id": pa.string(),
+    "status": pa.string(),
     "threads": pa.uint64(),
     "input_tables": pa.uint64(),
     "rows_written": pa.uint64(),
@@ -141,6 +142,31 @@ def test_report_lists_failed_cells_and_unfinished_runners(tmp_path):
     assert "- r1: interrupted" in markdown
 
 
+def test_report_lists_a_cell_whose_run_record_did_not_complete_as_failed(tmp_path):
+    write_runner(
+        tmp_path, "r1", "c4-standard-2", 2, {"cancelled": 0, "failed": 1, "unreported": None}
+    )
+    for cell, status in [
+        ("cancelled", "cancelled"),
+        ("failed", "failed"),
+        ("unreported", "failed"),
+    ]:
+        write_run_record(tmp_path, f"{cell}-r1", status=status, threads=1, run_ns=10**9)
+
+    report = sweep_report.report(tmp_path)
+
+    assert report.figures == []
+    assert report.failed == [
+        sweep_report.FailedCell("r1", "cancelled", "cancelled-r1", 0, "cancelled"),
+        sweep_report.FailedCell("r1", "failed", "failed-r1", 1, "failed"),
+        sweep_report.FailedCell("r1", "unreported", "unreported-r1", None, "failed"),
+    ]
+    markdown = sweep_report.render_markdown(report)
+    assert "- cancelled-r1: exit status 0, recorded as cancelled" in markdown
+    assert "- failed-r1: exit status 1, recorded as failed" in markdown
+    assert "- unreported-r1: recorded as failed" in markdown
+
+
 def test_markdown_gives_mean_and_half_range_in_millions(tmp_path):
     for repetition, run_s in enumerate([1.0, 0.5], start=1):
         write_runner(
@@ -210,18 +236,19 @@ def test_report_needs_runner_records(tmp_path):
 
 # The shared metrics directory fixture: the tables the Rust writers write from fixed synthetic
 # inputs (ADR 0021). Its run records are a measured write `write-r1` of 1,000,000 rows from 50
-# input tables in 2 s on 2 threads with a peak RSS of 1 GiB, and a drained shadow probe
-# `shadow-r1` with the same facts but its rows, run time and steady-state estimate.
+# input tables in 2 s on 2 threads with a peak RSS of 1 GiB, a drained shadow probe `shadow-r1`
+# with the same facts but its rows, run time and steady-state estimate, and a measured write
+# `failed-r1` with the status `failed` and no rows written.
 SHARED_FIXTURE = Path(__file__).parent / "fixtures" / "metrics_directory"
 
 
 def test_report_reads_the_run_records_of_the_shared_fixture(tmp_path):
     shutil.copytree(SHARED_FIXTURE / "runs", tmp_path / "runs")
-    write_runner(tmp_path, "r1", "c4-standard-2", 2, {"write": 0, "shadow": 0})
+    write_runner(tmp_path, "r1", "c4-standard-2", 2, {"write": 0, "shadow": 0, "failed": None})
 
     report = sweep_report.report(tmp_path)
 
-    assert report.failed == []
+    assert report.failed == [sweep_report.FailedCell("r1", "failed", "failed-r1", None, "failed")]
     shadow, write = report.figures
     assert (write.cell, [run.run_id for run in write.runs]) == ("write", ["write-r1"])
     assert write.whole_run == pytest.approx([500_000 * math.log(50) / 2])

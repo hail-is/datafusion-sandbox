@@ -18,6 +18,7 @@ use crate::{
 };
 
 use datafusion::{datasource::listing::ListingTableUrl, prelude::SessionContext};
+use object_store::ObjectStoreExt;
 use std::sync::Arc;
 
 #[test]
@@ -222,6 +223,40 @@ fn the_output_root_is_a_directory_beside_the_dataset_on_its_registered_store() {
         "{output_root}"
     );
     ctx.runtime_env().object_store(&output_root).unwrap();
+}
+
+/// A fixture registered with gated reads holds the reads of its dataset's files on the session
+/// until the gate is released.
+#[test]
+fn a_fixture_registered_with_gated_reads_holds_reads_of_its_dataset_until_released() {
+    let fixture = fixture::dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::Packed);
+    let ctx = SessionContext::new();
+    let gate = fixture.register_with_gated_reads(&ctx);
+    let store = ctx
+        .runtime_env()
+        .object_store(fixture.table_path())
+        .unwrap();
+    let file = object_store::path::Path::from(format!(
+        "{}/{}",
+        fixture.table_path().prefix(),
+        sample_table_files(SAMPLES[0], FixtureFormat::Parquet)[0]
+    ));
+
+    let held = block_on(async {
+        tokio::select! {
+            biased;
+            read = store.get(&file) => {
+                read.unwrap();
+                false
+            }
+            () = gate.reached() => true,
+        }
+    });
+    gate.release();
+    let released = block_on(async { store.get(&file).await?.bytes().await }).unwrap();
+
+    assert!(held);
+    assert!(!released.is_empty());
 }
 
 #[test]
