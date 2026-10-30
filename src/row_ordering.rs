@@ -1,5 +1,7 @@
 //! Row orderings: orderings declared in row components, the locus and named fields such as the
 //! sample, and their expansion into stored fields under a locus representation.
+//!
+//! An expanded ordering states itself to a sink or an ordering assertion as a plain sort list.
 
 use crate::{locus::LocusRepresentation, sample::sample_field};
 
@@ -99,9 +101,22 @@ impl StoredOrdering {
     /// Sort expressions for every field in this ordering.
     #[must_use]
     pub fn sort_expressions(&self) -> Vec<SortExpr> {
+        self.sort_columns()
+            .iter()
+            .map(SortColumn::sort_expression)
+            .collect()
+    }
+
+    /// This ordering as a plain sort list: every field ascending, nulls last.
+    #[must_use]
+    pub fn sort_columns(&self) -> Vec<SortColumn> {
         self.column_names()
             .into_iter()
-            .map(|name| col(name).sort(true, false))
+            .map(|column| SortColumn {
+                column,
+                ascending: true,
+                nulls_first: false,
+            })
             .collect()
     }
 
@@ -135,6 +150,23 @@ impl StoredOrdering {
             ordering: RowOrdering(components),
             representation: self.representation,
         }
+    }
+}
+
+/// One entry of a plain sort list, `(column, ascending, nulls_first)`: a column by name, its
+/// direction, and where its nulls sort.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SortColumn {
+    pub column: String,
+    pub ascending: bool,
+    pub nulls_first: bool,
+}
+
+impl SortColumn {
+    /// The sort expression ordering rows by this column.
+    #[must_use]
+    pub fn sort_expression(&self) -> SortExpr {
+        col(self.column.as_str()).sort(self.ascending, self.nulls_first)
     }
 }
 

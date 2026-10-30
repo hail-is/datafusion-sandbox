@@ -240,7 +240,7 @@ fn collects_ordered_alleles_with_ranks_across_file_cuts() {
 }
 
 /// Both reference combiner formulations collect the same rows in locus order; grouped-merge
-/// only does so because collect runs through a sink that requires the ordering.
+/// only does so because collect holds the rows in the ordering with an assertion at the root.
 #[test]
 fn collects_references_in_locus_order_across_file_cuts() {
     for format in [FixtureFormat::Parquet, FixtureFormat::Vortex] {
@@ -388,6 +388,7 @@ fn explain_actions_return_plain_and_analyzed_plans() {
         plan.contains("DataSinkExec: sink=DrainingSink"),
         "plan:\n{plan}"
     );
+    assert_sink_over_root_assertion(&plan);
 
     let outcome = run(
         Formulation::CombineAllelesUnion,
@@ -406,6 +407,26 @@ fn explain_actions_return_plain_and_analyzed_plans() {
     assert!(!exec_names(&plan).contains(&"LimitExec"), "plan:\n{plan}");
     assert!(
         plan.contains("DataSinkExec: sink=DrainingSink"),
+        "plan:\n{plan}"
+    );
+    assert_sink_over_root_assertion(&plan);
+}
+
+/// Asserts that every physical plan rendered in `plan` ends in a sink directly over the run's
+/// ordering assertion, which holds the formulation's ordering in the stored fields.
+fn assert_sink_over_root_assertion(plan: &str) {
+    let names = exec_names(plan);
+    let sinks = names.iter().filter(|&&name| name == "DataSinkExec").count();
+    let held = names
+        .windows(2)
+        .filter(|pair| pair == &["DataSinkExec", "OrderingAssertionExec"])
+        .count();
+    assert!(sinks > 0, "plan:\n{plan}");
+    assert_eq!(held, sinks, "plan:\n{plan}");
+    assert!(
+        plan.contains(
+            "OrderingAssertionExec: order=[contig@0 ASC NULLS LAST, position@1 ASC NULLS LAST"
+        ),
         "plan:\n{plan}"
     );
 }
@@ -440,6 +461,7 @@ fn explain_with_a_write_renders_the_file_sink_plan_without_writing() {
         plan.contains("DataSinkExec: sink=VortexSink"),
         "plan:\n{plan}"
     );
+    assert_sink_over_root_assertion(&plan);
     assert!(!plan.contains("DrainingSink"), "plan:\n{plan}");
     assert!(
         !output_path.exists(),
@@ -473,9 +495,19 @@ fn explain_analyze_with_a_write_performs_the_write() {
         panic!("expected a plan, got {outcome:?}");
     };
     assert!(plan.contains("Plan with Metrics"), "plan:\n{plan}");
-    assert!(exec_names(&plan).contains(&"DataSinkExec"), "plan:\n{plan}");
+    assert_sink_over_root_assertion(&plan);
     let reader = SerializedFileReader::try_from(output_path.as_path()).unwrap();
     assert_eq!(reader.metadata().file_metadata().num_rows(), 32);
+    // The sink requires no ordering but records the run's, the reference combiner's locus:
+    // contig, then position.
+    let sorting_columns = reader.metadata().row_group(0).sorting_columns().unwrap();
+    assert_eq!(
+        sorting_columns
+            .iter()
+            .map(|column| (column.column_idx, column.descending, column.nulls_first))
+            .collect::<Vec<_>>(),
+        [(0, false, false), (1, false, false)]
+    );
 }
 
 /// On stored files, grouped-merge over two groups shows one merge per group beneath the final

@@ -1,15 +1,17 @@
 //! Shared datasets and plans for the suites of `formulation` and its plan builders.
 //!
 //! The suites plan a formulation, or one of `formulation`'s plan builders directly, over the
-//! shared dataset fixtures, then observe the plan through a sink, as every action runs it: the
-//! sink's ordering requirement is what holds a merge per input group beneath the final merge, so
-//! a bare frame's physical plan is not the plan a run executes. See ADR 0014.
+//! shared dataset fixtures, then observe the plan through a sink, held in its ordering by an
+//! assertion at its root, as every action runs it: the assertion is what holds a merge per input
+//! group beneath the final merge, so a bare frame's physical plan is not the plan a run executes.
+//! See ADR 0014 and ADR 0022.
 
 use crate::{
     format::OutputFormat,
     formulation::Formulation,
     locus::{Locus, LocusRepresentation},
     ordered_frame::{OrderedFrame, OutputLayout},
+    ordering_assertion::AssertionScope,
     pipeline::{self, PipelineOptions},
     row_ordering::{RowOrdering, StoredOrdering},
     sink,
@@ -202,8 +204,9 @@ pub(crate) fn output_path(ordered: &OrderedFrame, dataset: &FixtureDataset) -> S
 }
 
 /// The physical plan `builder` builds over `dataset` under `config`, with a row limit of `limit`
-/// if given, run into the fixture format's file sink at an in-memory path. Planned, not executed.
-/// Returns the ordering carried by the frame so the sink requirement can be checked against it.
+/// if given, held in its ordering as a write in its layout holds it and run into the fixture
+/// format's file sink at an in-memory path, as a run writes it. Planned, not executed. Returns the
+/// ordering carried by the frame so the root assertion can be checked against it.
 pub(crate) fn file_sink_plan(
     builder: &impl PlanBuilder,
     dataset: &FixtureDataset,
@@ -216,18 +219,20 @@ pub(crate) fn file_sink_plan(
             Some(limit) => ordered.limit(limit).unwrap(),
             None => ordered,
         };
-        let ordering = ordered.ordering.clone();
+        let stored_ordering = ordered.ordering.clone();
         let path = output_path(&ordered, dataset);
+        let layout = ordered.layout;
+        let (frame, ordering) = ordered.hold(layout.assertion_scope()).unwrap();
         let plan = WriteTarget {
             output_path: path,
             output_format: output_format(dataset.format),
         }
-        .sink_frame(ordered)
+        .sink_frame(frame, &ordering, layout)
         .unwrap()
         .create_physical_plan()
         .await
         .unwrap();
-        (plan, ordering)
+        (plan, stored_ordering)
     })
 }
 
@@ -241,7 +246,7 @@ pub(crate) fn drained_plan(
     drained_plan_and_ordering(builder, dataset, config, limit).0
 }
 
-/// [`drained_plan`] with the ordering carried by the frame, so the sink requirement can be checked
+/// [`drained_plan`] with the ordering carried by the frame, so the root assertion can be checked
 /// against it.
 pub(crate) fn drained_plan_and_ordering(
     builder: &impl PlanBuilder,
@@ -273,12 +278,16 @@ pub(crate) async fn planned(
     Ok((ctx, ordered))
 }
 
-/// The physical plan of `ordered` run into a draining sink.
+/// The physical plan of `ordered`, held in its ordering over one partition, run into a draining
+/// sink, as a run drains it.
 pub(crate) async fn sink_plan(ordered: OrderedFrame) -> Result<Arc<dyn ExecutionPlan>> {
-    sink::drain(ordered)?.create_physical_plan().await
+    sink::drain(ordered.hold(AssertionScope::OnePartition)?.0)?
+        .create_physical_plan()
+        .await
 }
 
-/// Runs `builder`'s plan through the collecting sink after applying `adjust` only to its frame.
+/// Runs `builder`'s plan through the collecting sink, held in its ordering over one partition as a
+/// run collects it, after applying `adjust` only to its frame.
 pub(crate) fn collected_batches<Builder, Adjust>(
     builder: &Builder,
     dataset: FixtureDataset,
@@ -302,7 +311,7 @@ where
                 ordering,
                 layout,
             };
-            let (frame, collected) = sink::collect(ordered)?;
+            let (frame, collected) = sink::collect(ordered.hold(AssertionScope::OnePartition)?.0)?;
             let plan = frame.create_physical_plan().await?;
             datafusion::physical_plan::collect(Arc::clone(&plan), ctx.task_ctx()).await?;
             Ok((plan, collected.take()))

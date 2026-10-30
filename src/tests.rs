@@ -6,6 +6,7 @@ mod formulation;
 mod locus;
 mod metrics_directory;
 mod ordered_frame;
+mod ordering_assertion;
 mod pipeline;
 mod row_ordering;
 mod sample;

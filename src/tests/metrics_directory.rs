@@ -665,7 +665,7 @@ async fn executed_plan(ctx: &SessionContext, join: bool) -> Result<Arc<dyn Execu
     let collecting = Arc::new(CollectingSink::new(Arc::clone(frame.schema().inner())));
     let target = Arc::new(DataSinkTarget::new(collecting));
     Ok(
-        sink::execute_and_retain(sink::run_into(frame, "collect", None, target)?)
+        sink::execute_and_retain(sink::run_into(frame, "collect", &[], target)?)
             .await?
             .plan,
     )

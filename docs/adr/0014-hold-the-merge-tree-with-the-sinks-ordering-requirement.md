@@ -2,6 +2,8 @@
 
 > Superseded in part by [issue #151](https://github.com/hail-is/datafusion-sandbox/issues/151). `Formulation::plan` returns an ordered frame rather than a plain frame, and the sink still belongs to the run. The rest of this ADR stands.
 
+> Superseded in part by [ADR 0022](0022-build-hail-plans-with-datafusion-python-and-run-them-in-our-backend.md), as implemented in [issue #329](https://github.com/hail-is/datafusion-sandbox/issues/329). The sink's ordering requirement is replaced by an ordering assertion at the root of the plan, which requires the same one partition in the same order, so the optimizer builds the same merge tree beneath it. Sinks take the ordering as a plain sort list, record it as file metadata, and require none, and every sort a plan builder writes is an established order.
+
 The grouped-merge formulation of the reference combiner needs the physical plan
 `SortPreservingMergeExec(UnionExec(SortPreservingMergeExec(UnionExec(group 1 scans)), ...))`: one
 merge per sample group beneath a final merge of the groups, with no sort anywhere. Its plan builder

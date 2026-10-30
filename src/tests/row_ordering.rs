@@ -1,4 +1,7 @@
-use crate::{locus::LocusRepresentation, row_ordering::RowOrdering};
+use crate::{
+    locus::LocusRepresentation,
+    row_ordering::{RowOrdering, SortColumn},
+};
 use datafusion::{
     arrow::datatypes::{DataType, Field, Schema, SchemaRef},
     common::DataFusionError,
@@ -52,6 +55,31 @@ fn expands_a_contig_position_row_ordering() {
             col("position").sort(true, false),
         ]
     );
+}
+
+#[test]
+fn a_stored_ordering_is_a_plain_sort_list_ascending_with_nulls_last() {
+    assert_eq!(
+        RowOrdering::locus_then_alleles()
+            .expand(LocusRepresentation::ContigPosition)
+            .sort_columns(),
+        ["contig", "position", "alleles"].map(|column| SortColumn {
+            column: column.to_string(),
+            ascending: true,
+            nulls_first: false,
+        })
+    );
+}
+
+#[test]
+fn a_sort_column_sorts_by_its_column_in_its_direction_and_null_placement() {
+    let column = SortColumn {
+        column: "position".to_string(),
+        ascending: false,
+        nulls_first: true,
+    };
+
+    assert_eq!(column.sort_expression(), col("position").sort(false, true));
 }
 
 #[test]

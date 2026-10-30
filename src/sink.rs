@@ -1,8 +1,10 @@
-//! Sinks: the operator every action runs its frame into, and the ordering it requires.
+//! Sinks: the operator every action runs its frame into.
 //!
-//! Every action ends in a sink whose required input ordering is the formulation's ordering. The
-//! requirement is what keeps a merge per input group, or per locus interval, beneath the sink; a
-//! logical sort in the same place destroys it. The file sink is the write module's; the two
+//! Every action ends in a sink. A sink requires no ordering of its own: the run holds the rows in
+//! the combiner's ordering with an ordering assertion at the root of the frame it hands the sink
+//! (see [`crate::ordering_assertion`] and ADR 0022), which keeps a merge per input group, or per
+//! locus interval, beneath it. A sink takes that ordering as a plain sort list only to record it,
+//! as a file sink does in its file metadata. The file sink is the write module's; the two
 //! `DataSink`s here stand in for it when the action collects rows or only analyzes the plan. See
 //! [ADR 0014](../docs/adr/0014-hold-the-merge-tree-with-the-sinks-ordering-requirement.md).
 //!
@@ -24,31 +26,27 @@
 //! back as it stood at the stop.
 
 use crate::{
-    ordered_frame::OrderedFrame,
     pipeline,
-    row_ordering::StoredOrdering,
+    row_ordering::SortColumn,
     throughput_probe::{self, Decision, ProbeKind, ProbeSettings, ProbedKind, ProgressSample},
 };
 
 use datafusion::{
     arrow::{
         array::{Array, UInt64Array},
-        compute::SortOptions,
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
     },
     catalog::{Session, TableProvider},
-    common::{DFSchema, runtime::JoinSet, tree_node::TreeNodeRecursion},
+    common::{runtime::JoinSet, tree_node::TreeNodeRecursion},
     datasource::{
         DefaultTableSource,
         sink::{DataSink, DataSinkExec},
     },
     error::{DataFusionError, Result},
     execution::TaskContext,
-    logical_expr::{LogicalPlanBuilder, SortExpr, TableType, dml::InsertOp},
-    physical_expr::{
-        EquivalenceProperties, LexRequirement, OrderingRequirements, PhysicalExpr, PhysicalSortExpr,
-    },
+    logical_expr::{LogicalPlanBuilder, TableType, dml::InsertOp},
+    physical_expr::{EquivalenceProperties, PhysicalExpr},
     physical_plan::{
         self, ChildrenPropertiesMode, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan,
         ExecutionPlanProperties, InputDistributionRequirements, Partitioning, PlanProperties,
@@ -70,10 +68,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// What an insert plans to once its input and the ordering requirement are known.
+/// What an insert plans to once its input and the ordering its rows arrive in are known.
 #[async_trait::async_trait]
 pub trait SinkTarget: fmt::Debug + Send + Sync {
-    /// The execution plan that writes `input` into this target, requiring `ordering` of it.
+    /// The execution plan that writes `input` into this target, whose rows arrive in `ordering`.
+    ///
+    /// The plan may record `ordering`, as a file's metadata does, but requires no ordering of its
+    /// input: holding the rows in it is the frame's business.
     ///
     /// # Errors
     ///
@@ -82,14 +83,15 @@ pub trait SinkTarget: fmt::Debug + Send + Sync {
         &self,
         state: &dyn Session,
         input: Arc<dyn ExecutionPlan>,
-        ordering: Option<LexRequirement>,
+        ordering: &[SortColumn],
     ) -> Result<Arc<dyn ExecutionPlan>>;
 }
 
-/// The frame that runs `df` into `target` when executed, requiring `ordering` of the rows.
+/// The frame that runs `df` into `target` when executed, its rows arriving in `ordering`.
 ///
-/// `None` places no requirement. The planner reaches the target through the frame's table
-/// source; nothing is registered on the session.
+/// `ordering` is a plain sort list for the target to record, empty for unordered rows; the sink
+/// requires no ordering of `df`. The planner reaches the target through the frame's table source;
+/// nothing is registered on the session.
 ///
 /// # Errors
 ///
@@ -97,12 +99,12 @@ pub trait SinkTarget: fmt::Debug + Send + Sync {
 pub fn run_into(
     df: DataFrame,
     name: &str,
-    ordering: Option<&StoredOrdering>,
+    ordering: &[SortColumn],
     target: Arc<dyn SinkTarget>,
 ) -> Result<DataFrame> {
     let provider = Arc::new(SinkProvider {
         schema: Arc::clone(df.schema().inner()),
-        ordering: ordering.map(StoredOrdering::sort_expressions),
+        ordering: ordering.to_vec(),
         target,
     });
     let (state, plan) = df.into_parts();
@@ -401,7 +403,8 @@ fn to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-/// The frame that runs `df` into a sink keeping every batch it receives, in arrival order.
+/// The frame that runs `df` into a sink keeping every batch it receives, in arrival order, over
+/// one partition.
 ///
 /// Executing the frame yields the row count; the batches are taken from the returned sink
 /// afterwards.
@@ -409,30 +412,21 @@ fn to_u64(value: usize) -> u64 {
 /// # Errors
 ///
 /// Returns an error if the sink plan cannot be built.
-pub fn collect(ordered: OrderedFrame) -> Result<(DataFrame, Arc<CollectingSink>)> {
-    let sink = Arc::new(CollectingSink::new(Arc::clone(
-        ordered.frame.schema().inner(),
-    )));
+pub fn collect(df: DataFrame) -> Result<(DataFrame, Arc<CollectingSink>)> {
+    let sink = Arc::new(CollectingSink::new(Arc::clone(df.schema().inner())));
     let target = Arc::new(DataSinkTarget::new(sink.clone()));
-    let frame = run_into(ordered.frame, "collect", Some(&ordered.ordering), target)?;
+    let frame = run_into(df, "collect", &[], target)?;
     Ok((frame, sink))
 }
 
-/// The frame that runs `df` into a sink counting its rows and dropping them.
+/// The frame that runs `df` into a sink counting its rows and dropping them, over one partition.
 ///
 /// # Errors
 ///
 /// Returns an error if the sink plan cannot be built.
-pub fn drain(ordered: OrderedFrame) -> Result<DataFrame> {
-    let sink = Arc::new(DrainingSink::new(Arc::clone(
-        ordered.frame.schema().inner(),
-    )));
-    run_into(
-        ordered.frame,
-        "drain",
-        Some(&ordered.ordering),
-        Arc::new(DataSinkTarget::new(sink)),
-    )
+pub fn drain(df: DataFrame) -> Result<DataFrame> {
+    let sink = Arc::new(DrainingSink::new(Arc::clone(df.schema().inner())));
+    run_into(df, "drain", &[], Arc::new(DataSinkTarget::new(sink)))
 }
 
 /// A sink that keeps the batches written to it.
@@ -550,12 +544,12 @@ impl SinkTarget for DataSinkTarget {
         &self,
         _: &dyn Session,
         input: Arc<dyn ExecutionPlan>,
-        ordering: Option<LexRequirement>,
+        _: &[SortColumn],
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(Arc::new(DataSinkExec::new(
             input,
             Arc::clone(&self.0),
-            ordering,
+            None,
         )))
     }
 }
@@ -564,9 +558,9 @@ impl SinkTarget for DataSinkTarget {
 /// sink, and the exec yields that sink's count batch as its own partition `i`.
 ///
 /// `DataSinkExec` requires a single input partition and executes only partition 0, so one plan
-/// through it writes one file. This exec requires the ordering of every input partition, places no
-/// distribution requirement, and does not benefit from partitioning, so the optimizer neither
-/// coalesces nor repartitions beneath it. See
+/// through it writes one file. This exec places neither an ordering nor a distribution requirement,
+/// and does not benefit from partitioning, so the optimizer neither coalesces nor repartitions
+/// beneath it. See
 /// [ADR 0015](../docs/adr/0015-write-one-file-per-partition-through-a-partitioned-sink.md).
 ///
 /// The exec builds the single-partition input each partition sink reads, so a sink is never paired
@@ -580,22 +574,20 @@ impl SinkTarget for DataSinkTarget {
 pub struct PartitionedSinkExec {
     input: Arc<dyn ExecutionPlan>,
     partition_sinks: Vec<Arc<dyn ExecutionPlan>>,
-    ordering: Option<LexRequirement>,
     cache: Arc<PlanProperties>,
 }
 
 impl PartitionedSinkExec {
     /// The sink over `input` running each of its partitions into the sink its own target plans,
-    /// requiring `ordering` of every partition.
+    /// the rows of every partition arriving in `ordering`.
     ///
     /// `target(index, count)` supplies the target for partition `index` of `count`. The exec reads
     /// the partition count off `input` and builds the single-partition plan each target writes, so
     /// there is no protocol for a caller to get wrong.
     ///
-    /// `ordering` reaches every partition sink as well as this exec, because a format turns it into
-    /// file metadata there, such as Parquet's sorting columns. It is not enforced there: the
-    /// partition sinks are not this exec's children, so the optimizer never walks them. What the
-    /// optimizer satisfies is the requirement this exec reports for its own input.
+    /// `ordering` reaches every partition sink, because a format turns it into file metadata there,
+    /// such as Parquet's sorting columns. Neither this exec nor its partition sinks require it;
+    /// holding every partition in it is the frame's business.
     ///
     /// # Errors
     ///
@@ -604,7 +596,7 @@ impl PartitionedSinkExec {
     pub async fn plan(
         state: &dyn Session,
         input: Arc<dyn ExecutionPlan>,
-        ordering: Option<LexRequirement>,
+        ordering: &[SortColumn],
         target: &(dyn Fn(usize, usize) -> Arc<dyn SinkTarget> + Send + Sync),
     ) -> Result<Self> {
         let count = input.output_partitioning().partition_count();
@@ -613,7 +605,7 @@ impl PartitionedSinkExec {
         for index in 0..count {
             let partition = input_partition(Arc::clone(&input), index);
             let sink = target(index, count)
-                .plan(state, partition, ordering.clone())
+                .plan(state, partition, ordering)
                 .await?;
             if sink.output_partitioning().partition_count() != 1 {
                 return Err(DataFusionError::Internal(format!(
@@ -633,7 +625,6 @@ impl PartitionedSinkExec {
             cache: Arc::new(Self::properties(&input)),
             input,
             partition_sinks,
-            ordering,
         })
     }
 
@@ -687,10 +678,6 @@ impl ExecutionPlan for PartitionedSinkExec {
         InputDistributionRequirements::new(vec![Distribution::UnspecifiedDistribution])
     }
 
-    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
-        vec![self.ordering.clone().map(Into::into)]
-    }
-
     fn maintains_input_order(&self) -> Vec<bool> {
         vec![true]
     }
@@ -726,7 +713,6 @@ impl ExecutionPlan for PartitionedSinkExec {
             cache: Arc::new(Self::properties(&input)),
             input,
             partition_sinks,
-            ordering: self.ordering.clone(),
         }))
     }
 
@@ -929,11 +915,11 @@ impl ExecutionPlan for InputPartitionExec {
     }
 }
 
-/// The table an insert writes to: a target and the ordering its input must arrive in.
+/// The table an insert writes to: a target and the ordering its input arrives in.
 #[derive(Debug)]
 struct SinkProvider {
     schema: SchemaRef,
-    ordering: Option<Vec<SortExpr>>,
+    ordering: Vec<SortColumn>,
     target: Arc<dyn SinkTarget>,
 }
 
@@ -965,23 +951,6 @@ impl TableProvider for SinkProvider {
         input: Arc<dyn ExecutionPlan>,
         _: InsertOp,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let requirement = match &self.ordering {
-            Some(ordering) => {
-                let input_schema = DFSchema::try_from(input.schema())?;
-                let sort_exprs = ordering
-                    .iter()
-                    .map(|sort| {
-                        let expr = state.create_physical_expr(sort.expr.clone(), &input_schema)?;
-                        Ok(PhysicalSortExpr::new(
-                            expr,
-                            SortOptions::new(!sort.asc, sort.nulls_first),
-                        ))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                LexRequirement::new(sort_exprs.into_iter().map(Into::into))
-            }
-            None => None,
-        };
-        self.target.plan(state, input, requirement).await
+        self.target.plan(state, input, &self.ordering).await
     }
 }
