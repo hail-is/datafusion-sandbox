@@ -15,6 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import vortex as vx
+from hail_df import Backend
 
 FORMATS = ["parquet", "vortex"]
 
@@ -85,3 +86,13 @@ def input_format(request) -> str:
 @pytest.fixture
 def mixed_dataset(tmp_path, input_format) -> Path:
     return write_mixed_dataset(tmp_path, input_format)
+
+
+@pytest.fixture(scope="module")
+def backend() -> Backend:
+    return Backend()
+
+
+@pytest.fixture
+def dataset(backend, mixed_dataset, input_format):
+    return backend.open_dataset(str(mixed_dataset), input_format, "locus,alleles")
