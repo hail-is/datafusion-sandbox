@@ -16,8 +16,12 @@ __all__ = [
     "BackendError",
     "Collect",
     "Dataset",
+    "Explain",
+    "ExplainAnalyze",
+    "FormulationRecord",
     "InputTable",
     "InvalidAction",
+    "PlanText",
     "Rows",
     "Run",
     "ScanDescription",
@@ -62,6 +66,7 @@ class Dataset:
             SortColumn(*column) for column in opened.ordering
         )
         self.schema: pa.Schema = pa.schema(opened.schema)
+        self._opened = opened
 
     def __repr__(self) -> str:
         return (
@@ -102,10 +107,49 @@ class Collect:
 
 
 @dataclass(frozen=True)
+class Explain:
+    """The Action that renders the plan of a run that drains the rows, held in `ordering`, without
+    running it. `write`, the plan of a write instead, must be None until writes land."""
+
+    ordering: Sequence[SortColumn]
+    write: None = None
+
+
+@dataclass(frozen=True)
+class ExplainAnalyze:
+    """The Action that runs the plan, draining the rows, held in `ordering`, and renders it with
+    per-operator metrics. `write`, a run that writes instead, must be None until writes land."""
+
+    ordering: Sequence[SortColumn]
+    write: None = None
+
+
+Action = Collect | Explain | ExplainAnalyze
+
+
+@dataclass(frozen=True)
 class Rows:
     """The Outcome of a `Collect`: the rows, in its ordering, as Arrow data."""
 
     rows: pa.Table
+
+
+@dataclass(frozen=True)
+class PlanText:
+    """The Outcome of an `Explain` or `ExplainAnalyze`: the plan as a table of text, with a section
+    each for the decoded `frontend_plan`, the `logical_plan` and the `physical_plan`, and for an
+    `ExplainAnalyze` the `Plan with Metrics`."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class FormulationRecord:
+    """The settings of a formulation that a run record holds."""
+
+    name: str
+    groups: int | None = None
+    split_points: str | None = None
 
 
 class Run:
@@ -122,12 +166,13 @@ class Run:
         """The run's id, the one given to `Backend.start` or a generated one."""
         return self._run.run_id
 
-    def wait(self) -> Rows:
+    def wait(self) -> Rows | PlanText:
         """Blocks until the run ends and returns its Outcome. Other Python threads keep running.
 
         Raises `BackendError` if the run failed. Waiting again hands back the same result.
         """
-        return Rows(pa.table(self._run.wait()))
+        outcome = self._run.wait()
+        return PlanText(outcome) if isinstance(outcome, str) else Rows(pa.table(outcome))
 
 
 class Backend:
@@ -157,11 +202,31 @@ class Backend:
         """
         return self._backend.scan_descriptions(plan_bytes, DATAFUSION_MAJOR, WIRE_VERSION)
 
+    def builtin_plan(self, dataset: Dataset, formulation: FormulationRecord) -> bytes:
+        """The plan bytes of a built-in Rust formulation over `dataset`'s input tables, every scan
+        encoded as the scan description `dataset` handed out. They run through `start` as a
+        frontend's do.
+
+        Raises `InvalidAction` if the wheel's versions aren't the backend's or `formulation` is not
+        built in: only `FormulationRecord("union")` is. Raises `BackendError` if the dataset can no
+        longer be read as it was opened.
+        """
+        if not isinstance(formulation, FormulationRecord):
+            raise TypeError(f"formulation must be a FormulationRecord, not {formulation!r}")
+        return self._backend.builtin_plan(
+            dataset._opened,
+            formulation.name,
+            formulation.groups,
+            formulation.split_points,
+            DATAFUSION_MAJOR,
+            WIRE_VERSION,
+        )
+
     def start(
         self,
         ctx: SessionContext,
         frame_or_plan_bytes: DataFrame | bytes,
-        action: Collect,
+        action: Action,
         settings: Mapping[str, str] | None = None,
         run_id: str | None = None,
     ) -> Run:
@@ -171,17 +236,17 @@ class Backend:
         A frame is encoded unoptimized in `ctx`, a session from `hail_df.context()`; plan bytes
         were already encoded in one, here or elsewhere, and cross as they are.
 
+        `settings` takes exactly `hail_df.threads`, `hail_df.target_partitions` and
+        `hail_df.repartition_file_min_size`, each a string.
+
         Raises `InvalidAction`, before the run starts, if the wheel's versions aren't the
         backend's, a setting's name is unknown or its value doesn't parse, the Action's ordering is
-        empty, or the plan carries a payload framed at another wire version or an inlined Python
-        function. Raises `BackendError` if the bytes are not otherwise a plan encoded in such a
-        session. Raises `TypeError` if `action` is not an Action, or a setting's name or value is
-        not a string.
+        empty or it asks for a write, or the plan carries a payload framed at another wire version
+        or an inlined Python function. Raises `BackendError` if the bytes are not otherwise a plan
+        encoded in such a session. Raises `TypeError` if `action` is not an Action, or a setting's
+        name or value is not a string.
         """
-        if isinstance(action, Collect):
-            native_action = _native.Action.collect(list(action.ordering))
-        else:
-            raise TypeError(f"action must be a Collect, not {action!r}")
+        native_action = _native_action(action)
         plan_bytes = (
             frame_or_plan_bytes.logical_plan().to_bytes(ctx)
             if isinstance(frame_or_plan_bytes, DataFrame)
@@ -197,3 +262,18 @@ class Backend:
                 WIRE_VERSION,
             )
         )
+
+
+def _native_action(action: Action) -> _native.Action:
+    """`action` as the backend takes it."""
+    if isinstance(action, Explain | ExplainAnalyze) and action.write is not None:
+        raise InvalidAction(f"{type(action).__name__} can't take a write yet: {action.write!r}")
+    ordering = list(getattr(action, "ordering", ()))
+    match action:
+        case Collect():
+            return _native.Action.collect(ordering)
+        case Explain():
+            return _native.Action.explain(ordering)
+        case ExplainAnalyze():
+            return _native.Action.explain_analyze(ordering)
+    raise TypeError(f"action must be a Collect, Explain or ExplainAnalyze, not {action!r}")

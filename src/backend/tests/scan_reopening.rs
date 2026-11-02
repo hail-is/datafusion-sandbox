@@ -161,6 +161,116 @@ fn reopening_a_scan_of_an_input_table_the_dataset_no_longer_has_fails() {
 }
 
 /// The scan of a placeholder holding `description` and `schema`, as a decoded plan holds it.
+/// Describing a plan a dataset read gives each scan the description of its own input table, and
+/// reopening what it gives reads those input tables' rows.
+#[test]
+fn describing_a_dataset_s_scans_gives_each_its_input_table_s_description() {
+    let fixture = fixture::dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::Packed);
+    let register: Register = Arc::new(|ctx| fixture.register(ctx));
+    let names = ["s=HG02230", "s=HG00592"];
+    let [first, second] =
+        names.map(|name| description(fixture.table_path().as_str(), fixture.input_format(), name));
+    let schema = read_plan(&register, &first, &names)
+        .schema()
+        .inner()
+        .clone();
+    let scans = [&first, &second].map(|description| {
+        Arc::new(DescribedScan::new(
+            (*description).clone(),
+            Arc::clone(&schema),
+        ))
+    });
+
+    let plan = scan_reopening::describe(read_plan(&register, &first, &names), &scans).unwrap();
+
+    // The dataset reads its input tables in name order, whatever order they were asked for.
+    assert_eq!(
+        scan_reopening::descriptions(&plan).unwrap(),
+        [second, first]
+    );
+    let batches = reopened(&register, plan).unwrap();
+    let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+    assert_eq!(rows, 2 * fixture::sample_rows().len());
+}
+
+#[test]
+fn describing_a_plan_reading_anything_but_an_input_table_fails() {
+    let provider: Arc<dyn TableProvider> = Arc::new(EmptyTable::new(locus_schema()));
+    let plan = SessionContext::new()
+        .read_table(provider)
+        .unwrap()
+        .into_unoptimized_plan();
+
+    let error = scan_reopening::describe(plan, &[]).unwrap_err();
+
+    assert!(error.to_string().contains("not an input table"), "{error}");
+}
+
+#[test]
+fn describing_a_scan_of_an_input_table_no_description_names_fails() {
+    let fixture = fixture::dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::Packed);
+    let register: Register = Arc::new(|ctx| fixture.register(ctx));
+    let read = description(
+        fixture.table_path().as_str(),
+        fixture.input_format(),
+        "s=HG02230",
+    );
+    let other = description(
+        fixture.table_path().as_str(),
+        fixture.input_format(),
+        "s=HG00592",
+    );
+    let plan = read_plan(&register, &read, &["s=HG02230"]);
+    let scan = Arc::new(DescribedScan::new(other, Arc::clone(plan.schema().inner())));
+
+    let error = scan_reopening::describe(plan, &[scan]).unwrap_err();
+
+    assert!(error.to_string().contains("'s=HG02230'"), "{error}");
+}
+
+#[test]
+fn describing_a_scan_whose_input_table_reads_another_schema_than_its_description_fails() {
+    let fixture = fixture::dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::Packed);
+    let register: Register = Arc::new(|ctx| fixture.register(ctx));
+    let read = description(
+        fixture.table_path().as_str(),
+        fixture.input_format(),
+        "s=HG02230",
+    );
+    let plan = read_plan(&register, &read, &["s=HG02230"]);
+    let scan = Arc::new(DescribedScan::new(read, locus_schema()));
+
+    let error = scan_reopening::describe(plan, &[scan]).unwrap_err();
+
+    assert!(error.to_string().contains("schema"), "{error}");
+}
+
+/// The unoptimized plan of the dataset `description` names reading the input tables `names`.
+fn read_plan(register: &Register, description: &ScanDescription, names: &[&str]) -> LogicalPlan {
+    let register = Arc::clone(register);
+    let description = description.clone();
+    let names = names.iter().map(ToString::to_string).collect::<Vec<_>>();
+    pipeline::run(
+        move |ctx| async move {
+            register(&ctx);
+            let frame = Dataset::discover(
+                &ctx,
+                ListingTableUrl::parse(&description.dataset_path)?,
+                description.input_format.clone(),
+                description.row_ordering.clone(),
+                None,
+            )
+            .await?
+            .restrict_to(&names)?
+            .read(&ctx)
+            .await?;
+            Ok(frame.into_unoptimized_plan())
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap()
+}
+
 fn placeholder(description: &ScanDescription, schema: SchemaRef) -> LogicalPlan {
     let provider: Arc<dyn TableProvider> =
         Arc::new(DescribedScan::new(description.clone(), schema));

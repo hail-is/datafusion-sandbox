@@ -6,21 +6,25 @@
 //! and swaps every placeholder for the sorted-table scan of its input table that the Rust
 //! formulations read. Discovery lists the dataset's files afresh, so a scan reads the files its
 //! input table holds when it is reopened, not when it was described.
+//!
+//! [`describe`] goes the other way, for a plan a Rust formulation built over a dataset: it swaps
+//! each scan of an input table for the described scan a frontend's plan would hold.
 
 use crate::{
     backend::scan_description::{DescribedScan, ScanDescription},
     format::InputFormat,
     row_ordering::RowOrdering,
-    stored::dataset::Dataset,
+    stored::dataset::{Dataset, scanned_input_table},
 };
 
 use datafusion::{
     arrow::datatypes::SchemaRef,
+    catalog::TableProvider,
     common::{
         DataFusionError,
         tree_node::{Transformed, TreeNodeRecursion},
     },
-    datasource::{listing::ListingTableUrl, source_as_provider},
+    datasource::{listing::ListingTableUrl, provider_as_source, source_as_provider},
     error::Result,
     logical_expr::{LogicalPlan, TableScan, TableSource},
     prelude::SessionContext,
@@ -117,6 +121,50 @@ pub async fn reopen(ctx: &SessionContext, plan: LogicalPlan) -> Result<LogicalPl
         }
         Ok(Transformed::yes(LogicalPlan::TableScan(TableScan {
             source: Arc::clone(source),
+            ..scan
+        })))
+    })
+    .map(|transformed| transformed.data)
+}
+
+/// `plan`, built over a dataset's input tables, with every scan swapped for the one among `scans`
+/// that describes the same input table, subqueries included.
+///
+/// # Errors
+///
+/// Returns an error if the plan reads a table that is not an input table's scan, or one none of
+/// `scans` describes, or a scan's schema is not the one its description was handed out with.
+pub fn describe(plan: LogicalPlan, scans: &[Arc<DescribedScan>]) -> Result<LogicalPlan> {
+    plan.transform_up_with_subqueries(|node| {
+        let LogicalPlan::TableScan(scan) = node else {
+            return Ok(Transformed::no(node));
+        };
+        let provider = source_as_provider(&scan.source)?;
+        let Some(input_table) = scanned_input_table(provider.as_ref()) else {
+            return Err(DataFusionError::Plan(format!(
+                "the plan reads table '{}', which is not an input table of a dataset",
+                scan.table_name
+            )));
+        };
+        let Some(described) = scans
+            .iter()
+            .find(|described| described.description().input_table == input_table)
+        else {
+            return Err(DataFusionError::Plan(format!(
+                "the plan reads input table '{input_table}', which no scan description names"
+            )));
+        };
+        if scan.source.schema() != *described.schema_ref() {
+            return Err(DataFusionError::Plan(format!(
+                "input table '{input_table}' reads schema {:?} now, and its scan description was \
+                 handed out with {:?}",
+                scan.source.schema(),
+                described.schema_ref()
+            )));
+        }
+        let provider: Arc<dyn TableProvider> = described.clone();
+        Ok(Transformed::yes(LogicalPlan::TableScan(TableScan {
+            source: provider_as_source(provider),
             ..scan
         })))
     })

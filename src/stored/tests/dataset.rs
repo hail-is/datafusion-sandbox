@@ -14,7 +14,7 @@ use crate::{
     locus::{Locus, LocusRepresentation},
     pipeline::{self, PipelineOptions},
     row_ordering::RowOrdering,
-    stored::dataset::{Dataset, InputTable, InputTableKind},
+    stored::dataset::{Dataset, InputTable, InputTableKind, scanned_input_table},
     write::WriteTarget,
 };
 use datafusion::{
@@ -25,15 +25,59 @@ use datafusion::{
         util::display::array_value_to_string,
     },
     common::DataFusionError,
-    datasource::{listing::ListingTableUrl, source::DataSourceExec},
+    datasource::{
+        empty::EmptyTable, listing::ListingTableUrl, source::DataSourceExec, source_as_provider,
+    },
     error::Result,
     execution::object_store::ObjectStoreUrl,
+    logical_expr::LogicalPlan,
     prelude::{SessionContext, col, lit},
 };
 use futures::TryStreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
 use std::sync::Arc;
+
+/// What a dataset read names the input table it scans, and no other table does.
+#[test]
+fn a_scan_a_dataset_read_names_its_input_table() {
+    let fixture =
+        fixture::dataset_fixture(fixture::FixtureFormat::Parquet, LocusRepresentation::Packed);
+    let input_table = fixture::INPUT_TABLES[1].to_string();
+
+    let plan = pipeline::run(
+        move |ctx| {
+            fixture.register(&ctx);
+            async move {
+                let dataset = Dataset::discover(
+                    &ctx,
+                    fixture.table_path().clone(),
+                    fixture.input_format(),
+                    RowOrdering::locus(),
+                    None,
+                )
+                .await?
+                .restrict_to(std::slice::from_ref(&input_table))?;
+                Ok(dataset.read(&ctx).await?.into_unoptimized_plan())
+            }
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap();
+
+    let LogicalPlan::TableScan(scan) = plan else {
+        panic!("one input table reads as one scan: {plan}");
+    };
+    let provider = source_as_provider(&scan.source).unwrap();
+    assert_eq!(
+        scanned_input_table(provider.as_ref()),
+        Some(fixture::INPUT_TABLES[1])
+    );
+    assert_eq!(
+        scanned_input_table(&EmptyTable::new(Arc::new(Schema::empty()))),
+        None
+    );
+}
 
 #[test]
 fn reads_one_sample_in_locus_then_alleles_order_with_its_sample_id_attached_as_a_view_string() {

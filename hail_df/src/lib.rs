@@ -26,10 +26,11 @@ use datafusion_sandbox::{
         codec::{CODEC_ID, Codec},
         scan_description::{DescribedScan, ScanDescription},
     },
+    metrics_directory::FormulationRecord,
     row_ordering::SortColumn,
 };
 use pyo3::{
-    create_exception,
+    IntoPyObjectExt, create_exception,
     exceptions::PyException,
     prelude::*,
     types::{PyBytes, PyCapsule},
@@ -125,6 +126,38 @@ impl PyBackend {
             .map_err(|e| raised(&e))
     }
 
+    /// The plan bytes of the built-in formulation with the run record's `name`, `groups` and
+    /// `split_points` over `dataset`, for a frontend on `DataFusion` major `datafusion_major` whose
+    /// wheel frames payloads at `wire_version`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Python's call carries each value plainly, as the formulation record holds them"
+    )]
+    fn builtin_plan<'py>(
+        &self,
+        py: Python<'py>,
+        dataset: &PyOpenedDataset,
+        name: String,
+        groups: Option<usize>,
+        split_points: Option<String>,
+        datafusion_major: u64,
+        wire_version: u8,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let formulation = FormulationRecord {
+            name,
+            groups,
+            split_points,
+        };
+        let versions = Versions {
+            datafusion_major,
+            wire_version,
+        };
+        let bytes = py
+            .detach(|| self.0.builtin_plan(&dataset.0, &formulation, versions))
+            .map_err(|e| raised(&e))?;
+        Ok(PyBytes::new(py, &bytes))
+    }
+
     /// Starts a run of `plan_bytes` that performs `action` under `settings`, as `run_id` or under a
     /// generated id, for a frontend on `DataFusion` major `datafusion_major` whose wheel frames
     /// payloads at `wire_version`.
@@ -172,16 +205,37 @@ impl PyAction {
     #[staticmethod]
     fn collect(ordering: Vec<(String, bool, bool)>) -> Self {
         Self(Action::Collect {
-            ordering: ordering
-                .into_iter()
-                .map(|(column, ascending, nulls_first)| SortColumn {
-                    column,
-                    ascending,
-                    nulls_first,
-                })
-                .collect(),
+            ordering: sort_columns(ordering),
         })
     }
+
+    /// Render the plan of a run that drains the rows in `ordering`, without running it.
+    #[staticmethod]
+    fn explain(ordering: Vec<(String, bool, bool)>) -> Self {
+        Self(Action::Explain {
+            ordering: sort_columns(ordering),
+        })
+    }
+
+    /// Run the plan, draining the rows in `ordering`, and render it with per-operator metrics.
+    #[staticmethod]
+    fn explain_analyze(ordering: Vec<(String, bool, bool)>) -> Self {
+        Self(Action::ExplainAnalyze {
+            ordering: sort_columns(ordering),
+        })
+    }
+}
+
+/// `ordering`, a list of `(column, ascending, nulls_first)` triples, as the backend takes it.
+fn sort_columns(ordering: Vec<(String, bool, bool)>) -> Vec<SortColumn> {
+    ordering
+        .into_iter()
+        .map(|(column, ascending, nulls_first)| SortColumn {
+            column,
+            ascending,
+            nulls_first,
+        })
+        .collect()
 }
 
 /// How a run ended, once it has.
@@ -210,16 +264,16 @@ impl PyRun {
         &self.run_id
     }
 
-    /// Blocks until the run ends, with the interpreter released, and hands back its rows.
-    fn wait(&self, py: Python<'_>) -> PyResult<PyRows> {
+    /// Blocks until the run ends, with the interpreter released, and hands back its Outcome: the
+    /// rows of a collect, or the plan text of an explain, as a string.
+    fn wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match py.detach(|| LazyLock::force(&self.ended)) {
-            Ok(Outcome::Rows { schema, batches }) => Ok(PyRows {
+            Ok(Outcome::Rows { schema, batches }) => PyRows {
                 schema: Arc::clone(schema),
                 batches: batches.clone(),
-            }),
-            Ok(Outcome::Plan(_)) => Err(BackendError::new_err(
-                "a run handed back plan text, and only `Collect` crosses to Python so far",
-            )),
+            }
+            .into_bound_py_any(py),
+            Ok(Outcome::Plan(plan)) => plan.into_bound_py_any(py),
             Err(error) => Err(raised(error)),
         }
     }

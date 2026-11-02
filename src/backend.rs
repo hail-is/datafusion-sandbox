@@ -5,6 +5,9 @@
 //! place of the input table, and the dataset's stored ordering as plain sort columns. Plan bytes a
 //! frontend encodes with the backend's codec hold those descriptions, which the backend reads back.
 //!
+//! [`Backend::builtin_plan`] hands out a built-in Rust formulation's plan bytes, every scan a scan
+//! description, so that it runs as a frontend's plan does.
+//!
 //! [`Backend::start`] runs plan bytes with an [`Action`] and a settings map, and the [`Run`] it
 //! hands back waits for the run's [`Outcome`]. Decoding leaves each scan a placeholder holding its
 //! description; the run reopens each as the sorted-table scan the Rust formulations read, then
@@ -20,7 +23,8 @@
 //!
 //! - [`codec`] is the logical extension codec scan descriptions cross in.
 //! - [`scan_description`] holds scan descriptions and the schema-only provider that holds one.
-//! - [`scan_reopening`] reopens a decoded plan's described scans.
+//! - [`scan_reopening`] reopens a decoded plan's described scans, and describes the scans of a plan
+//!   a Rust formulation built.
 
 pub mod codec;
 pub mod scan_description;
@@ -31,6 +35,8 @@ mod tests;
 
 use crate::{
     format::InputFormat,
+    formulation::Formulation,
+    metrics_directory::FormulationRecord,
     ordering_assertion::{self, AssertionScope, OrderingAssertionFailed},
     pipeline::{self, PipelineOptions},
     row_ordering::{RowOrdering, SortColumn},
@@ -226,6 +232,70 @@ impl Backend {
         Ok(scan_reopening::descriptions(&decode(plan_bytes)?)?)
     }
 
+    /// The plan bytes of the built-in Rust formulation `formulation` over `dataset`'s input tables,
+    /// every scan encoded as the scan description `dataset` handed out. They run through
+    /// [`Backend::start`] as a frontend's do. The union formulation is the only built-in one.
+    ///
+    /// The formulation's plan builder runs here, so it discovers the dataset again through the
+    /// pipeline runner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorCode::InvalidAction`] error if `versions` are not the backend's,
+    /// `formulation` is not a built-in one or `dataset` has no input tables, and an
+    /// [`ErrorCode::Backend`] error if the resolver cannot serve the dataset, it can no longer be
+    /// discovered with all of those input tables, or their scans read other schemas than `dataset`
+    /// states.
+    pub fn builtin_plan(
+        &self,
+        dataset: &OpenedDataset,
+        formulation: &FormulationRecord,
+        versions: Versions,
+    ) -> Result<Vec<u8>, BackendError> {
+        versions.check()?;
+        let builtin = builtin_formulation(formulation)?;
+        let Some(first) = dataset.input_tables.first() else {
+            return Err(BackendError::invalid_action(
+                "a built-in plan reads at least one input table, and this dataset has none",
+            ));
+        };
+        let ScanDescription {
+            dataset_path,
+            input_format,
+            row_ordering,
+            ..
+        } = first.scan.description().clone();
+        let scans = dataset
+            .input_tables
+            .iter()
+            .map(|table| Arc::clone(&table.scan))
+            .collect::<Vec<_>>();
+        let options = self
+            .object_stores
+            .pipeline_options(pipeline::default_thread_count(), &[&dataset_path])?;
+        let plan = pipeline::run(
+            move |ctx| async move {
+                let input_tables = scans
+                    .iter()
+                    .map(|scan| scan.description().input_table.clone())
+                    .collect::<Vec<_>>();
+                let discovered = Dataset::discover(
+                    &ctx,
+                    ListingTableUrl::parse(&dataset_path)?,
+                    input_format,
+                    row_ordering,
+                    None,
+                )
+                .await?
+                .restrict_to(&input_tables)?;
+                let frame = builtin.plan(&ctx, &discovered).await?.frame;
+                scan_reopening::describe(frame.into_unoptimized_plan(), &scans)
+            },
+            options,
+        )?;
+        Ok(codec::plan_bytes(&plan)?)
+    }
+
     /// Starts a run of `plan_bytes`, a logical plan a frontend encoded with the backend's
     /// [codec], that performs `action` under `settings`, as `run_id` or under a generated id, and
     /// hands back the run. The run goes on in the background until it ends; dropping the handle
@@ -278,6 +348,18 @@ impl Backend {
                 .map_err(|error| BackendError::from(DataFusionError::External(Box::new(error))))?;
         Ok(Run { run_id, thread })
     }
+}
+
+/// The built-in formulation `record` names.
+fn builtin_formulation(record: &FormulationRecord) -> Result<Formulation, BackendError> {
+    let union = Formulation::CombineRefsUnion;
+    if *record == FormulationRecord::from(&union) {
+        return Ok(union);
+    }
+    Err(BackendError::invalid_action(&format!(
+        "formulation '{}' (groups {:?}, split points {:?}) has no built-in plan: only '{union}' does",
+        record.name, record.groups, record.split_points
+    )))
 }
 
 /// The plan `plan_bytes` encode, decoded with the backend's [codec] on a session of the shared
@@ -383,10 +465,10 @@ async fn execute(
     let frontend_plan = plan.display_indent().to_string();
     let plan = pipeline::until_cancelled(&ctx, scan_reopening::reopen(&ctx, plan)).await?;
     let frame = DataFrame::new(ctx.state(), plan);
+    let schema = Arc::clone(frame.schema().inner());
+    let held = ordering_assertion::hold(frame, action.ordering(), AssertionScope::OnePartition)?;
     match action {
-        Action::Collect { ordering } => {
-            let schema = Arc::clone(frame.schema().inner());
-            let held = ordering_assertion::hold(frame, &ordering, AssertionScope::OnePartition)?;
+        Action::Collect { .. } => {
             let (frame, sink) = sink::collect(held)?;
             pipeline::until_cancelled(&ctx, frame.collect()).await?;
             Ok(Outcome::Rows {
@@ -394,19 +476,27 @@ async fn execute(
                 batches: sink.take(),
             })
         }
-        Action::Explain { ordering } => {
-            let held = ordering_assertion::hold(frame, &ordering, AssertionScope::OnePartition)?;
-            explain(&frontend_plan, sink::drain(held)?).await
+        Action::Explain { .. } => {
+            pipeline::until_cancelled(&ctx, explain(&frontend_plan, sink::drain(held)?, false))
+                .await
+        }
+        Action::ExplainAnalyze { .. } => {
+            pipeline::until_cancelled(&ctx, explain(&frontend_plan, sink::drain(held)?, true)).await
         }
     }
 }
 
-/// The plan text of `frame`: `frontend_plan`, then its logical and physical plans. The physical
-/// plan is built first, so a plan that fails planning fails the explain rather than rendering the
-/// failure.
-async fn explain(frontend_plan: &str, frame: DataFrame) -> Result<Outcome> {
+/// The plan text of `frame`: `frontend_plan`, then its logical and physical plans, then, when
+/// `analyze`d, its physical plan with per-operator metrics from executing it. The physical plan is
+/// built first, so a plan that fails planning fails the explain rather than rendering the failure.
+async fn explain(frontend_plan: &str, frame: DataFrame, analyze: bool) -> Result<Outcome> {
     frame.clone().create_physical_plan().await?;
-    let explained = frame.explain(false, false)?.collect().await?;
+    let explained = frame.clone().explain(false, false)?.collect().await?;
+    let analyzed = if analyze {
+        frame.explain(false, true)?.collect().await?
+    } else {
+        Vec::new()
+    };
     let schema = explained.first().map_or_else(
         || {
             Err(DataFusionError::Internal(
@@ -422,7 +512,7 @@ async fn explain(frontend_plan: &str, frame: DataFrame) -> Result<Outcome> {
             Arc::new(StringArray::from(vec![frontend_plan])),
         ],
     )?;
-    let batches = [vec![frontend], explained].concat();
+    let batches = [vec![frontend], explained, analyzed].concat();
     Ok(Outcome::Plan(pretty_format_batches(&batches)?.to_string()))
 }
 
@@ -440,13 +530,23 @@ pub enum Action {
     /// Render the plan of a run that drains the rows in `ordering`, without running it: the
     /// frontend plan as decoded, then the logical and physical plans.
     Explain { ordering: Vec<SortColumn> },
+    /// Run the plan, draining the rows in `ordering`, and render what [`Action::Explain`] renders,
+    /// then its physical plan with per-operator metrics.
+    ExplainAnalyze { ordering: Vec<SortColumn> },
 }
 
 impl Action {
+    /// The ordering the Action holds the rows in.
+    fn ordering(&self) -> &[SortColumn] {
+        let (Self::Collect { ordering }
+        | Self::Explain { ordering }
+        | Self::ExplainAnalyze { ordering }) = self;
+        ordering
+    }
+
     /// Checks what the Action asks for before a run starts.
     fn check(&self) -> Result<(), BackendError> {
-        let (Self::Collect { ordering } | Self::Explain { ordering }) = self;
-        if ordering.is_empty() {
+        if self.ordering().is_empty() {
             return Err(BackendError::invalid_action(
                 "the Action's ordering has no sort columns, and a run holds its rows in at least one",
             ));
@@ -463,7 +563,7 @@ pub enum Outcome {
         schema: SchemaRef,
         batches: Vec<RecordBatch>,
     },
-    /// An explain's plan text.
+    /// An explain's or an explain analyze's plan text.
     Plan(String),
 }
 

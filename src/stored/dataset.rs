@@ -22,6 +22,7 @@ use crate::{
 
 use datafusion::{
     arrow::datatypes::{FieldRef, Schema, SchemaRef},
+    catalog::TableProvider,
     common::{DataFusionError, ScalarValue},
     datasource::listing::{ListingTableUrl, PartitionedFile},
     error::Result,
@@ -331,7 +332,8 @@ impl Dataset {
                 .expand(self.locus_representation)
                 .sort_expressions(),
             attached_scalar,
-        );
+        )
+        .of_input_table(input_table.name());
         ctx.read_table(Arc::new(table))
     }
 
@@ -386,6 +388,12 @@ impl Dataset {
             .retain(|table| requested_input_tables.contains(table.name()));
         Ok(restricted)
     }
+}
+
+/// The name of the input table `provider` scans, if it is a scan a [`Dataset`] read.
+#[must_use]
+pub fn scanned_input_table(provider: &dyn TableProvider) -> Option<&str> {
+    provider.downcast_ref::<SortedTable>()?.input_table()
 }
 
 /// The union of nonempty `plans`, or the one plan itself.

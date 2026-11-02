@@ -98,6 +98,8 @@ pub(super) struct SortedTable {
     ordering: Vec<SortExpr>,
     attached_scalar: Option<AttachedScalar>,
     statistics_source: StatisticsSource,
+    /// The input table of a dataset these files hold, if they hold one.
+    input_table: Option<String>,
 }
 
 impl SortedTable {
@@ -126,7 +128,22 @@ impl SortedTable {
             ordering,
             attached_scalar,
             statistics_source,
+            input_table: None,
         }
+    }
+
+    /// This table, named as the input table `name` of a dataset. The name changes nothing about
+    /// how it scans.
+    pub(super) fn of_input_table(self, name: &str) -> Self {
+        Self {
+            input_table: Some(name.to_string()),
+            ..self
+        }
+    }
+
+    /// The input table of a dataset this table was named as, if any.
+    pub(super) fn input_table(&self) -> Option<&str> {
+        self.input_table.as_deref()
     }
 
     /// Every file with its statistics, extended by the attached scalar's partition value.

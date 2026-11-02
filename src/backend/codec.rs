@@ -11,6 +11,8 @@
 //! session's registry. It refuses a function the wheel inlined as a Python payload, `DFPYUDF`,
 //! `DFPYUDA` or `DFPYUDW`, as Python functions are not part of the MVP (ADR 0022).
 //!
+//! [`plan_bytes`] writes a plan the backend itself built as the wheel writes one, in that frame.
+//!
 //! A payload outside the frame, framed at another version or by another codec, or carrying an
 //! inlined Python function fails decoding as [`ErrorCode::InvalidAction`](super::ErrorCode).
 
@@ -27,7 +29,9 @@ use datafusion::{
     execution::TaskContext,
     logical_expr::{AggregateUDF, Extension, LogicalPlan, ScalarUDF, WindowUDF},
 };
-use datafusion_proto::logical_plan::LogicalExtensionCodec;
+use datafusion_proto::{
+    bytes::logical_plan_to_bytes_with_extension_codec, logical_plan::LogicalExtensionCodec,
+};
 use std::sync::Arc;
 
 /// The id the codec is installed under on a frontend session, its `__datafusion_codec_id__`, which
@@ -111,6 +115,64 @@ impl LogicalExtensionCodec for Codec {
     /// Fails as [`Codec::try_decode_udf`] does.
     fn try_decode_udwf(&self, name: &str, buf: &[u8]) -> Result<Arc<WindowUDF>> {
         Err(no_function(name, buf))
+    }
+}
+
+/// The bytes of `plan`, every scan a described scan, as a wheel with the codec installed writes
+/// them: each payload in its frame, so the backend reads them as it reads a frontend's.
+///
+/// # Errors
+///
+/// Returns an error if the plan reads a table that is neither a described scan nor one `DataFusion`
+/// encodes itself, or holds an extension node.
+pub fn plan_bytes(plan: &LogicalPlan) -> Result<Vec<u8>> {
+    Ok(logical_plan_to_bytes_with_extension_codec(plan, &Framing)?.to_vec())
+}
+
+/// The codec, writing each table payload in the wheel's frame.
+#[derive(Debug)]
+struct Framing;
+
+impl LogicalExtensionCodec for Framing {
+    fn try_decode(
+        &self,
+        buf: &[u8],
+        inputs: &[LogicalPlan],
+        ctx: &TaskContext,
+    ) -> Result<Extension> {
+        Codec.try_decode(buf, inputs, ctx)
+    }
+
+    fn try_encode(&self, node: &Extension, buf: &mut Vec<u8>) -> Result<()> {
+        Codec.try_encode(node, buf)
+    }
+
+    fn try_decode_table_provider(
+        &self,
+        buf: &[u8],
+        table_ref: &TableReference,
+        schema: SchemaRef,
+        ctx: &TaskContext,
+    ) -> Result<Arc<dyn TableProvider>> {
+        Codec.try_decode_table_provider(buf, table_ref, schema, ctx)
+    }
+
+    fn try_encode_table_provider(
+        &self,
+        table_ref: &TableReference,
+        node: Arc<dyn TableProvider>,
+        buf: &mut Vec<u8>,
+    ) -> Result<()> {
+        let mut payload = Vec::new();
+        Codec.try_encode_table_provider(table_ref, node, &mut payload)?;
+        let id_length = u32::try_from(CODEC_ID.len())
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        buf.extend_from_slice(FRAME_MAGIC);
+        buf.push(WIRE_VERSION);
+        buf.extend_from_slice(&id_length.to_le_bytes());
+        buf.extend_from_slice(CODEC_ID.as_bytes());
+        buf.extend_from_slice(&payload);
+        Ok(())
     }
 }
 

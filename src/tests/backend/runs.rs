@@ -1,23 +1,27 @@
 //! Runs: plan bytes built in Rust with the backend's codec, framed as the wheel frames them,
 //! started with an Action and waited for.
 
-use super::{MemoryStores, backend_over, open, wheel_bytes};
+use super::{
+    FORMATS, MemoryStores, REPRESENTATIONS, backend_over, collected_rows, expected_keys,
+    expected_rows, hostile, keys, sorted, sorted_union, wheel_bytes,
+};
 use crate::{
     backend::{
-        Action, Backend, ErrorCode, Outcome, Settings, Versions,
+        Action, Backend, ErrorCode, ObjectStoreResolver, Outcome, Settings, Versions,
         codec::{CODEC_ID, Codec},
     },
-    locus::{Locus, LocusRepresentation},
+    locus::LocusRepresentation,
+    pipeline::PipelineOptions,
     row_ordering::{RowOrdering, SortColumn},
     testing::{
-        fixture::{self, DatasetFixture, FixtureFormat, GrowingDatasetFixture, SAMPLES},
+        fixture::{self, FixtureFormat, GrowingDatasetFixture},
         plan_shape::exec_names,
         wheel_codec::WheelCodec,
     },
 };
 
 use datafusion::{
-    arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
+    arrow::datatypes::SchemaRef,
     catalog::TableProvider,
     common::TableReference,
     error::Result,
@@ -32,13 +36,11 @@ use datafusion_proto::{
     },
     logical_plan::LogicalExtensionCodec,
 };
-use std::sync::Arc;
-
-const FORMATS: [FixtureFormat; 2] = [FixtureFormat::Parquet, FixtureFormat::Vortex];
-const REPRESENTATIONS: [LocusRepresentation; 2] = [
-    LocusRepresentation::ContigPosition,
-    LocusRepresentation::Packed,
-];
+use std::{
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
+    thread::available_parallelism,
+};
 
 /// The union formulation, written as a frontend writes it: every input table's scan, unioned and
 /// sorted by the dataset's ordering, collects every row in that ordering.
@@ -124,6 +126,157 @@ fn explaining_a_sorted_union_under_the_hostile_session_shows_a_merge_tree_and_no
                 "the frontend plan keeps its sort:\n{plan}"
             );
         }
+    }
+}
+
+/// An analyze runs the plan, draining its rows, and renders each operator's metrics beside the
+/// frontend, logical and physical plans; a plain explain has no metrics, since it runs nothing.
+#[test]
+fn analyzing_a_plan_runs_it_and_shows_per_operator_metrics_beside_every_plan_section() {
+    for format in FORMATS {
+        let fixture = fixture::dataset_fixture(format, LocusRepresentation::Packed);
+        let (bytes, ordering) = sorted_union(fixture, RowOrdering::locus_then_alleles());
+        let backend = backend_over(fixture);
+        let plan_of = |action| {
+            let outcome = backend
+                .start(&bytes, action, &hostile(), None, Versions::backend())
+                .unwrap()
+                .wait()
+                .unwrap();
+            let Outcome::Plan(plan) = outcome else {
+                panic!("expected a plan, got {outcome:?}");
+            };
+            plan
+        };
+
+        let analyzed = plan_of(Action::ExplainAnalyze {
+            ordering: ordering.clone(),
+        });
+        let explained = plan_of(Action::Explain { ordering });
+
+        for section in ["frontend_plan", "logical_plan", "physical_plan"] {
+            assert!(analyzed.contains(section), "{section}:\n{analyzed}");
+        }
+        let every_row = expected_rows().len();
+        assert!(analyzed.contains("Plan with Metrics"), "{analyzed}");
+        assert!(
+            analyzed.contains(&format!("output_rows={every_row}")),
+            "the root operators report every row:\n{analyzed}"
+        );
+        assert!(analyzed.contains("elapsed_compute="), "{analyzed}");
+        assert!(!explained.contains("Plan with Metrics"), "{explained}");
+        assert!(!explained.contains("output_rows="), "{explained}");
+    }
+}
+
+/// An analyze fails on what a run would fail on, rather than rendering the failure as a plan.
+#[test]
+fn analyzing_a_plan_the_root_assertion_holds_only_by_a_sort_fails_with_the_ordering_assertion_code()
+{
+    let fixture = fixture::dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::Packed);
+    let (bytes, _) = sorted_union(fixture, RowOrdering::locus_then_alleles());
+
+    let error = backend_over(fixture)
+        .start(
+            &bytes,
+            Action::ExplainAnalyze {
+                ordering: vec![SortColumn {
+                    column: "alleles".to_string(),
+                    ascending: true,
+                    nulls_first: false,
+                }],
+            },
+            &Settings::new(),
+            None,
+            Versions::backend(),
+        )
+        .unwrap()
+        .wait()
+        .unwrap_err();
+
+    assert_eq!(error.code(), ErrorCode::OrderingAssertionFailed, "{error}");
+}
+
+#[test]
+fn every_action_with_an_empty_ordering_fails_to_start_with_the_invalid_action_code() {
+    let fixture = fixture::dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::Packed);
+    let (bytes, _) = sorted_union(fixture, RowOrdering::locus());
+
+    for action in [
+        Action::Collect { ordering: vec![] },
+        Action::Explain { ordering: vec![] },
+        Action::ExplainAnalyze { ordering: vec![] },
+    ] {
+        let error = backend_over(fixture)
+            .start(
+                &bytes,
+                action.clone(),
+                &Settings::new(),
+                None,
+                Versions::backend(),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error.code(),
+            ErrorCode::InvalidAction,
+            "{action:?}: {error}"
+        );
+    }
+}
+
+/// The threads a run is started with, by default and under `hail_df.threads`, reach the options
+/// its runtimes are built from.
+#[test]
+fn the_threads_setting_sets_the_run_s_thread_count_and_defaults_to_available_parallelism() {
+    let fixture = fixture::dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::Packed);
+    let (bytes, ordering) = sorted_union(fixture, RowOrdering::locus());
+    let threads = Arc::new(RecordingThreads {
+        stores: MemoryStores(vec![(
+            fixture.table_path().object_store(),
+            Arc::clone(fixture.store()),
+        )]),
+        threads: Mutex::default(),
+    });
+    let backend = Backend::new(threads.clone());
+    let default = available_parallelism().unwrap();
+
+    for settings in [
+        Settings::new(),
+        Settings::from([("hail_df.threads".to_string(), "3".to_string())]),
+    ] {
+        backend
+            .start(
+                &bytes,
+                Action::Collect {
+                    ordering: ordering.clone(),
+                },
+                &settings,
+                None,
+                Versions::backend(),
+            )
+            .unwrap()
+            .wait()
+            .unwrap();
+    }
+
+    assert_eq!(
+        *threads.threads.lock().unwrap(),
+        [default, NonZeroUsize::new(3).unwrap()]
+    );
+}
+
+/// The adapter at the backend's object-store seam that records the thread count each run asks for.
+#[derive(Debug)]
+struct RecordingThreads {
+    stores: MemoryStores,
+    threads: Mutex<Vec<NonZeroUsize>>,
+}
+
+impl ObjectStoreResolver for RecordingThreads {
+    fn pipeline_options(&self, threads: NonZeroUsize, paths: &[&str]) -> Result<PipelineOptions> {
+        self.threads.lock().unwrap().push(threads);
+        self.stores.pipeline_options(threads, paths)
     }
 }
 
@@ -452,40 +605,6 @@ fn only_a_backend_verifying_order_checks_its_rows_order_at_run_time() {
     assert!(verifying.contains("verify_order"), "{verifying}");
 }
 
-/// The settings map of the hostile session: eight target partitions, and any file split across
-/// them wherever the plan lets the optimizer.
-fn hostile() -> Settings {
-    Settings::from([
-        ("hail_df.target_partitions".to_string(), "8".to_string()),
-        (
-            "hail_df.repartition_file_min_size".to_string(),
-            "0".to_string(),
-        ),
-    ])
-}
-
-/// The plan bytes of the union of every input table's scan of `fixture`, opened under
-/// `row_ordering` and sorted by its stored ordering, and that ordering.
-fn sorted_union(
-    fixture: &'static Arc<DatasetFixture>,
-    row_ordering: RowOrdering,
-) -> (Vec<u8>, Vec<SortColumn>) {
-    let opened = open(fixture, row_ordering);
-    let ctx = SessionContext::new();
-    let mut scans = opened.input_tables.iter().map(|table| {
-        let provider: Arc<dyn TableProvider> = table.scan.clone();
-        ctx.read_table(provider).unwrap().into_unoptimized_plan()
-    });
-    let first = LogicalPlanBuilder::from(scans.next().unwrap());
-    let plan = scans
-        .fold(first, |union, scan| union.union(scan).unwrap())
-        .sort(opened.ordering.iter().map(SortColumn::sort_expression))
-        .unwrap()
-        .build()
-        .unwrap();
-    (wheel_bytes(&plan), opened.ordering)
-}
-
 /// The plan `bytes` encode with a call of the registered function `abs` added to a projection
 /// above it, keeping its columns.
 fn with_function_call(bytes: &[u8]) -> LogicalPlan {
@@ -566,38 +685,6 @@ fn at_wire_version(bytes: &[u8], version: u8) -> Vec<u8> {
     reframed
 }
 
-/// The rows of a collect's Outcome, in the order they came.
-fn collected_rows(outcome: Outcome, representation: LocusRepresentation) -> Vec<fixture::Row> {
-    let Outcome::Rows { batches, .. } = outcome else {
-        panic!("expected collected rows, got {outcome:?}");
-    };
-    batches
-        .iter()
-        .flat_map(|batch: &RecordBatch| fixture::decode_rows(batch, representation))
-        .collect()
-}
-
-/// Every sample's fixture rows, sorted.
-fn expected_rows() -> Vec<fixture::Row> {
-    sorted(
-        SAMPLES
-            .iter()
-            .flat_map(|sample| {
-                fixture::sample_rows()
-                    .into_iter()
-                    .map(|(locus, alleles)| (locus, alleles.to_string(), (*sample).to_string()))
-            })
-            .collect(),
-    )
-}
-
-/// The locus and alleles of every expected row, in locus-then-alleles order.
-fn expected_keys() -> Vec<(Locus, String)> {
-    let mut expected = keys(&expected_rows());
-    expected.sort();
-    expected
-}
-
 /// The sort keys of the locus-then-alleles ordering in `representation`, as a logical plan
 /// renders them.
 fn sort_keys(representation: LocusRepresentation) -> String {
@@ -608,15 +695,4 @@ fn sort_keys(representation: LocusRepresentation) -> String {
         .map(|column| format!("{column} ASC NULLS LAST"))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn keys(rows: &[fixture::Row]) -> Vec<(Locus, String)> {
-    rows.iter()
-        .map(|(locus, alleles, _)| (*locus, alleles.clone()))
-        .collect()
-}
-
-fn sorted(mut rows: Vec<fixture::Row>) -> Vec<fixture::Row> {
-    rows.sort();
-    rows
 }
