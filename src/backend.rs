@@ -234,7 +234,8 @@ impl Backend {
 
     /// The plan bytes of the built-in Rust formulation `formulation` over `dataset`'s input tables,
     /// every scan encoded as the scan description `dataset` handed out. They run through
-    /// [`Backend::start`] as a frontend's do. The union formulation is the only built-in one.
+    /// [`Backend::start`] as a frontend's do. The union and grouped-merge formulations are the
+    /// built-in ones.
     ///
     /// The formulation's plan builder runs here, so it discovers the dataset again through the
     /// pipeline runner.
@@ -352,12 +353,18 @@ impl Backend {
 
 /// The built-in formulation `record` names.
 fn builtin_formulation(record: &FormulationRecord) -> Result<Formulation, BackendError> {
-    let union = Formulation::CombineRefsUnion;
-    if *record == FormulationRecord::from(&union) {
-        return Ok(union);
+    let builtin = record
+        .groups
+        .and_then(NonZeroUsize::new)
+        .map_or(Formulation::CombineRefsUnion, |groups| {
+            Formulation::CombineRefsGroupedMerge { groups }
+        });
+    if *record == FormulationRecord::from(&builtin) {
+        return Ok(builtin);
     }
     Err(BackendError::invalid_action(&format!(
-        "formulation '{}' (groups {:?}, split points {:?}) has no built-in plan: only '{union}' does",
+        "formulation '{}' (groups {:?}, split points {:?}) has no built-in plan: only 'union' and \
+         'grouped-merge' with a positive group count do",
         record.name, record.groups, record.split_points
     )))
 }

@@ -9,15 +9,26 @@ whose object-store resolver serves local paths and `gs://` URLs only, and the wh
 in-memory store the backend could reach.
 """
 
+from functools import partial
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import vortex as vx
-from hail_df import Backend
+from hail_df import Backend, formulations
 
 FORMATS = ["parquet", "vortex"]
+
+# Every formulation with a built-in plan, at group counts below, equal to and above the mixed
+# dataset's three input tables, as #321's matrix has them.
+FORMULATIONS = {
+    "union": formulations.union,
+    **{
+        f"grouped-merge-{groups}": partial(formulations.grouped_merge, groups=groups)
+        for groups in [1, 2, 3, 8]
+    },
+}
 
 INPUT_TABLES = ["g0", "s=HG02230", "s=NA18534"]
 SAMPLE_SETS = [("HG00308", "HG00592"), ("HG02230",), ("NA18534",)]
@@ -54,6 +65,15 @@ def rows_table(rows, samples=None) -> pa.Table:
         columns.append(samples)
         fields.append(SAMPLE_FIELD)
     return pa.table(columns, schema=pa.schema(fields))
+
+
+def write_single_sample_dataset(root: Path, input_format: str, samples: list[str]) -> Path:
+    """Writes a dataset of one single-sample input table per sample, `s=<sample>/`, each of one file
+    of the eight rows, under `root/samples`, and returns that path."""
+    dataset = root / "samples"
+    for sample in samples:
+        write_table(rows_table(ROWS), dataset / f"s={sample}" / f"a.{input_format}", input_format)
+    return dataset
 
 
 def write_mixed_dataset(root: Path, input_format: str) -> Path:
@@ -96,6 +116,11 @@ def plan_sections(text: str) -> dict[str, str]:
 @pytest.fixture(params=FORMATS)
 def input_format(request) -> str:
     return request.param
+
+
+@pytest.fixture(params=FORMULATIONS)
+def formulation(request):
+    return FORMULATIONS[request.param]
 
 
 @pytest.fixture
