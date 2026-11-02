@@ -53,7 +53,7 @@ fn stores(fixture: &'static Arc<DatasetFixture>, output: &MemoryStore) -> Memory
 }
 
 /// A write of a Parquet file at `path` on `output`, holding `ordering`.
-fn parquet_write(
+pub(super) fn parquet_write(
     output: &MemoryStore,
     path: &str,
     ordering: &[SortColumn],
@@ -162,7 +162,11 @@ fn file_at(store: &MemoryStore, path: &str) -> Vec<RecordBatch> {
 }
 
 /// What `metrics` on `store` holds for `run_id`.
-fn recorded(store: &MemoryStore, metrics: &MetricsDirectory, run_id: &str) -> RecordedRun {
+pub(super) fn recorded(
+    store: &MemoryStore,
+    metrics: &MetricsDirectory,
+    run_id: &str,
+) -> RecordedRun {
     let metrics = metrics.clone();
     let run_id = run_id.to_string();
     reading(store, move |ctx| async move {
@@ -171,7 +175,7 @@ fn recorded(store: &MemoryStore, metrics: &MetricsDirectory, run_id: &str) -> Re
 }
 
 /// The paths of what `store` holds under `out`.
-fn locations(store: &MemoryStore) -> Vec<String> {
+pub(super) fn locations(store: &MemoryStore) -> Vec<String> {
     let listed = store.clone();
     reading(store, move |_| async move {
         Ok(listed
@@ -425,7 +429,7 @@ fn an_explain_of_a_write_with_another_ordering_is_an_invalid_action() {
 }
 
 /// A measured write of `bytes` to `out/g.parquet`, recorded under `metrics` on `output`.
-fn measured(
+pub(super) fn measured(
     output: &MemoryStore,
     ordering: &[SortColumn],
     annotate_samples: bool,

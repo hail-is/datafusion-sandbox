@@ -355,22 +355,30 @@ fn a_run_cancelled_while_its_reads_are_held_ends_cancelled_and_runs_no_further()
     );
 }
 
+/// A run cancelled before it starts still calls its pipeline, so that a pipeline can record how
+/// the run ended, but no work under `until_cancelled` starts.
 #[test]
-fn a_run_cancelled_before_it_starts_ends_cancelled_without_running_its_pipeline() {
+fn a_run_cancelled_before_it_starts_runs_its_pipeline_but_none_of_its_work() {
     let token = CancellationToken::new();
     token.cancel();
 
-    let result = pipeline::run(
-        |_ctx| async move {
-            panic!("the pipeline of a run cancelled before it started ran");
-            #[expect(unreachable_code, reason = "fixes the pipeline's result type")]
-            Ok::<_, DataFusionError>(())
+    let (stopped, after) = pipeline::run(
+        |ctx| async move {
+            let stopped = pipeline::until_cancelled(&ctx, async {
+                panic!("work of a run cancelled before it started ran");
+                #[expect(unreachable_code, reason = "fixes the work's result type")]
+                Ok::<_, DataFusionError>(())
+            })
+            .await;
+            Ok::<_, DataFusionError>((stopped, "recorded"))
         },
         PipelineOptions::single_threaded().cancelled_by(token),
-    );
+    )
+    .unwrap();
 
-    let error = result.unwrap_err();
+    let error = stopped.unwrap_err();
     assert!(pipeline::is_cancelled(&error), "{error}");
+    assert_eq!(after, "recorded");
 }
 
 /// Work a run's pipeline does until cancelled hands back its own result, success or failure, when
@@ -434,7 +442,7 @@ fn is_cancelled_recognises_the_cancelled_error_beneath_context() {
     let token = CancellationToken::new();
     token.cancel();
     let cancelled = pipeline::run(
-        |_ctx| async move { Ok::<_, DataFusionError>(()) },
+        |ctx| async move { pipeline::until_cancelled(&ctx, async { Ok(()) }).await },
         PipelineOptions::single_threaded().cancelled_by(token),
     )
     .unwrap_err();

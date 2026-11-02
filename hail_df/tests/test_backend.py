@@ -9,7 +9,7 @@ import hail_df
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
-from conftest import INPUT_TABLES, ROW_FIELDS, SAMPLE_SETS, plan_sections, write_table
+from conftest import INPUT_TABLES, SAMPLE_SETS, plan_sections, write_large_dataset
 from datafusion import col, functions, lit, udf
 from hail_df import (
     BackendError,
@@ -205,17 +205,8 @@ def test_another_python_thread_keeps_running_while_wait_blocks(backend, tmp_path
     # On disk, as every `hail_df` dataset fixture is: see conftest.py. Enough rows that the run far
     # outlasts the time this thread takes to reach `wait` and to take the rows from it.
     rows_per_table = 2_000_000
-    rows = pa.table(
-        [
-            pa.repeat("chr01", rows_per_table),
-            pa.array(range(1, rows_per_table + 1), pa.int32()),
-            pa.repeat("A,G", rows_per_table),
-        ],
-        schema=pa.schema(ROW_FIELDS),
-    )
-    write_table(rows, tmp_path / "large" / "s=HG02230" / "a.parquet", "parquet")
-    write_table(rows, tmp_path / "large" / "s=NA18534" / "a.parquet", "parquet")
-    dataset = backend.open_dataset(str(tmp_path / "large"), "parquet", "locus,alleles")
+    path = write_large_dataset(tmp_path / "large", rows_per_table)
+    dataset = backend.open_dataset(str(path), "parquet", "locus,alleles")
     ctx = hail_df.context()
     frame = union_frame(ctx, dataset)
 

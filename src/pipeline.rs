@@ -169,13 +169,14 @@ pub fn session_config() -> SessionConfig {
 /// included. See `docs/adr/0006-run-every-plan-through-the-pipeline-runner.md`.
 ///
 /// The session carries the options' cancellation token, through which [`until_cancelled`] stops
-/// the pipeline's work. A run cancelled before it starts never calls `pipeline`.
+/// the pipeline's work. A run cancelled before it starts still calls `pipeline`, whose work under
+/// [`until_cancelled`] never starts, so a pipeline that records how its run ended records that one
+/// too.
 ///
 /// # Errors
 ///
-/// Returns the cancelled error if the run was cancelled before it started, and otherwise an error
-/// if a runtime or object store cannot be created, the pipeline fails, or its task cannot be
-/// joined.
+/// Returns an error if a runtime or object store cannot be created, the pipeline fails, or its
+/// task cannot be joined.
 pub fn run<T, Fut>(
     pipeline: impl FnOnce(SessionContext) -> Fut + Send + 'static,
     options: PipelineOptions,
@@ -190,13 +191,6 @@ where
         built_stores,
         cancellation,
     } = options;
-    if cancellation
-        .as_ref()
-        .is_some_and(CancellationToken::is_cancelled)
-    {
-        return Err(cancelled());
-    }
-
     // Multi-thread even at one worker: TLS and HTTP framing for every object store request runs
     // here, so throughput has to scale with the thread count. See
     // docs/adr/0001-always-use-multi-thread-tokio-runtimes.md.

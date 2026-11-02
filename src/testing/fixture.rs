@@ -282,11 +282,18 @@ impl DatasetFixture {
     /// as under the output root, pass.
     #[must_use]
     pub fn register_with_gated_reads(&self, ctx: &SessionContext) -> ReadGate {
-        let (gated, gate) = self
-            .store
-            .with_gated_reads_under(self.table_path.prefix().as_ref());
+        let (gated, gate) = self.with_gated_reads();
         gated.register(ctx);
         gate
+    }
+
+    /// The fixture's store through a view that holds every read of the dataset's files at the
+    /// returned gate until it is released, for a test whose session is built where it can't
+    /// register one, such as through an object-store resolver. Reads beside the dataset pass.
+    #[must_use]
+    pub fn with_gated_reads(&self) -> (MemoryStore, ReadGate) {
+        self.store
+            .with_gated_reads_under(self.table_path.prefix().as_ref())
     }
 
     /// The store holding the fixture's files.

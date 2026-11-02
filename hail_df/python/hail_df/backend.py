@@ -9,7 +9,7 @@ from typing import NamedTuple
 import pyarrow as pa
 
 from hail_df import _native
-from hail_df._native import BackendError, InvalidAction, ScanDescription
+from hail_df._native import BackendError, InvalidAction, RunCancelled, ScanDescription
 from hail_df.datafusion import DATAFUSION_MAJOR, WIRE_VERSION, DataFrame, SessionContext
 
 __all__ = [
@@ -29,6 +29,7 @@ __all__ = [
     "Rows",
     "RowsWritten",
     "Run",
+    "RunCancelled",
     "ScanDescription",
     "SortColumn",
     "Write",
@@ -236,7 +237,12 @@ class Run:
     def wait(self) -> Outcome:
         """Blocks until the run ends and returns its Outcome. Other Python threads keep running.
 
-        Raises `BackendError` if the run failed. Waiting again hands back the same result.
+        Raises `RunCancelled` if the run was cancelled and `BackendError` if it failed. Waiting
+        again hands back the same result.
+
+        On Ctrl-C, in the main thread, it cancels the run, waits for it to end so that a measured
+        write has recorded itself, and raises `KeyboardInterrupt`. A second Ctrl-C raises at once,
+        leaving the cancelled run to end in the background.
         """
         match self._run.wait():
             case str() as text:
@@ -324,8 +330,9 @@ class Backend:
         Raises `InvalidAction`, before the run starts, if the wheel's versions aren't the
         backend's, a setting's name is unknown or its value doesn't parse, the Action's ordering is
         empty, a write can't be performed as it asks, an explain's write holds another ordering, a
-        measured write's plan doesn't read exactly one dataset, or the plan carries a payload
-        framed at another wire version or an inlined Python function. Raises `BackendError` if the
+        measured write's plan doesn't read exactly one dataset, a run under `run_id` is still going,
+        or the plan carries a payload framed at another wire version or an inlined Python function.
+        Raises `BackendError` if the
         bytes are not otherwise a plan encoded in such a session. Raises `TypeError` if `action` is
         not an Action, or a setting's name or value is not a string.
         """
@@ -345,6 +352,15 @@ class Backend:
                 WIRE_VERSION,
             )
         )
+
+    def cancel(self, run_id: str) -> None:
+        """Cancels the going run named `run_id`, whether or not a handle to it is left. Its `wait`
+        raises `RunCancelled`, and a measured write records `status = cancelled`.
+
+        An id this backend has no run for, or whose run has already ended, is not an error: a run
+        that completed keeps its Outcome.
+        """
+        self._backend.cancel(run_id)
 
 
 def _native_write(write: Write | None) -> _native.Write | None:

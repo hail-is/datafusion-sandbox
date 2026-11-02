@@ -17,8 +17,11 @@
 //! A [`Write`] puts the rows at an output path, and the sample annotation table of the input tables
 //! the plan's scans read beside them when it asks for one (ADR 0018). [`Action::MeasuredWrite`]
 //! also records the run under a metrics directory, taking the dataset's facts from the plan's scan
-//! descriptions, so a frontend can't misstate them. It records how the run ended, failed included,
-//! before the run's runtimes are torn down.
+//! descriptions, so a frontend can't misstate them. It records how the run ended, failed or
+//! cancelled included, before the run's runtimes are torn down.
+//!
+//! [`Backend::cancel`] and [`Run::cancel`] cancel a run through the token its pipeline takes.
+//! Dropping a [`Run`] doesn't: the run goes on, and an id still reaches it.
 //!
 //! The backend reaches object stores only through the [`ObjectStoreResolver`] it is built with:
 //! [`ResolveFromUrls`] in production, or a suite's in-memory stores. Every call that touches a
@@ -72,16 +75,20 @@ use datafusion_proto::{
     bytes::logical_plan_from_bytes_with_extension_codec, logical_plan::LogicalExtensionCodec,
 };
 use std::{
-    collections::{BTreeMap, HashSet},
+    any::Any,
+    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
     error::Error,
     fmt,
     future::Future,
     mem,
     num::NonZeroUsize,
+    panic::{self, AssertUnwindSafe},
     slice,
-    sync::{Arc, Mutex},
-    thread::{self, JoinHandle},
+    sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
+    thread,
+    time::Duration,
 };
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Where a backend's runs find the object stores the paths they read and write live on, and the
@@ -114,6 +121,7 @@ pub struct Backend {
     /// Whether runs check at run time that rows arrive in the order every ordering assertion and
     /// established order holds.
     verify_order: bool,
+    runs: Arc<GoingRuns>,
 }
 
 /// A dataset a frontend plans against, as [`Backend::open_dataset`] hands it out.
@@ -142,6 +150,7 @@ impl Backend {
         Self {
             object_stores,
             verify_order: false,
+            runs: Arc::default(),
         }
     }
 
@@ -310,7 +319,7 @@ impl Backend {
     /// Starts a run of `plan_bytes`, a logical plan a frontend encoded with the backend's
     /// [codec], that performs `action` under `settings`, as `run_id` or under a generated id, and
     /// hands back the run. The run goes on in the background until it ends; dropping the handle
-    /// doesn't stop it.
+    /// doesn't stop it. A run id names one going run, and is free again once that run has ended.
     ///
     /// The plan's functions resolve by name from the backend's registry. The run reopens each scan
     /// as the sorted-table scan of its input table, listing the input table's files when it does,
@@ -322,7 +331,8 @@ impl Backend {
     /// the backend's, a setting is unknown or malformed, the Action's ordering is empty, an explain
     /// holds its rows in another ordering than the write it renders, the plan carries a payload
     /// framed at another wire version or an inlined Python function, a write annotating samples
-    /// reads no input tables, or a measured write's plan doesn't read exactly one dataset; and an
+    /// reads no input tables, a measured write's plan doesn't read exactly one dataset, or a run
+    /// under `run_id` is still going; and an
     /// [`ErrorCode::Backend`] error if the bytes are not otherwise a plan the backend can decode,
     /// the resolver can't serve the paths the plan and the Action name, or the run can't start.
     pub fn start(
@@ -349,6 +359,9 @@ impl Backend {
             .object_stores
             .pipeline_options(settings.threads, &paths)?;
         let run_id = run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let going = GoingRun::register(&self.runs, &run_id)?;
+        let cancellation = going.cancellation.clone();
+        let options = options.cancelled_by(cancellation.clone());
         let execution = Execution {
             plan,
             descriptions,
@@ -358,13 +371,99 @@ impl Backend {
             run_id: run_id.clone(),
             started,
         };
-        let thread = thread::Builder::new()
+        let ending = Arc::new(Ending::default());
+        let (thread_ending, thread_run_id) = (Arc::clone(&ending), run_id.clone());
+        thread::Builder::new()
             .name(format!("hail_df run {run_id}"))
             .spawn(move || {
-                pipeline::run(move |ctx| async move { execution.run(ctx).await }, options)
+                let ended = panic::catch_unwind(AssertUnwindSafe(|| {
+                    pipeline::run(move |ctx| async move { execution.run(ctx).await }, options)
+                }));
+                // Before any waiter wakes, so that the id is free once a wait hands back the end.
+                drop(going);
+                thread_ending.end(match ended {
+                    Ok(outcome) => outcome.map_err(BackendError::from),
+                    Err(panic) => Err(panicked(&thread_run_id, panic.as_ref())),
+                });
             })
             .map_err(|error| BackendError::from(DataFusionError::External(Box::new(error))))?;
-        Ok(Run { run_id, thread })
+        Ok(Run {
+            id: run_id,
+            cancellation,
+            ending,
+        })
+    }
+
+    /// Cancels the going run named `run_id`, through its handle or with no handle left. The run
+    /// stops its work, records itself if it is a measured write, and ends in
+    /// [`ErrorCode::RunCancelled`] with no Outcome.
+    ///
+    /// Cancelling an id no run of this backend has, or one whose run has ended, does nothing: a run
+    /// that already completed keeps its Outcome.
+    pub fn cancel(&self, run_id: &str) {
+        if let Some(cancellation) = self.runs.lock().get(run_id) {
+            cancellation.cancel();
+        }
+    }
+}
+
+/// The cancellation tokens of a backend's going runs, by run id.
+#[derive(Debug, Default)]
+struct GoingRuns(Mutex<HashMap<String, CancellationToken>>);
+
+impl GoingRuns {
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, CancellationToken>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A run's place among its backend's going runs, which it leaves when this drops.
+struct GoingRun {
+    runs: Arc<GoingRuns>,
+    run_id: String,
+    cancellation: CancellationToken,
+}
+
+impl GoingRun {
+    /// Registers a run under `run_id`, with a new token.
+    fn register(runs: &Arc<GoingRuns>, run_id: &str) -> Result<Self, BackendError> {
+        let cancellation = CancellationToken::new();
+        match runs.lock().entry(run_id.to_string()) {
+            Entry::Occupied(_) => {
+                return Err(BackendError::invalid_action(&format!(
+                    "a run with id '{run_id}' is still going"
+                )));
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(cancellation.clone());
+            }
+        }
+        Ok(Self {
+            runs: Arc::clone(runs),
+            run_id: run_id.to_string(),
+            cancellation,
+        })
+    }
+}
+
+impl Drop for GoingRun {
+    fn drop(&mut self) {
+        self.runs.lock().remove(&self.run_id);
+    }
+}
+
+/// The error of a run whose thread panicked with `panic`.
+fn panicked(run_id: &str, panic: &(dyn Any + Send)) -> BackendError {
+    BackendError {
+        code: ErrorCode::Backend,
+        message: format!(
+            "run {run_id} panicked: {}",
+            panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("with no message")
+        ),
     }
 }
 
@@ -873,7 +972,7 @@ impl Write {
 }
 
 /// What a run hands back once it ends.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Outcome {
     /// A collect's rows, in its ordering, and their schema.
     Rows {
@@ -969,43 +1068,78 @@ where
     })
 }
 
-/// A started run: its id, and the run itself, going on in the background.
+/// A started run: its id and a view of the run itself, which goes on in the background whether or
+/// not a handle is left.
 #[derive(Debug)]
 pub struct Run {
-    run_id: String,
-    thread: JoinHandle<Result<Outcome>>,
+    id: String,
+    cancellation: CancellationToken,
+    ending: Arc<Ending>,
 }
 
 impl Run {
     /// The run's id, as supplied to [`Backend::start`] or generated there.
     #[must_use]
     pub fn run_id(&self) -> &str {
-        &self.run_id
+        &self.id
     }
 
-    /// Blocks until the run ends, and hands back its Outcome.
+    /// Cancels this run, as [`Backend::cancel`] does by id. It never reaches a later run that took
+    /// the id once this one ended.
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// Blocks until the run ends, and hands back how it ended. Every wait hands back the same.
     ///
     /// # Errors
     ///
     /// Returns the run's failure: [`ErrorCode::OrderingAssertionFailed`] if the plan could meet an
     /// assertion only by a sort the backend inserted, [`ErrorCode::RunCancelled`] if the run was
     /// cancelled, and otherwise [`ErrorCode::Backend`].
-    pub fn wait(self) -> Result<Outcome, BackendError> {
-        match self.thread.join() {
-            Ok(outcome) => Ok(outcome?),
-            Err(panic) => Err(BackendError {
-                code: ErrorCode::Backend,
-                message: format!(
-                    "run {} panicked: {}",
-                    self.run_id,
-                    panic
-                        .downcast_ref::<&str>()
-                        .copied()
-                        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-                        .unwrap_or("with no message")
-                ),
-            }),
+    pub fn wait(&self) -> Result<Outcome, BackendError> {
+        let mut ended = self.ending.lock();
+        loop {
+            if let Some(ended) = &*ended {
+                return ended.clone();
+            }
+            ended = self
+                .ending
+                .changed
+                .wait(ended)
+                .unwrap_or_else(PoisonError::into_inner);
         }
+    }
+
+    /// Blocks until the run ends or `timeout` passes, and hands back how it ended, as
+    /// [`Run::wait`] does, or `None` if it is still going. A caller that must do something else
+    /// while it waits, such as checking for signals, waits a while at a time.
+    #[must_use]
+    pub fn wait_timeout(&self, timeout: Duration) -> Option<Result<Outcome, BackendError>> {
+        self.ending
+            .changed
+            .wait_timeout_while(self.ending.lock(), timeout, |ended| ended.is_none())
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
+            .clone()
+    }
+}
+
+/// How a run ended, once it has, which its thread hands to every handle's waits.
+#[derive(Debug, Default)]
+struct Ending {
+    ended: Mutex<Option<Result<Outcome, BackendError>>>,
+    changed: Condvar,
+}
+
+impl Ending {
+    fn lock(&self) -> MutexGuard<'_, Option<Result<Outcome, BackendError>>> {
+        self.ended.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn end(&self, ended: Result<Outcome, BackendError>) {
+        *self.lock() = Some(ended);
+        self.changed.notify_all();
     }
 }
 
