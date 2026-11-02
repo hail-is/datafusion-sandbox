@@ -7,7 +7,7 @@ frontend builds plans with datafusion-python's own `DataFrame` API, on the stock
 `src/backend.rs` in the root crate; `hail_df/` holds the bindings crate over it, the Python package
 and its tests.
 
-A frontend opens a dataset, plans against it, starts a run in the backend, and waits for its rows.
+A frontend opens a dataset, plans against it, starts a run in the backend, and waits for its Outcome.
 The scans in a plan are scan descriptions, which plan like tables but refuse to scan in Python, so
 only the backend ever runs a plan.
 
@@ -106,6 +106,24 @@ API. Each returns an `OrderedFrame`: its `frame`, the `ordering` a run holds its
 - `formulations.union(ctx, dataset)` sorts the union of every input table's scan by the dataset's
   ordering, for one file (`OutputLayout.SINGLE_FILE`).
 
+`backend.builtin_plan(dataset, formulation)` returns the plan bytes of the Rust plan builder of the
+formulation a `FormulationRecord` names, over the dataset's input tables, with every scan encoded as
+the scan description the dataset handed out. Run them through the same `start` as a Python plan, to
+check that the frontend loses nothing:
+
+```python
+union = hail_df.formulations.union(ctx, dataset)
+
+from_python = backend.start(ctx, union.frame, hail_df.Explain(union.ordering)).wait()
+built_in = backend.start(
+    ctx, backend.builtin_plan(dataset, union.formulation), hail_df.Explain(union.ordering)
+).wait()
+```
+
+Union, `FormulationRecord("union")`, is the one built-in plan so far. Any other record raises
+`InvalidAction`. The Rust plan builder discovers the dataset again, so a dataset that can no longer
+be read with the input tables it was opened with raises `BackendError`.
+
 ## Running a plan
 
 ```python
@@ -120,17 +138,50 @@ outcome.rows        # a pyarrow Table
 `Backend.start(ctx, frame_or_plan_bytes, action, settings=None, run_id=None)` starts a run in the
 background and returns a `Run` with its `run_id`. A frame is encoded unoptimized in `ctx` with
 `frame.logical_plan().to_bytes(ctx)`, a session from `hail_df.context()`. Plan bytes built elsewhere
-cross as they are, and give the same Outcome. `settings` is a map of string values, in the namespace
-below.
+cross as they are, and give the same Outcome. `settings` is the settings map below.
 
 `Run.wait()` blocks until the run ends and returns its Outcome. It releases the interpreter while it
 waits, so other Python threads keep running. Waiting again hands back the same result. Dropping a
 `Run` leaves the run going.
 
-`Collect(ordering)`, a frozen dataclass, is the one Action in Python so far. It takes plain sort
-columns, such as a dataset's or an ordered frame's `ordering`, and the run holds its rows in that
-order. Its Outcome is a `Rows`, whose `rows` is a `pyarrow.Table` holding the rows in `ordering`. The
-rows arrive once the run ends, through the Arrow C stream interface; nothing streams during a run.
+### Actions
+
+An Action is a frozen dataclass. Each takes plain sort columns, such as a dataset's or an ordered
+frame's `ordering`, and the run holds its rows in that order.
+
+- `Collect(ordering)` collects the rows. Its Outcome is a `Rows`, whose `rows` is a `pyarrow.Table`
+  holding the rows in `ordering`. The rows arrive once the run ends, through the Arrow C stream
+  interface; nothing streams during a run.
+- `Explain(ordering, write=None)` renders the plan of a run that drains the rows, without running
+  it. Its Outcome is a `PlanText`, whose `text` is a table with a section each for the decoded
+  `frontend_plan`, as the frontend wrote it, and the `logical_plan` and `physical_plan` the backend
+  made of it.
+- `ExplainAnalyze(ordering, write=None)` runs the plan, draining the rows, and renders the same
+  sections and a `Plan with Metrics` section, the physical plan with its per-operator metrics.
+
+Both explains take a `write` to render instead of draining the rows once writes land. Until then
+passing one raises `InvalidAction`.
+
+### Settings
+
+`settings` maps these keys to string values, and every one is optional:
+
+| Key | What it sets | Default |
+| --- | --- | --- |
+| `hail_df.threads` | the threads of each of the run's IO and CPU runtimes | available parallelism |
+| `hail_df.target_partitions` | the session's target partitions | the shared session's |
+| `hail_df.repartition_file_min_size` | the least file size, in bytes, the optimizer splits a scan of across partitions | the shared session's |
+
+Any other key, inside or outside the namespace, such as a `datafusion.*` key, and a value that isn't
+a count, raises `InvalidAction`. The session otherwise keeps the shared defaults of
+[ADR 0003](adr/0003-formulations-use-shared-session-defaults.md). A hostile
+session, which tempts the optimizer to sort, is:
+
+```python
+settings = {"hail_df.target_partitions": "8", "hail_df.repartition_file_min_size": "0"}
+```
+
+### Errors
 
 Every failure raises `BackendError`, or its subclass `InvalidAction` for a call the backend doesn't
 take. `start` raises `InvalidAction` before the run begins; a run that fails raises from `wait`:
@@ -139,7 +190,7 @@ take. `start` raises `InvalidAction` before the run begins; a run that fails rai
 try:
     outcome = backend.start(ctx, frame, hail_df.Collect(dataset.ordering)).wait()
 except hail_df.InvalidAction:
-    ...  # versions, a setting, an empty ordering, or a Python UDF in the plan
+    ...  # versions, a setting, an empty ordering, a write on an explain, or a Python UDF in the plan
 except hail_df.BackendError:
     ...  # anything else, such as an order the plan could hold only by an inserted sort
 ```
@@ -168,19 +219,21 @@ optimizer holds it with a merge tree.
 The backend's Actions so far:
 
 - `Collect { ordering }` returns `Outcome::Rows`, the rows in `ordering` and their schema.
-- `Explain { ordering }`, not in Python yet, returns `Outcome::Plan`, the plan of a run that drains
-  the rows: the decoded frontend plan as a `frontend_plan` section beside the logical and physical
-  plans.
+- `Explain { ordering }` returns `Outcome::Plan`, the plan of a run that drains the rows: the decoded
+  frontend plan as a `frontend_plan` section beside the logical and physical plans.
+- `ExplainAnalyze { ordering }` runs the plan, draining the rows, and returns `Outcome::Plan`: those
+  sections and a `Plan with Metrics` section.
 
-The settings map takes exactly `hail_df.threads` (default: available parallelism),
-`hail_df.target_partitions` and `hail_df.repartition_file_min_size` (default: the shared
-session's).
+`Backend::builtin_plan(dataset, formulation, versions)` builds a Rust formulation's frame with its
+plan builder, swaps each scan of an input table for the scan description the opened dataset handed
+out, and encodes the plan in the frame the wheel writes, so that `start` reads it as it reads a
+frontend's.
 
 Every failure is a `BackendError` with a stable `ErrorCode`:
 
 | Code | Name | Raised for |
 | --- | --- | --- |
-| `InvalidAction` | `invalid_action` | versions other than the backend's, an unknown or malformed setting, an empty ordering, a payload outside the `DFPYCHN` frame or framed at another version, an inlined Python UDF (`DFPYUD*`) |
+| `InvalidAction` | `invalid_action` | versions other than the backend's, an unknown or malformed setting, an empty ordering, a formulation with no built-in plan, a payload outside the `DFPYCHN` frame or framed at another version, an inlined Python UDF (`DFPYUD*`) |
 | `OrderingAssertionFailed` | `ordering_assertion_failed` | a plan the root assertion could hold only by a sort the backend inserted |
 | `RunCancelled` | `run_cancelled` | a cancelled run |
 | `Backend` | `backend_error` | anything else |

@@ -1,8 +1,9 @@
 use crate::{
     backend::{
         ErrorCode,
-        codec::{CODEC_ID, Codec},
+        codec::{self, CODEC_ID, Codec},
         scan_description::{DescribedScan, ScanDescription},
+        scan_reopening,
     },
     format::InputFormat,
     row_ordering::RowOrdering,
@@ -13,11 +14,16 @@ use datafusion::{
     arrow::datatypes::{DataType, Field, Schema, SchemaRef},
     catalog::TableProvider,
     common::TableReference,
-    datasource::empty::EmptyTable,
+    datasource::{MemTable, empty::EmptyTable},
     functions::math::abs,
     prelude::SessionContext,
 };
-use datafusion_proto::logical_plan::LogicalExtensionCodec;
+use datafusion_proto::{
+    bytes::{
+        logical_plan_from_bytes_with_extension_codec, logical_plan_to_bytes_with_extension_codec,
+    },
+    logical_plan::LogicalExtensionCodec,
+};
 use std::sync::Arc;
 
 #[test]
@@ -42,6 +48,49 @@ fn refuses_to_write_a_provider_it_does_not_own() {
 
     assert!(error.to_string().contains("scan description"), "{error}");
     assert_eq!(payload, b"");
+}
+
+/// The backend's own plan bytes are the wheel's, byte for byte, so they read back as a frontend's
+/// do.
+#[test]
+fn writes_a_plan_as_the_wheel_writes_it_with_the_codec_installed() {
+    let plan = SessionContext::new()
+        .read_table(described_scan())
+        .unwrap()
+        .into_unoptimized_plan();
+
+    let bytes = codec::plan_bytes(&plan).unwrap();
+
+    let wheel = logical_plan_to_bytes_with_extension_codec(
+        &plan,
+        &WheelCodec::new(Arc::new(Codec), CODEC_ID),
+    )
+    .unwrap();
+    assert_eq!(bytes, wheel.to_vec());
+    let decoded = logical_plan_from_bytes_with_extension_codec(
+        &bytes,
+        &SessionContext::new().task_ctx(),
+        &Codec,
+    )
+    .unwrap();
+    assert_eq!(
+        scan_reopening::descriptions(&decoded).unwrap(),
+        [description()]
+    );
+}
+
+#[test]
+fn refuses_to_write_a_plan_reading_a_provider_it_does_not_own() {
+    let provider: Arc<dyn TableProvider> =
+        Arc::new(MemTable::try_new(schema(), vec![vec![]]).unwrap());
+    let plan = SessionContext::new()
+        .read_table(provider)
+        .unwrap()
+        .into_unoptimized_plan();
+
+    let error = codec::plan_bytes(&plan).unwrap_err();
+
+    assert!(error.to_string().contains("scan description"), "{error}");
 }
 
 /// A function crosses by name: the codec writes nothing for it, so the backend resolves it from

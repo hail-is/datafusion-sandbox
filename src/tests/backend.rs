@@ -2,17 +2,19 @@
 //! backend through its object-store resolver.
 //!
 //! The tests here open datasets and read back plan bytes' scan descriptions; `runs` starts plan
-//! bytes and waits for their Outcomes.
+//! bytes and waits for their Outcomes; `builtin_plans` starts a built-in formulation's plan bytes.
 
+mod builtin_plans;
 mod runs;
 
 use crate::{
     backend::{
-        Backend, ErrorCode, ObjectStoreResolver, OpenedDataset, ResolveFromUrls, Versions,
+        Backend, ErrorCode, ObjectStoreResolver, OpenedDataset, Outcome, ResolveFromUrls, Settings,
+        Versions,
         codec::{CODEC_ID, Codec},
         scan_description::ScanDescription,
     },
-    locus::LocusRepresentation,
+    locus::{Locus, LocusRepresentation},
     pipeline::PipelineOptions,
     row_ordering::{RowOrdering, SortColumn},
     testing::{
@@ -25,7 +27,10 @@ use crate::{
 };
 
 use datafusion::{
-    arrow::datatypes::{DataType, Field, Schema},
+    arrow::{
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    },
     catalog::TableProvider,
     error::Result,
     execution::object_store::ObjectStoreUrl,
@@ -374,4 +379,81 @@ fn wheel_bytes(plan: &datafusion::logical_expr::LogicalPlan) -> Vec<u8> {
     logical_plan_to_bytes_with_extension_codec(plan, &WheelCodec::new(Arc::new(Codec), CODEC_ID))
         .unwrap()
         .to_vec()
+}
+
+/// The settings map of the hostile session: eight target partitions, and any file split across
+/// them wherever the plan lets the optimizer.
+fn hostile() -> Settings {
+    Settings::from([
+        ("hail_df.target_partitions".to_string(), "8".to_string()),
+        (
+            "hail_df.repartition_file_min_size".to_string(),
+            "0".to_string(),
+        ),
+    ])
+}
+
+/// The plan bytes of the union of every input table's scan of `fixture`, opened under
+/// `row_ordering` and sorted by its stored ordering, and that ordering.
+fn sorted_union(
+    fixture: &'static Arc<DatasetFixture>,
+    row_ordering: RowOrdering,
+) -> (Vec<u8>, Vec<SortColumn>) {
+    let opened = open(fixture, row_ordering);
+    let ctx = SessionContext::new();
+    let mut scans = opened.input_tables.iter().map(|table| {
+        let provider: Arc<dyn TableProvider> = table.scan.clone();
+        ctx.read_table(provider).unwrap().into_unoptimized_plan()
+    });
+    let first = LogicalPlanBuilder::from(scans.next().unwrap());
+    let plan = scans
+        .fold(first, |union, scan| union.union(scan).unwrap())
+        .sort(opened.ordering.iter().map(SortColumn::sort_expression))
+        .unwrap()
+        .build()
+        .unwrap();
+    (wheel_bytes(&plan), opened.ordering)
+}
+
+/// The rows of a collect's Outcome, in the order they came.
+fn collected_rows(outcome: Outcome, representation: LocusRepresentation) -> Vec<fixture::Row> {
+    let Outcome::Rows { batches, .. } = outcome else {
+        panic!("expected collected rows, got {outcome:?}");
+    };
+    batches
+        .iter()
+        .flat_map(|batch: &RecordBatch| fixture::decode_rows(batch, representation))
+        .collect()
+}
+
+/// Every sample's fixture rows, sorted.
+fn expected_rows() -> Vec<fixture::Row> {
+    sorted(
+        SAMPLES
+            .iter()
+            .flat_map(|sample| {
+                fixture::sample_rows()
+                    .into_iter()
+                    .map(|(locus, alleles)| (locus, alleles.to_string(), (*sample).to_string()))
+            })
+            .collect(),
+    )
+}
+
+/// The locus and alleles of every expected row, in locus-then-alleles order.
+fn expected_keys() -> Vec<(Locus, String)> {
+    let mut expected = keys(&expected_rows());
+    expected.sort();
+    expected
+}
+
+fn keys(rows: &[fixture::Row]) -> Vec<(Locus, String)> {
+    rows.iter()
+        .map(|(locus, alleles, _)| (*locus, alleles.clone()))
+        .collect()
+}
+
+fn sorted(mut rows: Vec<fixture::Row>) -> Vec<fixture::Row> {
+    rows.sort();
+    rows
 }

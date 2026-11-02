@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum
 
-from hail_df.backend import Dataset, SortColumn
+from hail_df.backend import Dataset, FormulationRecord, SortColumn
 from hail_df.datafusion import DataFrame, SessionContext, col
 
 
@@ -12,15 +12,6 @@ class OutputLayout(Enum):
 
     SINGLE_FILE = "single_file"
     FILE_PER_PARTITION = "file_per_partition"
-
-
-@dataclass(frozen=True)
-class FormulationRecord:
-    """The settings of a formulation that a run record holds."""
-
-    name: str
-    groups: int | None = None
-    split_points: str | None = None
 
 
 @dataclass(frozen=True)

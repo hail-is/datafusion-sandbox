@@ -1,4 +1,6 @@
 import itertools
+import os
+import sys
 import threading
 import time
 from dataclasses import FrozenInstanceError
@@ -7,9 +9,19 @@ import hail_df
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
-from conftest import INPUT_TABLES, ROW_FIELDS, SAMPLE_SETS, write_table
-from datafusion import col, lit, udf
-from hail_df import BackendError, Collect, InvalidAction, Rows, SortColumn, formulations
+from conftest import INPUT_TABLES, ROW_FIELDS, SAMPLE_SETS, plan_sections, write_table
+from datafusion import col, functions, lit, udf
+from hail_df import (
+    BackendError,
+    Collect,
+    Explain,
+    ExplainAnalyze,
+    InvalidAction,
+    PlanText,
+    Rows,
+    SortColumn,
+    formulations,
+)
 
 LOCUS_THEN_ALLELES = [
     SortColumn("contig", True, False),
@@ -253,12 +265,165 @@ def test_plan_bytes_with_a_mismatched_wire_version_raise_invalid_action(backend,
         backend.scan_descriptions(mismatched)
 
 
-def test_an_unknown_setting_raises_invalid_action(backend, dataset):
+@pytest.mark.parametrize(
+    "key", ["hail_df.typo", "threads", "datafusion.execution.target_partitions"]
+)
+def test_a_settings_key_outside_the_three_the_backend_takes_raises_invalid_action(
+    backend, dataset, key
+):
     ctx = hail_df.context()
     frame = union_frame(ctx, dataset)
 
-    with pytest.raises(InvalidAction, match="hail_df.typo"):
-        backend.start(ctx, frame, Collect(dataset.ordering), settings={"hail_df.typo": "1"})
+    with pytest.raises(InvalidAction, match=key):
+        backend.start(ctx, frame, Collect(dataset.ordering), settings={key: "1"})
+
+
+@pytest.mark.parametrize(
+    "key", ["hail_df.threads", "hail_df.target_partitions", "hail_df.repartition_file_min_size"]
+)
+def test_a_setting_that_is_not_a_count_raises_invalid_action(backend, dataset, key):
+    ctx = hail_df.context()
+    frame = union_frame(ctx, dataset)
+
+    with pytest.raises(InvalidAction, match=key):
+        backend.start(ctx, frame, Collect(dataset.ordering), settings={key: "many"})
+
+
+def test_target_partitions_sets_the_session_s(backend, dataset):
+    # An aggregate over the sorted scans shows it, unlike the formulations, whose merge tree no
+    # setting changes: it repartitions by hash into the target partitions.
+    ctx = hail_df.context()
+    by_contig = col("contig").sort(ascending=True, nulls_first=False)
+    frame = (
+        dataset.read(ctx)
+        .aggregate([col("contig")], [functions.count(col("position")).alias("rows")])
+        .sort(by_contig)
+    )
+    action = Explain([SortColumn("contig", True, False)])
+
+    # Two counts, so that at most one is the machine's default.
+    for target_partitions in [3, 7]:
+        settings = {"hail_df.target_partitions": str(target_partitions)}
+        text = backend.start(ctx, frame, action, settings=settings).wait().text
+
+        assert f"Hash([contig@0], {target_partitions})" in plan_sections(text)["physical_plan"]
+
+
+def test_a_run_s_session_keeps_the_shared_defaults_under_any_settings(backend, dataset):
+    # ADR 0003's shared session pushes filters down so that a filtered Parquet plan has a filtered
+    # Vortex plan's shape, which a session of DataFusion's own defaults doesn't: it keeps a
+    # `FilterExec` over Parquet.
+    ctx = hail_df.context()
+    frame = dataset.read(ctx, ["g0"]).filter(col("position") > lit(0))
+
+    for settings in [None, {"hail_df.threads": "2", "hail_df.target_partitions": "2"}]:
+        text = backend.start(ctx, frame, Explain(dataset.ordering), settings=settings).wait().text
+
+        assert "FilterExec" not in plan_sections(text)["physical_plan"]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="counts threads through /proc")
+def test_the_threads_setting_sets_the_thread_count_of_the_run_s_runtimes(backend, dataset):
+    # More threads than any machine's default, so that only the setting can account for them: the
+    # run builds an IO and a CPU runtime of that many, each running for the whole run. This reads
+    # /proc because no interface states how many threads a run has until a measured write records
+    # them; the Rust suite checks the same count at the backend's object-store seam.
+    threads = 64
+    ctx = hail_df.context()
+    frame = union_frame(ctx, dataset)
+    before = len(os.listdir("/proc/self/task"))
+    peak = [before]
+    done = threading.Event()
+
+    def sample():
+        while not done.is_set():
+            peak[0] = max(peak[0], len(os.listdir("/proc/self/task")))
+
+    sampler = threading.Thread(target=sample)
+    sampler.start()
+    try:
+        settings = {"hail_df.threads": str(threads)}
+        backend.start(ctx, frame, Collect(dataset.ordering), settings=settings).wait()
+    finally:
+        done.set()
+        sampler.join()
+
+    assert peak[0] - before >= 2 * threads
+
+
+def test_explain_renders_the_frontend_logical_and_physical_plans_without_running(backend, dataset):
+    ctx = hail_df.context()
+
+    outcome = backend.start(ctx, union_frame(ctx, dataset), Explain(dataset.ordering)).wait()
+
+    assert isinstance(outcome, PlanText)
+    sections = plan_sections(outcome.text)
+    assert list(sections) == ["frontend_plan", "logical_plan", "physical_plan"]
+    assert "Sort: " in sections["frontend_plan"]
+    assert "OrderingAssertion" in sections["logical_plan"]
+    assert "OrderingAssertionExec" in sections["physical_plan"]
+    assert "output_rows=" not in outcome.text
+
+
+def test_explain_analyze_runs_the_plan_and_shows_per_operator_metrics(backend, dataset):
+    ctx = hail_df.context()
+
+    outcome = backend.start(ctx, union_frame(ctx, dataset), ExplainAnalyze(dataset.ordering)).wait()
+
+    assert isinstance(outcome, PlanText)
+    sections = plan_sections(outcome.text)
+    assert list(sections) == [
+        "frontend_plan",
+        "logical_plan",
+        "physical_plan",
+        "Plan with Metrics",
+    ]
+    # The fixture's eight rows, for each of its four samples.
+    metrics = sections["Plan with Metrics"]
+    assert "output_rows=32" in metrics
+    assert "elapsed_compute=" in metrics
+
+
+def test_the_frontend_plan_is_the_frame_as_written_unoptimized(backend, dataset):
+    ctx = hail_df.context()
+    # The optimizer would push this filter beneath the sort, into the scans.
+    frame = union_frame(ctx, dataset).filter(col("position") < lit(0))
+
+    outcome = backend.start(ctx, frame, Explain(dataset.ordering)).wait()
+
+    frontend = plan_sections(outcome.text)["frontend_plan"].splitlines()
+    assert frontend[0].startswith("Filter: ")
+    assert frontend[1].strip().startswith("Sort: ")
+    assert all("Filter" not in line for line in frontend[1:])
+
+
+@pytest.mark.parametrize("action", [Explain, ExplainAnalyze])
+def test_an_explain_failing_raises_backend_error_rather_than_rendering_the_failure(
+    backend, dataset, action
+):
+    ctx = hail_df.context()
+    run = backend.start(
+        ctx, union_frame(ctx, dataset), action([SortColumn("alleles", True, False)])
+    )
+
+    with pytest.raises(BackendError, match="ordering_assertion_failed"):
+        run.wait()
+
+
+@pytest.mark.parametrize("action", [Explain, ExplainAnalyze])
+def test_an_explain_with_no_ordering_raises_invalid_action(backend, dataset, action):
+    ctx = hail_df.context()
+
+    with pytest.raises(InvalidAction, match="ordering"):
+        backend.start(ctx, union_frame(ctx, dataset), action(()))
+
+
+@pytest.mark.parametrize("action", [Explain, ExplainAnalyze])
+def test_an_explain_given_a_write_raises_invalid_action_until_writes_land(backend, dataset, action):
+    ctx = hail_df.context()
+
+    with pytest.raises(InvalidAction, match="write"):
+        backend.start(ctx, union_frame(ctx, dataset), action(dataset.ordering, "a write"))
 
 
 def test_a_setting_whose_value_does_not_parse_raises_invalid_action(backend, dataset):
@@ -322,5 +487,5 @@ def test_starting_bytes_that_are_no_plan_raises_backend_error_not_invalid_action
 def test_starting_something_that_is_no_action_raises_type_error(backend, dataset):
     ctx = hail_df.context()
 
-    with pytest.raises(TypeError, match="Collect"):
+    with pytest.raises(TypeError, match="Collect, Explain or ExplainAnalyze"):
         backend.start(ctx, union_frame(ctx, dataset), "collect")

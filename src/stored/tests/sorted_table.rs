@@ -106,6 +106,32 @@ fn multi_column_table(store: &MemoryStore, files: Vec<PartitionedFile>) -> Sorte
     )
 }
 
+#[test]
+fn a_table_names_an_input_table_only_once_it_is_named_as_one() {
+    let store = MemoryStore::new("sorted-table-unnamed");
+    let unnamed = table(&store, vec![file("a.parquet", Some(1), Some(2))]);
+
+    assert_eq!(unnamed.input_table(), None);
+    assert_eq!(unnamed.of_input_table("g0").input_table(), Some("g0"));
+}
+
+/// Naming a table as an input table changes nothing about how it scans: the same files in the same
+/// order, recovered from their statistics.
+#[tokio::test]
+async fn naming_a_table_as_an_input_table_leaves_its_scan_as_it_was() {
+    let store = MemoryStore::new("sorted-table-named");
+    let files = vec![
+        file("b.parquet", Some(3), Some(4)),
+        file("a.parquet", Some(1), Some(2)),
+    ];
+
+    let unnamed = file_group_paths(&store, table(&store, files.clone())).await;
+    let named = file_group_paths(&store, table(&store, files).of_input_table("g0")).await;
+
+    assert_eq!(named, unnamed);
+    assert_eq!(named, [Path::from("a.parquet"), Path::from("b.parquet")]);
+}
+
 /// Plans `table` on a fresh session that knows `store`, the store the table was built over.
 async fn file_group_paths(store: &MemoryStore, table: SortedTable) -> Vec<Path> {
     let ctx = SessionContext::new();

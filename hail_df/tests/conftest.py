@@ -78,6 +78,21 @@ def write_mixed_dataset(root: Path, input_format: str) -> Path:
     return dataset
 
 
+def plan_sections(text: str) -> dict[str, str]:
+    """The sections of an Outcome's plan text by name, each line without the table's padding, which
+    the widest line of any section sets."""
+    lines = text.splitlines()
+    name_width = lines[0].index("+", 1)
+    sections: dict[str, list[str]] = {}
+    current: list[str] = []
+    for line in lines[3:-1]:
+        name, plan = line[1:name_width].strip(), line[name_width + 2 : -1].rstrip()
+        if name:
+            current = sections.setdefault(name, [])
+        current.append(plan)
+    return {name: "\n".join(plan) for name, plan in sections.items()}
+
+
 @pytest.fixture(params=FORMATS)
 def input_format(request) -> str:
     return request.param
