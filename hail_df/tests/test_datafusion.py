@@ -35,3 +35,9 @@ def test_it_exports_the_dataframe_and_session_types_of_the_datafusion_wheel():
 
     assert hail_df.datafusion.DataFrame is datafusion.DataFrame
     assert hail_df.datafusion.SessionContext is datafusion.SessionContext
+
+
+def test_it_states_the_versions_the_wheel_speaks_which_every_backend_call_checks():
+    # The wheel pinned in pyproject.toml, datafusion 55.0.0, frames payloads at DFPYCHN version 1.
+    assert hail_df.datafusion.DATAFUSION_MAJOR == 55
+    assert hail_df.datafusion.WIRE_VERSION == 1

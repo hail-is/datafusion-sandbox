@@ -15,7 +15,7 @@ use datafusion_ffi::{
     table_provider::FFI_TableProvider,
 };
 use datafusion_sandbox::backend::{
-    self, InputTableScan, OpenedDataset, ResolveFromUrls,
+    self, InputTableScan, OpenedDataset, ResolveFromUrls, Versions,
     codec::{CODEC_ID, Codec},
     scan_description::{DescribedScan, ScanDescription},
 };
@@ -34,7 +34,7 @@ create_exception!(
     "A failure the backend reports."
 );
 
-fn backend_error(error: &DataFusionError) -> PyErr {
+fn backend_error(error: &impl ToString) -> PyErr {
     BackendError::new_err(error.to_string())
 }
 
@@ -49,29 +49,48 @@ impl PyBackend {
         Self(backend::Backend::new(Arc::new(ResolveFromUrls)))
     }
 
-    /// Opens the dataset at `path`, stored in `input_format` and declared in `row_ordering`.
+    /// Opens the dataset at `path`, stored in `input_format` and declared in `row_ordering`, for a
+    /// frontend on `DataFusion` major `datafusion_major` whose wheel frames payloads at
+    /// `wire_version`.
     fn open_dataset(
         &self,
         py: Python<'_>,
         path: &str,
         input_format: &str,
         row_ordering: &str,
+        datafusion_major: u64,
+        wire_version: u8,
     ) -> PyResult<PyOpenedDataset> {
         let input_format = input_format.parse().map_err(|e| backend_error(&e))?;
         let row_ordering = row_ordering.parse().map_err(|e| backend_error(&e))?;
-        py.detach(|| self.0.open_dataset(path, input_format, row_ordering))
-            .map(PyOpenedDataset)
-            .map_err(|e| backend_error(&e))
+        let versions = Versions {
+            datafusion_major,
+            wire_version,
+        };
+        py.detach(|| {
+            self.0
+                .open_dataset(path, input_format, row_ordering, versions)
+        })
+        .map(PyOpenedDataset)
+        .map_err(|e| backend_error(&e))
     }
 
-    /// The scan descriptions `plan_bytes` read, each once, in the order the plan first reads them.
+    /// The scan descriptions `plan_bytes` read, each once, in the order the plan first reads them,
+    /// for a frontend on `DataFusion` major `datafusion_major` whose wheel frames payloads at
+    /// `wire_version`.
     fn scan_descriptions(
         &self,
         py: Python<'_>,
         plan_bytes: &Bound<'_, PyBytes>,
+        datafusion_major: u64,
+        wire_version: u8,
     ) -> PyResult<Vec<PyScanDescription>> {
         let plan_bytes = plan_bytes.as_bytes();
-        py.detach(|| self.0.scan_descriptions(plan_bytes))
+        let versions = Versions {
+            datafusion_major,
+            wire_version,
+        };
+        py.detach(|| self.0.scan_descriptions(plan_bytes, versions))
             .map(|descriptions| descriptions.into_iter().map(PyScanDescription).collect())
             .map_err(|e| backend_error(&e))
     }

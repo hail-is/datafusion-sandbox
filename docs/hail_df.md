@@ -7,8 +7,9 @@ frontend builds plans with datafusion-python's own `DataFrame` API, on the stock
 `src/backend.rs` in the root crate; `hail_df/` holds the bindings crate over it, the Python package
 and its tests.
 
-So far a frontend can open a dataset and plan against it. Nothing runs yet: the scans in a plan are
-scan descriptions, which plan like tables but refuse to scan in Python.
+So far a frontend can open a dataset and plan against it. The backend runs plan bytes through its
+Rust interface, but Python can't start a run yet: the scans in a plan are scan descriptions, which
+plan like tables but refuse to scan in Python.
 
 ## Building it
 
@@ -62,6 +63,11 @@ scan reads, enough for any backend to reopen it.
 A dataset that can't be discovered, an unknown format or row ordering, and rows that lack a column
 of the row ordering each raise `hail_df.BackendError`.
 
+Every backend call carries the DataFusion major the wheel builds plans on and the version of the
+`DFPYCHN` frame it wraps codec payloads in, `hail_df.datafusion.DATAFUSION_MAJOR` and
+`WIRE_VERSION`, and the backend refuses a call whose versions aren't its own with `BackendError`. A
+`datafusion` wheel of another major than the backend's fails every call rather than misdecode.
+
 ## Reading it into a plan
 
 ```python
@@ -88,6 +94,42 @@ descriptions.
 descriptions the plan reads, each once, in the order the plan first reads them. Bytes that are not
 such a plan raise `BackendError`.
 
+## Running plan bytes in the backend
+
+The Python binding follows; this is the backend's Rust interface in `src/backend.rs`.
+`Backend::start(plan_bytes, action, settings, run_id, versions)` starts a run in the background and
+returns a `Run` with its `run_id`, the one given or a generated one; `Run::wait` returns its
+`Outcome`. Dropping a `Run` leaves the run going.
+
+The backend decodes the plan with its own session, so functions resolve by name from its registry.
+Each scan decodes to a placeholder holding its description, and the run reopens each as the sorted
+scan the Rust formulations read, listing the input table's files then: a file added after the plan
+was encoded is read. Before the logical optimizer, every sort the frontend wrote becomes an
+established order, and the Action's ordering becomes an ordering assertion at the root, so the
+optimizer holds it with a merge tree.
+
+The Actions so far:
+
+- `Collect { ordering }` returns `Outcome::Rows`, the rows in `ordering` and their schema.
+- `Explain { ordering }` returns `Outcome::Plan`, the plan of a run that drains the rows: the
+  decoded frontend plan as a `frontend_plan` section beside the logical and physical plans.
+
+The settings map takes exactly `hail_df.threads` (default: available parallelism),
+`hail_df.target_partitions` and `hail_df.repartition_file_min_size` (default: the shared
+session's).
+
+Every failure is a `BackendError` with a stable `ErrorCode`:
+
+| Code | Name | Raised for |
+| --- | --- | --- |
+| `InvalidAction` | `invalid_action` | versions other than the backend's, an unknown or malformed setting, an empty ordering, a payload outside the `DFPYCHN` frame or framed at another version, an inlined Python UDF (`DFPYUD*`) |
+| `OrderingAssertionFailed` | `ordering_assertion_failed` | a plan the root assertion could hold only by a sort the backend inserted |
+| `RunCancelled` | `run_cancelled` | a cancelled run |
+| `Backend` | `backend_error` | anything else |
+
+Invalid actions fail `start` before the run begins; an ordering assertion fails `wait`, before the
+plan executes.
+
 ## Inside the package
 
 The package's own code imports DataFusion only through `hail_df.datafusion`, so that moving to our
@@ -96,4 +138,5 @@ own build of datafusion-python stays a change to one module. Its tests check thi
 The codec is installed under the id `hail_df`, its `__datafusion_codec_id__`. It writes each
 scan's description as the provider's payload and nothing for functions, which cross by name. The
 wheel frames each payload under that id; the backend reads payloads back only from that frame, at
-its version 1.
+its version 1. The backend refuses a function the wheel inlined as a pickled Python payload:
+Python UDFs aren't part of the MVP.

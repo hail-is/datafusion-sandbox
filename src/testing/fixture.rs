@@ -14,6 +14,8 @@
 //!
 //! Per-test owned in-memory inventory:
 //! - A locus-sorted table, one or more files, with caller-chosen loci, format, and representation
+//! - A growing dataset: one single-sample input table, `s=HG00308/`, holding the documented file
+//!   `d` until the test adds the next one, `c`
 //!
 //! Per-test owned disk inventory:
 //! - Vortex with contig-position loci
@@ -472,6 +474,107 @@ pub fn sorted_table_fixture(
         table_path,
         file_paths,
     }
+}
+
+/// A dataset on a store of its own of one single-sample input table, `s=HG00308/`, holding the
+/// documented file `d` until the test adds the next one, `c`, for tests of when a reader lists an
+/// input table's files. Its files are copies of the shared dataset fixture's.
+#[cfg(test)]
+pub(crate) struct GrowingDatasetFixture {
+    source: &'static Arc<DatasetFixture>,
+    store: MemoryStore,
+    table_path: ListingTableUrl,
+}
+
+#[cfg(test)]
+impl GrowingDatasetFixture {
+    /// The sample of the dataset's one input table.
+    pub(crate) const SAMPLE: &'static str = "HG00308";
+
+    pub(crate) const fn table_path(&self) -> &ListingTableUrl {
+        &self.table_path
+    }
+
+    pub(crate) fn input_format(&self) -> InputFormat {
+        self.source.input_format()
+    }
+
+    /// The store holding the dataset, and its URL.
+    pub(crate) const fn store(&self) -> &MemoryStore {
+        &self.store
+    }
+
+    /// Adds the documented file `c` to the input table, beside `d`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the file can't be copied, or was added already.
+    pub(crate) fn add_next_file(&self) {
+        self.copy_file("c");
+    }
+
+    /// Copies the shared fixture's documented file `stem` of [`Self::SAMPLE`] into the input
+    /// table.
+    fn copy_file(&self, stem: &str) {
+        block_on(async {
+            let file = self
+                .source
+                .sample_files(Self::SAMPLE)
+                .await
+                .into_iter()
+                .find(|file| {
+                    file.location
+                        .filename()
+                        .is_some_and(|name| name.starts_with(&format!("{stem}.")))
+                })
+                .unwrap_or_else(|| panic!("the shared fixture has no file {stem}"));
+            let filename = file.location.filename().unwrap_or_default();
+            let location = object_store::path::Path::from(format!(
+                "{}/s={}/{filename}",
+                self.table_path.prefix(),
+                Self::SAMPLE
+            ));
+            let copied = self.store.store();
+            assert!(
+                copied.head(&location).await.is_err(),
+                "{location} was added already"
+            );
+            let read = |error| panic!("reading {}: {error}", file.location);
+            let bytes = match self.source.store().get(&file.location).await {
+                Ok(got) => got.bytes().await.unwrap_or_else(read),
+                Err(error) => read(error),
+            };
+            copied
+                .put(&location, bytes.into())
+                .await
+                .unwrap_or_else(|error| panic!("writing {location}: {error}"));
+        });
+    }
+}
+
+/// A growing dataset named `name` on its own store, in `format` and `representation`, holding
+/// file `d`.
+///
+/// # Panics
+///
+/// Panics if `name` is not a valid URL authority or a file can't be copied.
+#[cfg(test)]
+pub(crate) fn growing_dataset_fixture(
+    name: &str,
+    format: FixtureFormat,
+    representation: LocusRepresentation,
+) -> GrowingDatasetFixture {
+    let store = MemoryStore::new(name);
+    let table_path =
+        ListingTableUrl::parse(format!("{}fixtures/{name}/samples/", store.url().as_str()))
+            .unwrap_or_else(|error| panic!("parsing the {name} dataset fixture path: {error}"));
+    let fixture = GrowingDatasetFixture {
+        source: dataset_fixture(format, representation),
+        store,
+        table_path,
+    };
+    fixture.copy_file("d");
+    fixture
 }
 
 pub struct DiskDatasetFixture {

@@ -1,5 +1,6 @@
 use crate::{
     backend::{
+        ErrorCode,
         codec::{CODEC_ID, Codec},
         scan_description::{DescribedScan, ScanDescription},
     },
@@ -78,6 +79,7 @@ fn refuses_a_payload_another_codec_wrote() {
         .unwrap_err();
 
     assert!(error.to_string().contains("'another_library'"), "{error}");
+    assert_eq!(ErrorCode::of(&error), ErrorCode::InvalidAction);
 }
 
 #[test]
@@ -94,6 +96,7 @@ fn refuses_a_payload_the_wheel_did_not_frame() {
         .unwrap_err();
 
     assert!(error.to_string().contains("DFPYCHN"), "{error}");
+    assert_eq!(ErrorCode::of(&error), ErrorCode::InvalidAction);
 }
 
 /// The wheel's framing has a version of its own, the byte after `DFPYCHN`, which the codec reads
@@ -109,6 +112,50 @@ fn refuses_a_payload_framed_at_another_wire_version() {
         .unwrap_err();
 
     assert!(error.to_string().contains("version 2"), "{error}");
+    assert_eq!(ErrorCode::of(&error), ErrorCode::InvalidAction);
+}
+
+/// The wheel inlines a Python function as a payload of its own, `DFPYUDF`, `DFPYUDA` or
+/// `DFPYUDW` and then a pickled callable, which the backend refuses rather than runs.
+#[test]
+fn refuses_a_python_function_the_wheel_inlined_in_every_family() {
+    let inlined = |family: &[u8]| [b"DFPYUD".as_slice(), family, &[1, 3, 13], b"pickled"].concat();
+
+    let errors = [
+        Codec.try_decode_udf("double", &inlined(b"F")).unwrap_err(),
+        Codec.try_decode_udaf("double", &inlined(b"A")).unwrap_err(),
+        Codec.try_decode_udwf("double", &inlined(b"W")).unwrap_err(),
+    ];
+
+    for error in errors {
+        assert_eq!(ErrorCode::of(&error), ErrorCode::InvalidAction, "{error}");
+        assert!(error.to_string().contains("'double'"), "{error}");
+        assert!(error.to_string().contains("Python function"), "{error}");
+    }
+}
+
+/// Functions cross by name only, so any other payload is refused too.
+#[test]
+fn refuses_a_function_with_any_other_payload() {
+    let error = Codec
+        .try_decode_udf("double", b"DFPYCHN\x01 framed")
+        .unwrap_err();
+
+    assert_eq!(ErrorCode::of(&error), ErrorCode::InvalidAction, "{error}");
+    assert!(error.to_string().contains("by name"), "{error}");
+}
+
+/// The decoder asks the codec for a function the registry lacks, with no payload; the codec has
+/// none to give.
+#[test]
+fn has_no_function_the_backend_s_registry_lacks() {
+    let error = Codec.try_decode_udf("double", b"").unwrap_err();
+
+    assert_eq!(ErrorCode::of(&error), ErrorCode::Backend, "{error}");
+    assert!(
+        error.to_string().contains("'double' is not registered"),
+        "{error}"
+    );
 }
 
 /// What the wheel writes for a described scan when the codec is installed on its session under

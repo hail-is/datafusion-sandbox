@@ -2,6 +2,7 @@
 //! test wrote or a plan returned.
 
 mod disk_datasets;
+mod growing_datasets;
 mod reading_back;
 mod rows;
 mod shared_datasets;
