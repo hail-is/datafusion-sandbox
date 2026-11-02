@@ -30,11 +30,12 @@ def test_no_other_module_of_the_package_imports_datafusion():
     assert importers == []
 
 
-def test_it_exports_the_dataframe_and_session_types_of_the_datafusion_wheel():
+def test_it_exports_the_names_of_the_datafusion_wheel_the_package_uses():
     import datafusion
 
     assert hail_df.datafusion.DataFrame is datafusion.DataFrame
     assert hail_df.datafusion.SessionContext is datafusion.SessionContext
+    assert hail_df.datafusion.col is datafusion.col
 
 
 def test_it_states_the_versions_the_wheel_speaks_which_every_backend_call_checks():

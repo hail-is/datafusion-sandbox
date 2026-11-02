@@ -1,6 +1,6 @@
-"""The in-process backend, and the datasets it opens for a frontend to plan against."""
+"""The in-process backend, the datasets it opens for a frontend to plan against, and its runs."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import reduce
 from typing import NamedTuple
@@ -8,10 +8,21 @@ from typing import NamedTuple
 import pyarrow as pa
 
 from hail_df import _native
-from hail_df._native import BackendError, ScanDescription
+from hail_df._native import BackendError, InvalidAction, ScanDescription
 from hail_df.datafusion import DATAFUSION_MAJOR, WIRE_VERSION, DataFrame, SessionContext
 
-__all__ = ["Backend", "BackendError", "Dataset", "InputTable", "ScanDescription", "SortColumn"]
+__all__ = [
+    "Backend",
+    "BackendError",
+    "Collect",
+    "Dataset",
+    "InputTable",
+    "InvalidAction",
+    "Rows",
+    "Run",
+    "ScanDescription",
+    "SortColumn",
+]
 
 
 class SortColumn(NamedTuple):
@@ -83,6 +94,42 @@ class Dataset:
         return reduce(lambda left, right: left.union(right), frames)
 
 
+@dataclass(frozen=True)
+class Collect:
+    """The Action that collects a plan's rows, held in `ordering`, into the run's Outcome."""
+
+    ordering: Sequence[SortColumn]
+
+
+@dataclass(frozen=True)
+class Rows:
+    """The Outcome of a `Collect`: the rows, in its ordering, as Arrow data."""
+
+    rows: pa.Table
+
+
+class Run:
+    """A started run. It goes on in the background: dropping the handle doesn't stop it."""
+
+    def __init__(self, run: _native.Run) -> None:
+        self._run = run
+
+    def __repr__(self) -> str:
+        return f"Run(run_id={self.run_id!r})"
+
+    @property
+    def run_id(self) -> str:
+        """The run's id, the one given to `Backend.start` or a generated one."""
+        return self._run.run_id
+
+    def wait(self) -> Rows:
+        """Blocks until the run ends and returns its Outcome. Other Python threads keep running.
+
+        Raises `BackendError` if the run failed. Waiting again hands back the same result.
+        """
+        return Rows(pa.table(self._run.wait()))
+
+
 class Backend:
     """The in-process backend. It resolves object stores and credentials from URLs."""
 
@@ -109,3 +156,44 @@ class Backend:
         session.
         """
         return self._backend.scan_descriptions(plan_bytes, DATAFUSION_MAJOR, WIRE_VERSION)
+
+    def start(
+        self,
+        ctx: SessionContext,
+        frame_or_plan_bytes: DataFrame | bytes,
+        action: Collect,
+        settings: Mapping[str, str] | None = None,
+        run_id: str | None = None,
+    ) -> Run:
+        """Starts a run of a plan that performs `action` under `settings`, as `run_id` or under a
+        generated id, and returns its handle.
+
+        A frame is encoded unoptimized in `ctx`, a session from `hail_df.context()`; plan bytes
+        were already encoded in one, here or elsewhere, and cross as they are.
+
+        Raises `InvalidAction`, before the run starts, if the wheel's versions aren't the
+        backend's, a setting's name is unknown or its value doesn't parse, the Action's ordering is
+        empty, or the plan carries a payload framed at another wire version or an inlined Python
+        function. Raises `BackendError` if the bytes are not otherwise a plan encoded in such a
+        session. Raises `TypeError` if `action` is not an Action, or a setting's name or value is
+        not a string.
+        """
+        if isinstance(action, Collect):
+            native_action = _native.Action.collect(list(action.ordering))
+        else:
+            raise TypeError(f"action must be a Collect, not {action!r}")
+        plan_bytes = (
+            frame_or_plan_bytes.logical_plan().to_bytes(ctx)
+            if isinstance(frame_or_plan_bytes, DataFrame)
+            else frame_or_plan_bytes
+        )
+        return Run(
+            self._backend.start(
+                plan_bytes,
+                native_action,
+                dict(settings or {}),
+                run_id,
+                DATAFUSION_MAJOR,
+                WIRE_VERSION,
+            )
+        )

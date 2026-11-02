@@ -1,12 +1,17 @@
 //! `hail_df._native`: the Python bindings over the backend in `datafusion_sandbox::backend`.
 //!
 //! The bindings only marshal: values between Python and the backend, the FFI capsules the
-//! `datafusion` wheel loads (the codec and each input table's schema-only scan), and the backend's
-//! errors as `BackendError`. The Python package around them is the interface; see
-//! `docs/hail_df.md`.
+//! `datafusion` wheel loads (the codec and each input table's schema-only scan), a collect's rows
+//! through the Arrow C stream interface, and the backend's error codes as `BackendError` and its
+//! subclasses. The Python package around them is the interface; see `docs/hail_df.md`.
 
 use datafusion::{
-    arrow::{datatypes::SchemaRef, ffi::FFI_ArrowSchema},
+    arrow::{
+        datatypes::SchemaRef,
+        ffi::FFI_ArrowSchema,
+        ffi_stream::FFI_ArrowArrayStream,
+        record_batch::{RecordBatch, RecordBatchIterator},
+    },
     catalog::TableProvider,
     error::DataFusionError,
 };
@@ -14,10 +19,14 @@ use datafusion_ffi::{
     execution::FFI_TaskContextProvider, proto::logical_extension_codec::FFI_LogicalExtensionCodec,
     table_provider::FFI_TableProvider,
 };
-use datafusion_sandbox::backend::{
-    self, InputTableScan, OpenedDataset, ResolveFromUrls, Versions,
-    codec::{CODEC_ID, Codec},
-    scan_description::{DescribedScan, ScanDescription},
+use datafusion_sandbox::{
+    backend::{
+        self, Action, ErrorCode, InputTableScan, OpenedDataset, Outcome, ResolveFromUrls, Run,
+        Settings, Versions,
+        codec::{CODEC_ID, Codec},
+        scan_description::{DescribedScan, ScanDescription},
+    },
+    row_ordering::SortColumn,
 };
 use pyo3::{
     create_exception,
@@ -25,7 +34,10 @@ use pyo3::{
     prelude::*,
     types::{PyBytes, PyCapsule},
 };
-use std::{ffi::CStr, sync::Arc};
+use std::{
+    ffi::CStr,
+    sync::{Arc, LazyLock},
+};
 
 create_exception!(
     hail_df,
@@ -33,9 +45,27 @@ create_exception!(
     PyException,
     "A failure the backend reports."
 );
+create_exception!(
+    hail_df,
+    InvalidAction,
+    BackendError,
+    "A call the backend doesn't take: versions other than its own, an unknown setting, a \
+     malformed Action, or a plan carrying a payload it refuses."
+);
 
 fn backend_error(error: &impl ToString) -> PyErr {
     BackendError::new_err(error.to_string())
+}
+
+/// The exception for `error`, by its code. The codes with no exception of their own yet raise
+/// `BackendError`.
+fn raised(error: &backend::BackendError) -> PyErr {
+    match error.code() {
+        ErrorCode::InvalidAction => InvalidAction::new_err(error.to_string()),
+        ErrorCode::OrderingAssertionFailed | ErrorCode::RunCancelled | ErrorCode::Backend => {
+            BackendError::new_err(error.to_string())
+        }
+    }
 }
 
 /// The in-process backend, resolving object stores and credentials from URLs.
@@ -72,7 +102,7 @@ impl PyBackend {
                 .open_dataset(path, input_format, row_ordering, versions)
         })
         .map(PyOpenedDataset)
-        .map_err(|e| backend_error(&e))
+        .map_err(|e| raised(&e))
     }
 
     /// The scan descriptions `plan_bytes` read, each once, in the order the plan first reads them,
@@ -92,7 +122,132 @@ impl PyBackend {
         };
         py.detach(|| self.0.scan_descriptions(plan_bytes, versions))
             .map(|descriptions| descriptions.into_iter().map(PyScanDescription).collect())
-            .map_err(|e| backend_error(&e))
+            .map_err(|e| raised(&e))
+    }
+
+    /// Starts a run of `plan_bytes` that performs `action` under `settings`, as `run_id` or under a
+    /// generated id, for a frontend on `DataFusion` major `datafusion_major` whose wheel frames
+    /// payloads at `wire_version`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Python's call carries each value plainly, as `Backend::start` takes them"
+    )]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "pyo3 extracts `settings` by value"
+    )]
+    #[pyo3(signature = (plan_bytes, action, settings, run_id, datafusion_major, wire_version))]
+    fn start(
+        &self,
+        py: Python<'_>,
+        plan_bytes: &Bound<'_, PyBytes>,
+        action: &PyAction,
+        settings: Settings,
+        run_id: Option<String>,
+        datafusion_major: u64,
+        wire_version: u8,
+    ) -> PyResult<PyRun> {
+        let plan_bytes = plan_bytes.as_bytes();
+        let action = action.0.clone();
+        let versions = Versions {
+            datafusion_major,
+            wire_version,
+        };
+        py.detach(|| {
+            self.0
+                .start(plan_bytes, action, &settings, run_id, versions)
+        })
+        .map(PyRun::new)
+        .map_err(|e| raised(&e))
+    }
+}
+
+/// What a run does with the plan's rows, as the backend takes it.
+#[pyclass(name = "Action", frozen)]
+struct PyAction(Action);
+
+#[pymethods]
+impl PyAction {
+    /// Collect the rows, in `ordering`, a list of `(column, ascending, nulls_first)` triples.
+    #[staticmethod]
+    fn collect(ordering: Vec<(String, bool, bool)>) -> Self {
+        Self(Action::Collect {
+            ordering: ordering
+                .into_iter()
+                .map(|(column, ascending, nulls_first)| SortColumn {
+                    column,
+                    ascending,
+                    nulls_first,
+                })
+                .collect(),
+        })
+    }
+}
+
+/// How a run ended, once it has.
+type Ended = Result<Outcome, backend::BackendError>;
+
+/// A started run. Every `wait` hands back what the first one waited for.
+#[pyclass(name = "Run", frozen)]
+struct PyRun {
+    run_id: String,
+    ended: LazyLock<Ended, Box<dyn FnOnce() -> Ended + Send>>,
+}
+
+impl PyRun {
+    fn new(run: Run) -> Self {
+        Self {
+            run_id: run.run_id().to_string(),
+            ended: LazyLock::new(Box::new(move || run.wait())),
+        }
+    }
+}
+
+#[pymethods]
+impl PyRun {
+    #[getter]
+    fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    /// Blocks until the run ends, with the interpreter released, and hands back its rows.
+    fn wait(&self, py: Python<'_>) -> PyResult<PyRows> {
+        match py.detach(|| LazyLock::force(&self.ended)) {
+            Ok(Outcome::Rows { schema, batches }) => Ok(PyRows {
+                schema: Arc::clone(schema),
+                batches: batches.clone(),
+            }),
+            Ok(Outcome::Plan(_)) => Err(BackendError::new_err(
+                "a run handed back plan text, and only `Collect` crosses to Python so far",
+            )),
+            Err(error) => Err(raised(error)),
+        }
+    }
+}
+
+/// A collect's rows, exported through the Arrow C stream interface.
+#[pyclass(name = "Rows", frozen)]
+struct PyRows {
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
+}
+
+#[pymethods]
+impl PyRows {
+    #[pyo3(signature = (requested_schema=None))]
+    fn __arrow_c_stream__<'py>(
+        &self,
+        py: Python<'py>,
+        requested_schema: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyCapsule>> {
+        // A consumer may ask for another schema; these rows are in this one.
+        let _ = requested_schema;
+        let reader = RecordBatchIterator::new(
+            self.batches.clone().into_iter().map(Ok),
+            Arc::clone(&self.schema),
+        );
+        let stream = FFI_ArrowArrayStream::new(Box::new(reader));
+        PyCapsule::new_with_value(py, stream, c"arrow_array_stream")
     }
 }
 
@@ -277,10 +432,14 @@ fn capsule_value<T: Clone>(capsule: &Bound<'_, PyAny>, name: &'static CStr) -> P
 #[pymodule(gil_used = false, name = "_native")]
 fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("BackendError", m.py().get_type::<BackendError>())?;
+    m.add("InvalidAction", m.py().get_type::<InvalidAction>())?;
+    m.add_class::<PyAction>()?;
     m.add_class::<PyBackend>()?;
     m.add_class::<PyCodec>()?;
     m.add_class::<PyInputTableScan>()?;
     m.add_class::<PyOpenedDataset>()?;
+    m.add_class::<PyRows>()?;
+    m.add_class::<PyRun>()?;
     m.add_class::<PyScanDescription>()?;
     m.add_class::<PySchema>()?;
     Ok(())
