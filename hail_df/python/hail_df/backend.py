@@ -208,19 +208,27 @@ class Backend:
         frontend's do.
 
         Raises `InvalidAction` if the wheel's versions aren't the backend's or `formulation` is not
-        built in: only `FormulationRecord("union")` is. Raises `BackendError` if the dataset can no
-        longer be read as it was opened.
+        built in: only `FormulationRecord("union")` and `FormulationRecord("grouped-merge", groups)`
+        with a positive group count are. Raises `BackendError` if the dataset can no longer be read
+        as it was opened.
         """
         if not isinstance(formulation, FormulationRecord):
             raise TypeError(f"formulation must be a FormulationRecord, not {formulation!r}")
-        return self._backend.builtin_plan(
-            dataset._opened,
-            formulation.name,
-            formulation.groups,
-            formulation.split_points,
-            DATAFUSION_MAJOR,
-            WIRE_VERSION,
-        )
+        try:
+            return self._backend.builtin_plan(
+                dataset._opened,
+                formulation.name,
+                formulation.groups,
+                formulation.split_points,
+                DATAFUSION_MAJOR,
+                WIRE_VERSION,
+            )
+        except OverflowError as error:
+            # A count the native call can't take, such as a negative one, is no built-in's.
+            raise InvalidAction(
+                f"formulation {formulation.name!r} has no built-in plan with "
+                f"groups={formulation.groups}"
+            ) from error
 
     def start(
         self,

@@ -105,6 +105,13 @@ API. Each returns an `OrderedFrame`: its `frame`, the `ordering` a run holds its
 
 - `formulations.union(ctx, dataset)` sorts the union of every input table's scan by the dataset's
   ordering, for one file (`OutputLayout.SINGLE_FILE`).
+- `formulations.grouped_merge(ctx, dataset, groups)` splits the input tables, in name order, into
+  `groups` contiguous, count-balanced input groups, larger groups first and clamped to one input
+  table per group. It sorts each group's union and unions the groups with no sort above them, for
+  one file (`OutputLayout.SINGLE_FILE`). The run's root assertion merges the groups, and each sort
+  is an established order, so the plan is a merge per group beneath a final merge, with no
+  `SortExec`. With one group, the plan is the union formulation's. Its formulation record holds the
+  group count as given, above the input table count too. A count below 1 raises `ValueError`.
 
 `backend.builtin_plan(dataset, formulation)` returns the plan bytes of the Rust plan builder of the
 formulation a `FormulationRecord` names, over the dataset's input tables, with every scan encoded as
@@ -120,8 +127,9 @@ built_in = backend.start(
 ).wait()
 ```
 
-Union, `FormulationRecord("union")`, is the one built-in plan so far. Any other record raises
-`InvalidAction`. The Rust plan builder discovers the dataset again, so a dataset that can no longer
+`FormulationRecord("union")` and `FormulationRecord("grouped-merge", groups=n)`, with a positive
+`n`, have built-in plans. Any other record raises `InvalidAction`, including a grouped-merge with no
+group count or with split points. The Rust plan builder discovers the dataset again, so a dataset that can no longer
 be read with the input tables it was opened with raises `BackendError`.
 
 ## Running a plan

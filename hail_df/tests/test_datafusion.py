@@ -32,9 +32,11 @@ def test_no_other_module_of_the_package_imports_datafusion():
 
 def test_it_exports_the_names_of_the_datafusion_wheel_the_package_uses():
     import datafusion
+    import datafusion.expr
 
     assert hail_df.datafusion.DataFrame is datafusion.DataFrame
     assert hail_df.datafusion.SessionContext is datafusion.SessionContext
+    assert hail_df.datafusion.SortExpr is datafusion.expr.SortExpr
     assert hail_df.datafusion.col is datafusion.col
 
 
