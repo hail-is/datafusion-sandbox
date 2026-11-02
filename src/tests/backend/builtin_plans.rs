@@ -120,6 +120,7 @@ fn assert_explains_alike(
     let [builtin, frontend] = [builtin, frontend].map(|bytes| {
         let action = Action::Explain {
             ordering: ordering.to_vec(),
+            write: None,
         };
         let outcome = run(fixture, bytes, action, settings);
         let Outcome::Plan(plan) = outcome else {

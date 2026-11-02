@@ -29,7 +29,11 @@ use datafusion::{
     logical_expr::{LogicalPlan, TableScan, TableSource},
     prelude::SessionContext,
 };
-use std::{collections::HashMap, slice, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    slice,
+    sync::Arc,
+};
 
 /// The scan descriptions `plan` reads, each once, in the order the plan first reads them,
 /// subqueries included.
@@ -51,17 +55,28 @@ pub fn descriptions(plan: &LogicalPlan) -> Result<Vec<ScanDescription>> {
     Ok(descriptions)
 }
 
-/// `plan` with every described scan reopened through `ctx` as the sorted-table scan of its input
-/// table, listing the input table's files now. Each dataset is discovered once.
+/// A decoded plan with its described scans reopened, and what its input tables hold.
+#[derive(Debug)]
+pub struct Reopened {
+    pub plan: LogicalPlan,
+    /// The union of the sample sets of the input tables the plan reads, sorted, each sample once.
+    pub sample_set: Vec<String>,
+}
+
+/// `plan` with its described scans reopened through `ctx`, and the sample set they cover.
+///
+/// Each scan becomes the sorted-table scan of its input table, listing the input table's files now,
+/// and the sample set is the one those input tables declare now. Each dataset is discovered once.
 ///
 /// # Errors
 ///
 /// Returns an error if the plan reads a table that is not a scan description, a dataset cannot be
 /// discovered or no longer has a described input table, or an input table's scan reads a
 /// different schema than its description was handed out with.
-pub async fn reopen(ctx: &SessionContext, plan: LogicalPlan) -> Result<LogicalPlan> {
+pub async fn reopen(ctx: &SessionContext, plan: LogicalPlan) -> Result<Reopened> {
     let mut datasets = HashMap::<(String, InputFormat, RowOrdering), Dataset>::new();
     let mut sources = HashMap::<ScanDescription, Arc<dyn TableSource>>::new();
+    let mut sample_set = BTreeSet::<String>::new();
     for description in descriptions(&plan)? {
         let key = (
             description.dataset_path.clone(),
@@ -85,11 +100,9 @@ pub async fn reopen(ctx: &SessionContext, plan: LogicalPlan) -> Result<LogicalPl
                 description.dataset_path
             ))
         })?;
-        let read = dataset
-            .restrict_to(slice::from_ref(&description.input_table))?
-            .read(ctx)
-            .await?
-            .into_unoptimized_plan();
+        let input_table = dataset.restrict_to(slice::from_ref(&description.input_table))?;
+        sample_set.extend(input_table.sample_set());
+        let read = input_table.read(ctx).await?.into_unoptimized_plan();
         let LogicalPlan::TableScan(scan) = read else {
             return Err(DataFusionError::Internal(format!(
                 "input table '{}' of dataset '{}' read as a plan that is not one scan: {read}",
@@ -98,7 +111,7 @@ pub async fn reopen(ctx: &SessionContext, plan: LogicalPlan) -> Result<LogicalPl
         };
         sources.insert(description, scan.source);
     }
-    plan.transform_up_with_subqueries(|node| {
+    let plan = plan.transform_up_with_subqueries(|node| {
         let LogicalPlan::TableScan(scan) = node else {
             return Ok(Transformed::no(node));
         };
@@ -123,8 +136,11 @@ pub async fn reopen(ctx: &SessionContext, plan: LogicalPlan) -> Result<LogicalPl
             source: Arc::clone(source),
             ..scan
         })))
+    })?;
+    Ok(Reopened {
+        plan: plan.data,
+        sample_set: sample_set.into_iter().collect(),
     })
-    .map(|transformed| transformed.data)
 }
 
 /// `plan`, built over a dataset's input tables, with every scan swapped for the one among `scans`

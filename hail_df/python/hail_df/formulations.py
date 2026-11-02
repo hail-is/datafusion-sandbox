@@ -2,18 +2,10 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import Enum
 from functools import reduce
 
-from hail_df.backend import Dataset, FormulationRecord, InputTable, SortColumn
+from hail_df.backend import Dataset, FormulationRecord, InputTable, OutputLayout, SortColumn
 from hail_df.datafusion import DataFrame, SessionContext, SortExpr, col
-
-
-class OutputLayout(Enum):
-    """How a write lays a formulation's rows out at the output path."""
-
-    SINGLE_FILE = "single_file"
-    FILE_PER_PARTITION = "file_per_partition"
 
 
 @dataclass(frozen=True)

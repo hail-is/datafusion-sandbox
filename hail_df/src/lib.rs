@@ -22,11 +22,12 @@ use datafusion_ffi::{
 use datafusion_sandbox::{
     backend::{
         self, Action, ErrorCode, InputTableScan, OpenedDataset, Outcome, ResolveFromUrls, Run,
-        Settings, Versions,
+        Settings, Versions, Write,
         codec::{CODEC_ID, Codec},
         scan_description::{DescribedScan, ScanDescription},
     },
-    metrics_directory::FormulationRecord,
+    metrics_directory::{FormulationRecord, MetricsDirectory},
+    ordered_frame::OutputLayout,
     row_ordering::SortColumn,
 };
 use pyo3::{
@@ -209,20 +210,93 @@ impl PyAction {
         })
     }
 
-    /// Render the plan of a run that drains the rows in `ordering`, without running it.
+    /// Render the plan of a run that drains the rows in `ordering`, or performs `write`, without
+    /// running it.
     #[staticmethod]
-    fn explain(ordering: Vec<(String, bool, bool)>) -> Self {
+    #[pyo3(signature = (ordering, write=None))]
+    fn explain(ordering: Vec<(String, bool, bool)>, write: Option<&PyWrite>) -> Self {
         Self(Action::Explain {
             ordering: sort_columns(ordering),
+            write: write.map(|write| write.0.clone()),
         })
     }
 
-    /// Run the plan, draining the rows in `ordering`, and render it with per-operator metrics.
+    /// Run the plan, draining the rows in `ordering` or performing `write`, and render it with
+    /// per-operator metrics.
     #[staticmethod]
-    fn explain_analyze(ordering: Vec<(String, bool, bool)>) -> Self {
+    #[pyo3(signature = (ordering, write=None))]
+    fn explain_analyze(ordering: Vec<(String, bool, bool)>, write: Option<&PyWrite>) -> Self {
         Self(Action::ExplainAnalyze {
             ordering: sort_columns(ordering),
+            write: write.map(|write| write.0.clone()),
         })
+    }
+
+    /// Perform `write`.
+    #[staticmethod]
+    fn write(write: &PyWrite) -> Self {
+        Self(Action::Write(write.0.clone()))
+    }
+
+    /// Perform `write`, and record the run under `metrics_directory` with the formulation record of
+    /// `name`, `groups` and `split_points`.
+    #[staticmethod]
+    fn measured_write(
+        write: &PyWrite,
+        metrics_directory: &str,
+        name: String,
+        groups: Option<usize>,
+        split_points: Option<String>,
+    ) -> Self {
+        Self(Action::MeasuredWrite {
+            write: write.0.clone(),
+            metrics_directory: MetricsDirectory::new(metrics_directory),
+            formulation: FormulationRecord {
+                name,
+                groups,
+                split_points,
+            },
+        })
+    }
+}
+
+/// A write of a plan's rows, as the backend takes it.
+#[pyclass(name = "Write", frozen)]
+struct PyWrite(Write);
+
+#[pymethods]
+impl PyWrite {
+    /// A write to `output_path` in the format named `output_format`, with `compression` or the
+    /// format's default, recording `ordering`, in the layout named `layout`, with a sample
+    /// annotation table beside the file if it should `annotate_samples`.
+    #[new]
+    fn new(
+        output_path: String,
+        output_format: &str,
+        compression: Option<&str>,
+        ordering: Vec<(String, bool, bool)>,
+        layout: &str,
+        annotate_samples: bool,
+    ) -> PyResult<Self> {
+        let layout = match layout {
+            "single_file" => OutputLayout::SingleFile,
+            "file_per_partition" => OutputLayout::FilePerPartition,
+            _ => {
+                return Err(InvalidAction::new_err(format!(
+                    "unknown output layout '{layout}'"
+                )));
+            }
+        };
+        Write::new(
+            output_path,
+            output_format,
+            compression,
+            sort_columns(ordering),
+            layout,
+            annotate_samples,
+        )
+        .map(Self)
+        .map_err(|e| raised(&e))
     }
 }
 
@@ -265,7 +339,9 @@ impl PyRun {
     }
 
     /// Blocks until the run ends, with the interpreter released, and hands back its Outcome: the
-    /// rows of a collect, or the plan text of an explain, as a string.
+    /// rows of a collect, the plan text of an explain as a string, the rows a write wrote as an
+    /// integer, or the rows a measured write wrote and the names of the metrics it could not record
+    /// as a tuple.
     fn wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match py.detach(|| LazyLock::force(&self.ended)) {
             Ok(Outcome::Rows { schema, batches }) => PyRows {
@@ -274,6 +350,11 @@ impl PyRun {
             }
             .into_bound_py_any(py),
             Ok(Outcome::Plan(plan)) => plan.into_bound_py_any(py),
+            Ok(Outcome::RowsWritten(rows_written)) => rows_written.into_bound_py_any(py),
+            Ok(Outcome::Measured {
+                rows_written,
+                unrecorded_metrics,
+            }) => (*rows_written, unrecorded_metrics.clone()).into_bound_py_any(py),
             Err(error) => Err(raised(error)),
         }
     }
@@ -496,5 +577,6 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRun>()?;
     m.add_class::<PyScanDescription>()?;
     m.add_class::<PySchema>()?;
+    m.add_class::<PyWrite>()?;
     Ok(())
 }

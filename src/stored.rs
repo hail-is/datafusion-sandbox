@@ -52,7 +52,7 @@ async fn list_files_by_extension(
 
 /// Whether a path segment names a hidden entry, such as macOS Finder's `.DS_Store`, which no
 /// stored table owns.
-fn is_hidden(segment: &str) -> bool {
+pub(crate) fn is_hidden(segment: &str) -> bool {
     segment.starts_with('.')
 }
 

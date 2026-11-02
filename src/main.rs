@@ -22,10 +22,9 @@ use datafusion_sandbox::metrics_directory::{Grid, MetricsDirectory};
 use datafusion_sandbox::ordered_frame::OutputLayout;
 use datafusion_sandbox::pipeline::{self, PipelineOptions};
 use datafusion_sandbox::row_ordering::RowOrdering;
-use datafusion_sandbox::stored::dataset::sample_annotation_table::annotated_stem;
 use datafusion_sandbox::stored::locus_sorted_table::{LocusSortedTable, split_points};
 use datafusion_sandbox::throughput_probe::{ProbeKind, ProbeSettings};
-use datafusion_sandbox::write::WriteTarget;
+use datafusion_sandbox::write::{WriteTarget, check_one_file_path};
 use std::{
     num::{NonZeroU32, NonZeroUsize},
     path::Path,
@@ -649,9 +648,7 @@ fn validate_input_path(input_path: &str, input_format: &InputFormat) -> Result<(
 
 /// Rejects an output path that does not name what the formulation's output layout writes. Under a
 /// file-per-partition layout it names a directory, which carries no extension. Under a one-file
-/// layout it names a file, which must be named as a later run's discovery finds an input table:
-/// with the format's extension, a stem that does not name a sample annotation table, and no
-/// trailing slash, which would name a directory.
+/// layout it names a file, as [`check_one_file_path`] requires.
 fn validate_output_path(
     output_path: &str,
     output_format: &OutputFormat,
@@ -666,35 +663,8 @@ fn validate_output_path(
                  the {formulation} formulation writes one file per partition into"
             )))
         }
-        (OutputLayout::SingleFile, _) if output_path.ends_with('/') => {
-            Err(DataFusionError::Configuration(format!(
-                "output path '{output_path}' has a trailing slash, but the {formulation} \
-                 formulation writes one file"
-            )))
-        }
-        (OutputLayout::SingleFile, None) => Err(DataFusionError::Configuration(format!(
-            "output path '{output_path}' has no extension; the {formulation} formulation's file \
-             needs extension '.{}' for a later run to read it",
-            output_format.extension()
-        ))),
-        (OutputLayout::SingleFile, Some(extension)) if extension != output_format.extension() => {
-            Err(DataFusionError::Configuration(format!(
-                "output path '{output_path}' has extension '.{extension}', which contradicts output format '{output_format}'"
-            )))
-        }
-        (OutputLayout::SingleFile, Some(_))
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| annotated_stem(name, output_format.extension()))
-                .is_some() =>
-        {
-            Err(DataFusionError::Configuration(format!(
-                "output path '{output_path}' is named as a sample annotation table, which a later \
-                 run would not read as the {formulation} formulation's data"
-            )))
-        }
-        (OutputLayout::FilePerPartition, None) | (OutputLayout::SingleFile, Some(_)) => Ok(()),
+        (OutputLayout::SingleFile, _) => check_one_file_path(output_path, output_format),
+        (OutputLayout::FilePerPartition, None) => Ok(()),
     }
 }
 
@@ -1367,6 +1337,7 @@ mod tests {
             ("out/g0.vortex/", "trailing slash"),
             ("out/g0.samples.vortex", "sample annotation table"),
             ("out/.samples.vortex", "sample annotation table"),
+            ("out/.g0.vortex", "hidden"),
         ] {
             let commands: [&[&str]; 3] = [
                 &["combine-refs", "--formulation", "union"],

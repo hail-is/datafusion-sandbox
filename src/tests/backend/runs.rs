@@ -87,7 +87,10 @@ fn explaining_a_sorted_union_under_the_hostile_session_shows_a_merge_tree_and_no
             let outcome = backend_over(fixture)
                 .start(
                     &bytes,
-                    Action::Explain { ordering },
+                    Action::Explain {
+                        ordering,
+                        write: None,
+                    },
                     &hostile(),
                     None,
                     Versions::backend(),
@@ -151,8 +154,12 @@ fn analyzing_a_plan_runs_it_and_shows_per_operator_metrics_beside_every_plan_sec
 
         let analyzed = plan_of(Action::ExplainAnalyze {
             ordering: ordering.clone(),
+            write: None,
         });
-        let explained = plan_of(Action::Explain { ordering });
+        let explained = plan_of(Action::Explain {
+            ordering,
+            write: None,
+        });
 
         for section in ["frontend_plan", "logical_plan", "physical_plan"] {
             assert!(analyzed.contains(section), "{section}:\n{analyzed}");
@@ -185,6 +192,7 @@ fn analyzing_a_plan_the_root_assertion_holds_only_by_a_sort_fails_with_the_order
                     ascending: true,
                     nulls_first: false,
                 }],
+                write: None,
             },
             &Settings::new(),
             None,
@@ -204,8 +212,14 @@ fn every_action_with_an_empty_ordering_fails_to_start_with_the_invalid_action_co
 
     for action in [
         Action::Collect { ordering: vec![] },
-        Action::Explain { ordering: vec![] },
-        Action::ExplainAnalyze { ordering: vec![] },
+        Action::Explain {
+            ordering: vec![],
+            write: None,
+        },
+        Action::ExplainAnalyze {
+            ordering: vec![],
+            write: None,
+        },
     ] {
         let error = backend_over(fixture)
             .start(
@@ -587,6 +601,7 @@ fn only_a_backend_verifying_order_checks_its_rows_order_at_run_time() {
                 &bytes,
                 Action::Explain {
                     ordering: ordering.clone(),
+                    write: None,
                 },
                 &Settings::new(),
                 None,

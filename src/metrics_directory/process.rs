@@ -1,6 +1,6 @@
 //! The measurement of the running process that a run record carries.
 //!
-//! A combiner run's plan-level metrics come from `DataFusion`'s operators; what the process as a
+//! A run's plan-level metrics come from `DataFusion`'s operators; what the process as a
 //! whole held in memory does not, since the pipeline configures no memory pool and scans and
 //! merge trees reserve nothing from one. The kernel's peak resident set size is the figure that
 //! sees scan buffers and the pages the allocator keeps resident, under any allocator, and this
@@ -26,6 +26,7 @@ compile_error!("the unit of getrusage's ru_maxrss is known only for macOS and Li
 ///
 /// A whole-process figure: it counts scan buffers and the pages the allocator keeps resident,
 /// under any allocator. The CLI runs one combiner run per process, so there it is the run's peak.
+/// A process that holds a backend runs many, so there it is the peak of everything so far.
 ///
 /// # Errors
 ///

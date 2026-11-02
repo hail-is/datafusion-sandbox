@@ -79,7 +79,8 @@ or the directory `data/combined`. It holds the run's sample ids, sorted, in one 
 makes the output a complete multi-sample input table for a later run. Any write of one file,
 the allele combiner's included, must be named as a later run finds an input table, so its path
 needs the output format's extension and no trailing slash, and a path such as
-`g0.samples.vortex`, named as an annotation table, is rejected. A write that fails leaves none, and a probe, a
+`g0.samples.vortex`, named as an annotation table, or `.g0.vortex`, a hidden file discovery skips,
+is rejected. A write that fails leaves none, and a probe, a
 collect, an explain or an allele combiner write writes none. See
 [ADR 0018](adr/0018-declare-a-multi-sample-input-tables-samples-in-a-sample-annotation-table.md).
 

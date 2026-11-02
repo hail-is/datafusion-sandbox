@@ -2,10 +2,12 @@
 //! backend through its object-store resolver.
 //!
 //! The tests here open datasets and read back plan bytes' scan descriptions; `runs` starts plan
-//! bytes and waits for their Outcomes; `builtin_plans` starts a built-in formulation's plan bytes.
+//! bytes and waits for their Outcomes; `builtin_plans` starts a built-in formulation's plan bytes;
+//! `writes` writes a plan's rows to in-memory stores of their own, measured or not.
 
 mod builtin_plans;
 mod runs;
+mod writes;
 
 use crate::{
     backend::{
