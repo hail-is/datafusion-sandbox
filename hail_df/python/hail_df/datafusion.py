@@ -6,10 +6,19 @@ build of datafusion-python, should a custom logical node ever need one, changes 
 """
 
 import datafusion
-from datafusion import DataFrame, SessionContext, col
+from datafusion import DataFrame, ScalarUDF, SessionContext, col, lit
 from datafusion.expr import SortExpr
 
-__all__ = ["DATAFUSION_MAJOR", "WIRE_VERSION", "DataFrame", "SessionContext", "SortExpr", "col"]
+__all__ = [
+    "DATAFUSION_MAJOR",
+    "WIRE_VERSION",
+    "DataFrame",
+    "ScalarUDF",
+    "SessionContext",
+    "SortExpr",
+    "col",
+    "lit",
+]
 
 # The DataFusion major the wheel builds plans on, which every backend call checks.
 DATAFUSION_MAJOR: int = int(datafusion.__version__.split(".")[0])

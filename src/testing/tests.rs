@@ -1,6 +1,7 @@
 //! Module tests for the `testing` module's children; `testing` itself only declares them, so it
 //! has no suite of its own.
 
+mod assertion_marker;
 mod columns;
 mod fixture;
 mod formulation_plans;

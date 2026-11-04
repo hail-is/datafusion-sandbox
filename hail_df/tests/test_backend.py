@@ -17,6 +17,7 @@ from hail_df import (
     Explain,
     ExplainAnalyze,
     InvalidAction,
+    OrderingAssertionFailed,
     PlanText,
     Rows,
     SortColumn,
@@ -457,15 +458,18 @@ def test_invalid_action_is_a_backend_error():
     assert issubclass(InvalidAction, BackendError)
 
 
-def test_a_run_failing_raises_backend_error_from_wait(backend, dataset):
+def test_a_run_failing_its_root_assertion_raises_ordering_assertion_failed_from_wait(
+    backend, dataset
+):
     ctx = hail_df.context()
     # Rows sorted by locus then alleles aren't in alleles order, unless the backend inserts a sort.
     action = Collect([SortColumn("alleles", True, False)])
 
     run = backend.start(ctx, union_frame(ctx, dataset), action)
 
-    with pytest.raises(BackendError, match="ordering_assertion_failed") as raised:
+    with pytest.raises(OrderingAssertionFailed, match="ordering_assertion_failed") as raised:
         run.wait()
+    assert isinstance(raised.value, BackendError)
     assert not isinstance(raised.value, InvalidAction)
 
 

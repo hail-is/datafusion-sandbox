@@ -82,8 +82,9 @@ plan_bytes = group.sort(*keys).logical_plan().to_bytes(ctx)
 ```
 
 `hail_df.context()` returns a fresh datafusion-python `SessionContext` with the backend's codec
-installed. Plans over a dataset's scans encode only in such a session. Keep the context alive while
-its frames are in use: the wheel's frames reach their session through it.
+installed and the `assert_ordered` function registered. Plans over a dataset's scans encode only in
+such a session. Keep the context alive while its frames are in use: the wheel's frames reach their
+session through it.
 
 `Dataset.read(ctx, names=None)` returns a `DataFrame` over the named input tables: the union of
 their scans, or the single scan of one. With no names it reads every input table, in name order. An
@@ -95,6 +96,48 @@ descriptions.
 descriptions the plan reads, each once, in the order the plan first reads them. Bytes that are not
 such a plan raise `BackendError`, and a plan carrying a payload the backend refuses raises
 `InvalidAction`.
+
+## Asserting an order mid-plan
+
+`hail_df.assert_ordered(frame, ordering)` marks a point in a plan where rows already arrive in an
+order, given as plain sort columns. The backend holds the order there with a merge tree, and fails
+before execution if only a sort it inserted could meet it:
+
+```python
+frame = hail_df.assert_ordered(dataset.read(ctx), dataset.ordering).select("contig", "position")
+keys = [hail_df.SortColumn("contig", True, False), hail_df.SortColumn("position", True, False)]
+
+backend.start(ctx, frame, hail_df.Collect(keys)).wait()
+```
+
+Here the input tables merge beneath the assertion, and the projection runs above the merge. For now,
+an assertion always requires one partition in its order.
+
+It returns the frame with a stock-shaped marker above it:
+`Filter(assert_ordered(<key column>, '<direction>', …))`, each direction one of `ASC NULLS LAST`,
+`ASC NULLS FIRST`, `DESC NULLS LAST` and `DESC NULLS FIRST`. The function is registered in
+`hail_df.context()` and in the backend, and crosses plan bytes by name. The marker shows in an
+explain's `frontend_plan` section as written; in the `logical_plan` and `physical_plan` sections it
+has become an `OrderingAssertion` and an `OrderingAssertionExec`.
+
+- An order the rows lack raises `OrderingAssertionFailed`, as does a key the plan computes, since
+  nothing states the order of a computed column. It raises from `wait`, and no rows are read or
+  written.
+- A sort the frame wrote is an established order, so an assertion of that sort's order above it
+  holds, whether or not the scans have that order.
+- An ordering with no keys raises `ValueError`.
+- A marker the backend can't read raises `InvalidAction` from `start`: one that is only part of a
+  filter's predicate, or that sits anywhere but a filter, or with arguments other than pairs of a
+  column and one of the directions above. Only a marker written by hand can be one; `assert_ordered`
+  always writes a filter of its own.
+- The wheel can't evaluate a marker, and neither can the backend: it marks a plan and computes
+  nothing.
+
+An assertion that contradicts the Action's ordering, such as one of `(position, contig, alleles)`
+beneath a `Collect` by `(contig, position, alleles)`, fails before execution too. When the two orders
+agree on a key at the same place, as these do on `alleles`, it fails with plain `BackendError` rather
+than `OrderingAssertionFailed`, because of a DataFusion bug tracked in
+[#325](https://github.com/hail-is/datafusion-sandbox/issues/325).
 
 ## Formulations
 
@@ -297,23 +340,26 @@ settings = {"hail_df.target_partitions": "8", "hail_df.repartition_file_min_size
 ### Errors
 
 Every failure raises `BackendError`, or one of its subclasses: `InvalidAction` for a call the backend
-doesn't take, and `RunCancelled` for a cancelled run. `start` raises `InvalidAction` before the run
+doesn't take, `OrderingAssertionFailed` for an order the plan could hold only by a sort the backend
+inserted, and `RunCancelled` for a cancelled run. `start` raises `InvalidAction` before the run
 begins; a run that fails or is cancelled raises from `wait`:
 
 ```python
 try:
     outcome = backend.start(ctx, frame, hail_df.Collect(dataset.ordering)).wait()
 except hail_df.InvalidAction:
-    ...  # versions, a setting, an empty ordering, a write it can't perform, a run id still going, or a Python UDF in the plan
+    ...  # versions, a setting, an empty ordering, a write it can't perform, a run id still going, a Python UDF in the plan, or a marker it can't read
+except hail_df.OrderingAssertionFailed:
+    ...  # an order the plan could hold only by an inserted sort, at the root or at an `assert_ordered`
 except hail_df.RunCancelled:
     ...  # the run was cancelled
 except hail_df.BackendError:
-    ...  # anything else, such as an order the plan could hold only by an inserted sort
+    ...  # anything else
 ```
 
-The message of each starts with the error code in the table below. The `ordering_assertion_failed`
-code raises plain `BackendError` for now. A Python UDF inlined into a frame
-raises `InvalidAction`: Python UDFs aren't part of the MVP.
+The message of each starts with the error code in the table below. `OrderingAssertionFailed` is
+raised before the plan executes, so no rows are read or written, and a measured write records it as
+`failed`. A Python UDF inlined into a frame raises `InvalidAction`: Python UDFs aren't part of the MVP.
 
 Passing something that is not an Action, or a setting whose name or value is not a string, raises
 `TypeError` in Python, before the backend sees the call. A string the backend can't take, an unknown
@@ -329,9 +375,10 @@ its `Outcome`.
 The backend decodes the plan with its own session, so functions resolve by name from its registry.
 Each scan decodes to a placeholder holding its description, and the run reopens each as the sorted
 scan the Rust formulations read, listing the input table's files then: a file added after the plan
-was encoded is read. Before the logical optimizer, every sort the frontend wrote becomes an
-established order, and the Action's ordering becomes an ordering assertion at the root, so the
-optimizer holds it with a merge tree.
+was encoded is read. Before the logical optimizer, every `assert_ordered` marker becomes an ordering
+assertion where the frontend wrote it, every sort the frontend wrote becomes an established order,
+and the Action's ordering becomes an ordering assertion at the root, so the optimizer holds each
+with a merge tree.
 
 The backend's Actions:
 
@@ -361,8 +408,8 @@ Every failure is a `BackendError` with a stable `ErrorCode`:
 
 | Code | Name | Raised for |
 | --- | --- | --- |
-| `InvalidAction` | `invalid_action` | versions other than the backend's, an unknown or malformed setting, an empty ordering, an explain whose write holds another ordering, an unknown output format, a compression mode the format doesn't take, an output path that names no readable file, a file-per-partition write, a write annotating samples over no input tables, a measured write not over exactly one dataset, a run id whose run is still going, a formulation with no built-in plan, a payload outside the `DFPYCHN` frame or framed at another version, an inlined Python UDF (`DFPYUD*`) |
-| `OrderingAssertionFailed` | `ordering_assertion_failed` | a plan the root assertion could hold only by a sort the backend inserted |
+| `InvalidAction` | `invalid_action` | versions other than the backend's, an unknown or malformed setting, an empty ordering, an explain whose write holds another ordering, an unknown output format, a compression mode the format doesn't take, an output path that names no readable file, a file-per-partition write, a write annotating samples over no input tables, a measured write not over exactly one dataset, a run id whose run is still going, a formulation with no built-in plan, a payload outside the `DFPYCHN` frame or framed at another version, an inlined Python UDF (`DFPYUD*`), an `assert_ordered` marker that isn't a filter's whole predicate or whose arguments aren't pairs of a key column and a direction |
+| `OrderingAssertionFailed` | `ordering_assertion_failed` | a plan an ordering assertion, at the root or at a marker, could hold only by a sort the backend inserted or through a node that keeps no input's order |
 | `RunCancelled` | `run_cancelled` | a cancelled run |
 | `Backend` | `backend_error` | anything else |
 
@@ -375,7 +422,8 @@ The package's own code imports DataFusion only through `hail_df.datafusion`, so 
 own build of datafusion-python stays a change to one module. Its tests check this.
 
 The codec is installed under the id `hail_df`, its `__datafusion_codec_id__`. It writes each
-scan's description as the provider's payload and nothing for functions, which cross by name. The
+scan's description as the provider's payload and nothing for functions, which cross by name, as
+`assert_ordered` does: the wheel holds it as an FFI function from the extension. The
 wheel frames each payload under that id; the backend reads payloads back only from that frame, at
 its version 1. The backend refuses a function the wheel inlined as a pickled Python payload:
 Python UDFs aren't part of the MVP.

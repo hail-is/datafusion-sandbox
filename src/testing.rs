@@ -16,6 +16,7 @@
 //!
 //! `cfg(test)`:
 //!
+//! - `assertion_marker` builds an ordering assertion's marker as a frontend lowers it.
 //! - `columns` reads a record batch's columns as plain values and asserts a schema's columns.
 //! - `formulation_plans` discovers datasets over the shared fixtures and plans formulations over
 //!   them through a sink, for the suites of `formulation` and its plan builders.
@@ -29,6 +30,8 @@
 //! - `session` builds the hostile session config.
 //! - `wheel_codec` frames a logical codec's payloads as the `datafusion` Python wheel does.
 
+#[cfg(test)]
+pub(crate) mod assertion_marker;
 #[cfg(test)]
 pub(crate) mod columns;
 pub mod fixture;
