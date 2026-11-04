@@ -105,7 +105,7 @@ is another), combined table
 
 **Output layout**:
 How a write lays a formulation's rows out at the output path: one file, or one file per partition of
-its frame. The formulation chooses it; the action does not.
+its frame. The formulation chooses it; an action can carry the choice but does not make it.
 _Avoid_: layout (unqualified), partitioning, write mode
 
 **Output path**:

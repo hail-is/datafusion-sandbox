@@ -1,7 +1,7 @@
 //! The run record: the facts of one combiner run, and the table that holds one row per run.
 //!
 //! The record types are plain data. A [`FormulationRecord`] and a [`WriteRecord`] are read from a
-//! formulation and a write target, the combiner run supplies the other facts, and
+//! formulation and a write target, the runner supplies the other facts, and
 //! [`run_record_batch`] turns a record into its one-row batch. [`recorded_probe`] reads a
 //! throughput probe back out of a row of the table.
 

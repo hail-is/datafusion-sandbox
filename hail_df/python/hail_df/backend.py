@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from functools import reduce
 from typing import NamedTuple
 
@@ -21,11 +22,16 @@ __all__ = [
     "FormulationRecord",
     "InputTable",
     "InvalidAction",
+    "MeasuredWrite",
+    "MeasuredWritten",
+    "OutputLayout",
     "PlanText",
     "Rows",
+    "RowsWritten",
     "Run",
     "ScanDescription",
     "SortColumn",
+    "Write",
 ]
 
 
@@ -106,25 +112,67 @@ class Collect:
     ordering: Sequence[SortColumn]
 
 
+class OutputLayout(Enum):
+    """How a write lays rows out at its output path: one file, or one file per partition."""
+
+    SINGLE_FILE = "single_file"
+    FILE_PER_PARTITION = "file_per_partition"
+
+
+@dataclass(frozen=True)
+class Write:
+    """The Action that writes the rows, held in `ordering`, to `output_path` in `output_format`,
+    with `compression` or the format's default when None.
+
+    With `annotate_samples`, the sample annotation table written beside the output covers the union
+    of the sample sets of the input tables the plan's scans read. A data write that fails leaves no
+    table. An `OutputLayout.FILE_PER_PARTITION` layout raises `InvalidAction` until per-partition
+    assertions exist.
+    """
+
+    output_path: str
+    output_format: str
+    compression: str | None
+    ordering: Sequence[SortColumn]
+    layout: OutputLayout
+    annotate_samples: bool = False
+
+
+@dataclass(frozen=True)
+class MeasuredWrite:
+    """The Action that performs `write` and records the run under `metrics_directory` with
+    `formulation`: a run record, and for a completed run its run metrics.
+
+    The backend takes the record's dataset path, input format, row ordering, input table count and
+    sample count from the plan's scans. A plan that doesn't read exactly one dataset raises
+    `InvalidAction`.
+    """
+
+    write: Write
+    metrics_directory: str
+    formulation: "FormulationRecord"
+
+
 @dataclass(frozen=True)
 class Explain:
-    """The Action that renders the plan of a run that drains the rows, held in `ordering`, without
-    running it. `write`, the plan of a write instead, must be None until writes land."""
+    """The Action that renders the plan of a run that drains the rows, held in `ordering`, or
+    performs `write`, without running it. A `write` must hold the rows in the same `ordering`."""
 
     ordering: Sequence[SortColumn]
-    write: None = None
+    write: Write | None = None
 
 
 @dataclass(frozen=True)
 class ExplainAnalyze:
-    """The Action that runs the plan, draining the rows, held in `ordering`, and renders it with
-    per-operator metrics. `write`, a run that writes instead, must be None until writes land."""
+    """The Action that runs the plan, draining the rows, held in `ordering`, or performing `write`,
+    and renders it with per-operator metrics. A `write` must hold the rows in the same `ordering`,
+    and is performed as a `Write` is."""
 
     ordering: Sequence[SortColumn]
-    write: None = None
+    write: Write | None = None
 
 
-Action = Collect | Explain | ExplainAnalyze
+Action = Collect | Explain | ExplainAnalyze | Write | MeasuredWrite
 
 
 @dataclass(frozen=True)
@@ -141,6 +189,25 @@ class PlanText:
     `ExplainAnalyze` the `Plan with Metrics`."""
 
     text: str
+
+
+@dataclass(frozen=True)
+class RowsWritten:
+    """The Outcome of a `Write`: how many rows it wrote."""
+
+    rows_written: int
+
+
+@dataclass(frozen=True)
+class MeasuredWritten:
+    """The Outcome of a `MeasuredWrite`: how many rows it wrote, and what it could not record: the
+    names of the metrics its plan reported that the run metrics table has no column for."""
+
+    rows_written: int
+    unrecorded_metrics: tuple[str, ...]
+
+
+Outcome = Rows | PlanText | RowsWritten | MeasuredWritten
 
 
 @dataclass(frozen=True)
@@ -166,13 +233,20 @@ class Run:
         """The run's id, the one given to `Backend.start` or a generated one."""
         return self._run.run_id
 
-    def wait(self) -> Rows | PlanText:
+    def wait(self) -> Outcome:
         """Blocks until the run ends and returns its Outcome. Other Python threads keep running.
 
         Raises `BackendError` if the run failed. Waiting again hands back the same result.
         """
-        outcome = self._run.wait()
-        return PlanText(outcome) if isinstance(outcome, str) else Rows(pa.table(outcome))
+        match self._run.wait():
+            case str() as text:
+                return PlanText(text)
+            case int() as rows_written:
+                return RowsWritten(rows_written)
+            case (int() as rows_written, list() as unrecorded_metrics):
+                return MeasuredWritten(rows_written, tuple(unrecorded_metrics))
+            case rows:
+                return Rows(pa.table(rows))
 
 
 class Backend:
@@ -249,10 +323,11 @@ class Backend:
 
         Raises `InvalidAction`, before the run starts, if the wheel's versions aren't the
         backend's, a setting's name is unknown or its value doesn't parse, the Action's ordering is
-        empty or it asks for a write, or the plan carries a payload framed at another wire version
-        or an inlined Python function. Raises `BackendError` if the bytes are not otherwise a plan
-        encoded in such a session. Raises `TypeError` if `action` is not an Action, or a setting's
-        name or value is not a string.
+        empty, a write can't be performed as it asks, an explain's write holds another ordering, a
+        measured write's plan doesn't read exactly one dataset, or the plan carries a payload
+        framed at another wire version or an inlined Python function. Raises `BackendError` if the
+        bytes are not otherwise a plan encoded in such a session. Raises `TypeError` if `action` is
+        not an Action, or a setting's name or value is not a string.
         """
         native_action = _native_action(action)
         plan_bytes = (
@@ -272,16 +347,57 @@ class Backend:
         )
 
 
+def _native_write(write: Write | None) -> _native.Write | None:
+    """`write` as the backend takes it."""
+    if write is None:
+        return None
+    if not isinstance(write, Write):
+        raise TypeError(f"write must be a Write, not {write!r}")
+    layout = write.layout.value if isinstance(write.layout, OutputLayout) else write.layout
+    return _native.Write(
+        write.output_path,
+        write.output_format,
+        write.compression,
+        list(write.ordering),
+        layout,
+        write.annotate_samples,
+    )
+
+
 def _native_action(action: Action) -> _native.Action:
     """`action` as the backend takes it."""
-    if isinstance(action, Explain | ExplainAnalyze) and action.write is not None:
-        raise InvalidAction(f"{type(action).__name__} can't take a write yet: {action.write!r}")
-    ordering = list(getattr(action, "ordering", ()))
     match action:
         case Collect():
-            return _native.Action.collect(ordering)
+            return _native.Action.collect(list(action.ordering))
         case Explain():
-            return _native.Action.explain(ordering)
+            return _native.Action.explain(list(action.ordering), _native_write(action.write))
         case ExplainAnalyze():
-            return _native.Action.explain_analyze(ordering)
-    raise TypeError(f"action must be a Collect, Explain or ExplainAnalyze, not {action!r}")
+            return _native.Action.explain_analyze(
+                list(action.ordering), _native_write(action.write)
+            )
+        case Write():
+            return _native.Action.write(_native_write(action))
+        case MeasuredWrite():
+            return _native_measured_write(action)
+    raise TypeError(
+        f"action must be a Collect, Explain, ExplainAnalyze, Write or MeasuredWrite, not {action!r}"
+    )
+
+
+def _native_measured_write(action: MeasuredWrite) -> _native.Action:
+    """`action` as the backend takes it."""
+    if not isinstance(action.formulation, FormulationRecord):
+        raise TypeError(f"formulation must be a FormulationRecord, not {action.formulation!r}")
+    try:
+        return _native.Action.measured_write(
+            _native_write(action.write),
+            action.metrics_directory,
+            action.formulation.name,
+            action.formulation.groups,
+            action.formulation.split_points,
+        )
+    except OverflowError as error:
+        # A run record holds a group count as an unsigned count, so a negative one is no record's.
+        raise InvalidAction(
+            f"a run record can't hold groups={action.formulation.groups}"
+        ) from error

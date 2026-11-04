@@ -13,7 +13,7 @@ use crate::{
         generated::make_range_table,
         memory_store::MemoryStore,
     },
-    write::WriteTarget,
+    write::{WriteTarget, check_one_file_path},
 };
 
 use datafusion::{
@@ -269,5 +269,35 @@ fn a_parquet_write_records_its_ordering_as_sorting_columns_and_requires_none() {
                 );
             }
         }
+    }
+}
+
+/// A later run's discovery finds an input table named with the format's extension, so that is the
+/// path a one-file write checks for.
+#[test]
+fn a_one_file_path_needs_the_format_s_extension_and_no_other_name() {
+    let parquet = OutputFormat::PARQUET;
+    for path in [
+        "out/combined.parquet",
+        "gs://bucket/combined.parquet",
+        "memory://out/g.samples.d.parquet",
+        // Discovery skips a hidden entry of a dataset's root, not a root under a hidden directory.
+        ".cache/out/combined.parquet",
+    ] {
+        check_one_file_path(path, &parquet).unwrap();
+    }
+    check_one_file_path("combined.vortex", &OutputFormat::VORTEX).unwrap();
+
+    for (path, problem) in [
+        ("out/combined", "no extension"),
+        ("out/combined.parquet/", "trailing slash"),
+        ("out/combined.vortex", "contradicts output format 'parquet'"),
+        ("out/g.samples.parquet", "sample annotation table"),
+        ("out/.combined.parquet", "hidden"),
+        ("gs://bucket/.combined.parquet", "hidden"),
+    ] {
+        let message = check_one_file_path(path, &parquet).unwrap_err().to_string();
+        assert!(message.contains(path), "{message}");
+        assert!(message.contains(problem), "{message}");
     }
 }

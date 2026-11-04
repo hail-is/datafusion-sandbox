@@ -4,8 +4,8 @@
 //! ordering they arrive in as a plain sort list, and their output layout, and selects the file
 //! sink for the layout. The sink records the ordering in each file's metadata, where the format
 //! has a place for it, and requires none: the caller holds the rows in it, with an ordering
-//! assertion at the root of the frame. Validating an output path's extension against the format
-//! and layout remains the CLI's responsibility.
+//! assertion at the root of the frame. A write takes any output path; [`check_one_file_path`]
+//! states what a later run needs of one that names a file, for callers to refuse the rest.
 //!
 //! A throughput probe that writes never keeps its output, so it writes only to a [`VacantTarget`]:
 //! a target with nothing at its output path when checked, whose probe removes everything under
@@ -16,6 +16,7 @@ use crate::{
     ordered_frame::OutputLayout,
     row_ordering::SortColumn,
     sink::{self, ExecutedSink, PartitionedSinkExec, ProbedSink, SinkTarget},
+    stored::{dataset::sample_annotation_table::annotated_stem, is_hidden},
     throughput_probe::{ProbeKind, ProbeSettings},
 };
 
@@ -41,10 +42,52 @@ use datafusion::{
 };
 use datafusion_datasource::{file_groups::FileGroup, file_sink_config::FileOutputMode};
 use futures_util::TryStreamExt;
-use std::{io, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
+/// Checks that `output_path` names one file a later run's discovery finds as an input table.
+///
+/// That takes the extension of `output_format`, a file name that is not hidden and does not name a
+/// sample annotation table, and no trailing slash, which would name a directory.
+///
+/// # Errors
+///
+/// Returns a configuration error stating how the path falls short.
+pub fn check_one_file_path(output_path: &str, output_format: &OutputFormat) -> Result<()> {
+    let path = Path::new(output_path);
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    let wanted = output_format.extension();
+    let problem = if output_path.ends_with('/') {
+        "has a trailing slash, but it names one file".to_string()
+    } else {
+        match path.extension().and_then(|extension| extension.to_str()) {
+            None => format!(
+                "has no extension; a file needs extension '.{wanted}' for a later run to read it"
+            ),
+            Some(extension) if extension != wanted => format!(
+                "has extension '.{extension}', which contradicts output format '{output_format}'"
+            ),
+            Some(_) if file_name.is_some_and(|name| annotated_stem(name, wanted).is_some()) => {
+                "is named as a sample annotation table, which a later run would not read as data"
+                    .to_string()
+            }
+            Some(_) if file_name.is_some_and(is_hidden) => {
+                "is hidden, which a later run's discovery skips".to_string()
+            }
+            Some(_) => return Ok(()),
+        }
+    };
+    Err(DataFusionError::Configuration(format!(
+        "output path '{output_path}' {problem}"
+    )))
+}
 
 /// The output path and output format of a write.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct WriteTarget {
     pub output_path: String,
     pub output_format: OutputFormat,

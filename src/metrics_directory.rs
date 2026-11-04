@@ -19,6 +19,8 @@
 //! and the later one's files replace the earlier one's.
 //!
 //! - `run_record` holds the record types and fills and reads the run record table.
+//! - `run_facts` gathers what a run knows into its run record, as the run ends.
+//! - `process` measures the running process for the run record.
 //! - `progress_samples` fills and reads a throughput probe's progress samples table.
 //! - `run_metrics` fills the run metrics table from an executed plan.
 //! - `replay` judges a shadow probe again under a [`Grid`], in memory, and fills the replay tables.
@@ -31,8 +33,10 @@
 //! The tables share one way of storing values: counts and durations as saturating `UInt64`
 //! nanoseconds, timestamps as nanoseconds in UTC. The helpers at the end of this module state it.
 
+mod process;
 mod progress_samples;
 mod replay;
+mod run_facts;
 mod run_metrics;
 mod run_record;
 
@@ -40,6 +44,7 @@ mod run_record;
 mod tests;
 
 pub use replay::Grid;
+pub use run_facts::{Coverage, MeasuredRows, RunFacts, Started};
 pub use run_record::{FormulationRecord, ProbeRecord, RunRecord, RunStatus, WriteRecord};
 
 pub(crate) use progress_samples::progress_samples_schema;

@@ -88,6 +88,41 @@ fn reopening_turns_every_described_scan_into_a_scan_of_its_input_table() {
     }
 }
 
+/// A plan's sample set is that of the input tables it reads, whichever else its dataset has, and
+/// each sample comes once, however many scans read it. Opening an input table under two row
+/// orderings describes two scans of the same samples.
+#[test]
+fn reopening_hands_back_the_union_of_the_sample_sets_of_the_input_tables_the_plan_reads() {
+    let fixture =
+        fixture::mixed_dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::Packed);
+    let register: Register = Arc::new(|ctx| fixture.register(ctx));
+    let path = fixture.table_path().as_str();
+    let single = description(path, fixture.input_format(), "s=NA18534");
+    let again = ScanDescription {
+        row_ordering: RowOrdering::locus_then_alleles(),
+        ..single.clone()
+    };
+    let g0 = description(path, fixture.input_format(), "g0");
+    let plan = LogicalPlanBuilder::from(described(&register, single))
+        .union(described(&register, g0))
+        .unwrap()
+        .union(described(&register, again))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let sample_set = pipeline::run(
+        move |ctx| async move {
+            register(&ctx);
+            Ok(scan_reopening::reopen(&ctx, plan).await?.sample_set)
+        },
+        PipelineOptions::single_threaded(),
+    )
+    .unwrap();
+
+    assert_eq!(sample_set, ["HG00308", "HG00592", "NA18534"]);
+}
+
 /// Reopening lists the input table's files then, so it reads a file added after the scan was
 /// described.
 #[test]
@@ -312,7 +347,7 @@ fn reopened(register: &Register, plan: LogicalPlan) -> Result<Vec<RecordBatch>> 
     pipeline::run(
         move |ctx| async move {
             register(&ctx);
-            let plan = scan_reopening::reopen(&ctx, plan).await?;
+            let plan = scan_reopening::reopen(&ctx, plan).await?.plan;
             DataFrame::new(ctx.state(), plan).collect().await
         },
         PipelineOptions::single_threaded(),

@@ -1,18 +1,10 @@
 //! A resolved combiner run, the action it performs, and its outcome.
-//!
-//! - `process` measures the running process for the run record.
-
-mod process;
-
-#[cfg(test)]
-mod tests;
 
 use crate::{
     format::InputFormat,
     formulation::Formulation,
     metrics_directory::{
-        FormulationRecord, MetricsDirectory, ProbeRecord, RunRecord, RunStatus, UnrecordedRun,
-        WriteRecord,
+        Coverage, MetricsDirectory, ProbeRecord, RunFacts, Started, UnrecordedRun,
     },
     ordered_frame::{OrderedFrame, OutputLayout},
     ordering_assertion::AssertionScope,
@@ -31,10 +23,7 @@ use datafusion::{
     prelude::{DataFrame, SessionContext},
 };
 use futures::{FutureExt, future::BoxFuture};
-use std::{
-    num::NonZeroUsize,
-    time::{Instant, SystemTime},
-};
+use std::num::NonZeroUsize;
 
 /// What to do with the combined rows.
 ///
@@ -233,7 +222,14 @@ impl CombinerRun {
     }
 
     async fn run(self, ctx: &SessionContext, started: Started) -> Result<Outcome> {
-        let facts = RunFacts::new(started, &self.inputs, self.threads);
+        let facts = RunFacts {
+            started,
+            formulation: (&self.inputs.formulation).into(),
+            row_ordering: self.inputs.row_ordering.to_string(),
+            dataset_path: self.inputs.input_path.clone(),
+            input_format: self.inputs.input_format.name().to_string(),
+            threads: self.threads.get(),
+        };
         self.action
             .check(ctx, self.inputs.formulation.output_layout())
             .await?
@@ -356,45 +352,21 @@ impl CheckedMeasuredWrite {
         facts: RunFacts,
     ) -> Result<Outcome> {
         let Self { write, run } = self;
-        let mut planned_coverage = None;
-        let written = pipeline::until_cancelled(ctx, async {
-            let rows = inputs.plan(ctx).await?;
-            planned_coverage = Some(rows.coverage);
-            Ok((rows.coverage, rows.write(ctx, &write).await?))
-        })
-        .await;
-        let (coverage, executed) = match written {
-            Ok(written) => written,
-            Err(error) => {
-                let status = if pipeline::is_cancelled(&error) {
-                    RunStatus::Cancelled
-                } else {
-                    RunStatus::Failed
-                };
-                if let Ok(record) = facts.ended(
-                    run.run_id().to_string(),
-                    status,
-                    planned_coverage,
-                    Some((&write).into()),
-                ) {
-                    // The run's own error is what the caller needs; a failure to record the run
-                    // too is dropped.
-                    drop(run.record_unfinished(ctx, &record).await);
-                }
-                return Err(error);
-            }
-        };
-        let record = facts.record(
-            run.run_id().to_string(),
-            coverage,
-            Some((&write).into()),
-            executed.rows_written,
-            executed.execute_ns,
-            None,
-        )?;
+        let measured = facts
+            .measure(
+                ctx,
+                run,
+                (&write).into(),
+                Box::pin(async {
+                    let rows = inputs.plan(ctx).await?;
+                    Ok((rows.coverage, rows))
+                }),
+                |rows| rows.write(ctx, &write),
+            )
+            .await?;
         Ok(Outcome::Measured {
-            rows_written: executed.rows_written,
-            unrecorded_metrics: run.record(ctx, &record, &executed.plan).await?,
+            rows_written: measured.rows_written,
+            unrecorded_metrics: measured.unrecorded_metrics,
         })
     }
 }
@@ -436,7 +408,7 @@ impl CheckedProbe {
             }
             None => sink::probe(drained(rows.ordered)?, &settings, kind).await?,
         };
-        let record = facts.record(
+        let record = facts.completed(
             run.run_id().to_string(),
             coverage,
             write.as_ref().map(|target| target.target().into()),
@@ -466,97 +438,6 @@ async fn collect_rows(ordered: OrderedFrame) -> Result<Outcome> {
     let (frame, sink) = sink::collect(ordered.hold(AssertionScope::OnePartition)?.0)?;
     frame.collect().await?;
     Ok(Outcome::Batches(sink.take()))
-}
-
-/// When a run started, by the wall clock it records and the monotonic clock it times with.
-#[derive(Clone, Copy)]
-struct Started {
-    at: SystemTime,
-    instant: Instant,
-}
-
-impl Started {
-    fn now() -> Self {
-        Self {
-            at: SystemTime::now(),
-            instant: Instant::now(),
-        }
-    }
-}
-
-/// What a run record holds that a run knows before its action executes.
-struct RunFacts {
-    started: Started,
-    formulation: FormulationRecord,
-    row_ordering: String,
-    dataset_path: String,
-    input_format: String,
-    threads: usize,
-}
-
-impl RunFacts {
-    /// The facts of a run started at `started` on `threads` threads over the rows `inputs`
-    /// describe.
-    fn new(started: Started, inputs: &PlanInputs, threads: NonZeroUsize) -> Self {
-        Self {
-            started,
-            formulation: (&inputs.formulation).into(),
-            row_ordering: inputs.row_ordering.to_string(),
-            dataset_path: inputs.input_path.clone(),
-            input_format: inputs.input_format.name().to_string(),
-            threads: threads.get(),
-        }
-    }
-
-    /// The run record of `run_id`, a completed run over `coverage` that ends now. Its action
-    /// wrote `write`, if any, wrote `rows_written` rows, or received them for a probe, and
-    /// executed for `execute_ns`. A probe's settings and decision are `probe`.
-    fn record(
-        self,
-        run_id: String,
-        coverage: Coverage,
-        write: Option<WriteRecord>,
-        rows_written: u64,
-        execute_ns: u64,
-        probe: Option<ProbeRecord>,
-    ) -> Result<RunRecord> {
-        Ok(RunRecord {
-            rows_written: Some(rows_written),
-            execute_ns: Some(execute_ns),
-            probe,
-            ..self.ended(run_id, RunStatus::Completed, Some(coverage), write)?
-        })
-    }
-
-    /// The run record of `run_id`, a run that ends now with `status`, over `coverage` if it
-    /// planned its rows, whose action writes `write`, if any. It holds none of the facts only a
-    /// completed run has: the rows written, the execution time, and a probe's decision.
-    fn ended(
-        self,
-        run_id: String,
-        status: RunStatus,
-        coverage: Option<Coverage>,
-        write: Option<WriteRecord>,
-    ) -> Result<RunRecord> {
-        Ok(RunRecord {
-            run_id,
-            status,
-            started_at: self.started.at,
-            formulation: self.formulation,
-            row_ordering: self.row_ordering,
-            dataset_path: self.dataset_path,
-            input_format: self.input_format,
-            write,
-            threads: self.threads,
-            input_tables: coverage.map(|coverage| coverage.input_tables),
-            samples: coverage.map(|coverage| coverage.samples),
-            rows_written: None,
-            run_ns: elapsed_ns(self.started.instant),
-            execute_ns: None,
-            peak_rss_bytes: process::peak_rss_bytes()?,
-            probe: None,
-        })
-    }
 }
 
 /// What a run plans its rows from: the formulation's rows over the dataset at `input_path`,
@@ -615,14 +496,6 @@ struct PlannedRows {
     annotated: bool,
 }
 
-/// How much of the dataset a run covers: the input tables it merges after narrowing, and the
-/// size of their sample set.
-#[derive(Clone, Copy)]
-struct Coverage {
-    input_tables: usize,
-    samples: usize,
-}
-
 impl PlannedRows {
     /// Writes the rows to `target`, then, when annotated, the sample annotation table of the
     /// sample set beside them, and returns the data write's execution. A failed data write writes
@@ -658,11 +531,6 @@ impl PlannedRows {
         }
         .boxed()
     }
-}
-
-/// Wall-clock nanoseconds since `since`, saturating at `u64::MAX`.
-fn elapsed_ns(since: Instant) -> u64 {
-    u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// The frame an explain renders: the write's file-sink frame in the formulation's output layout,

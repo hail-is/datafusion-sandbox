@@ -63,6 +63,21 @@ impl FromStr for InputFormat {
 #[derive(Clone, Debug)]
 pub struct OutputFormat(OutputRepr);
 
+/// Parses an output format, with its default compression, from its [name](OutputFormat::name).
+impl FromStr for OutputFormat {
+    type Err = DataFusionError;
+
+    fn from_str(name: &str) -> Result<Self> {
+        match name {
+            "parquet" => Ok(Self::PARQUET),
+            "vortex" => Ok(Self::VORTEX),
+            _ => Err(DataFusionError::Configuration(format!(
+                "unknown output format '{name}': expected parquet or vortex"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum OutputRepr {
     Parquet { compression: Option<String> },

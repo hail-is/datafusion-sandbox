@@ -160,6 +160,10 @@ frame's `ordering`, and the run holds its rows in that order.
 - `Collect(ordering)` collects the rows. Its Outcome is a `Rows`, whose `rows` is a `pyarrow.Table`
   holding the rows in `ordering`. The rows arrive once the run ends, through the Arrow C stream
   interface; nothing streams during a run.
+- `Write(output_path, output_format, compression, ordering, layout, annotate_samples=False)` writes
+  the rows, below. Its Outcome is a `RowsWritten`, whose `rows_written` counts them.
+- `MeasuredWrite(write, metrics_directory, formulation)` performs a `Write` and records the run,
+  below. Its Outcome is a `MeasuredWritten`, with `rows_written` and `unrecorded_metrics`.
 - `Explain(ordering, write=None)` renders the plan of a run that drains the rows, without running
   it. Its Outcome is a `PlanText`, whose `text` is a table with a section each for the decoded
   `frontend_plan`, as the frontend wrote it, and the `logical_plan` and `physical_plan` the backend
@@ -167,8 +171,75 @@ frame's `ordering`, and the run holds its rows in that order.
 - `ExplainAnalyze(ordering, write=None)` runs the plan, draining the rows, and renders the same
   sections and a `Plan with Metrics` section, the physical plan with its per-operator metrics.
 
-Both explains take a `write` to render instead of draining the rows once writes land. Until then
-passing one raises `InvalidAction`.
+Given a `write`, `Explain` renders the plan of that write and writes nothing, and `ExplainAnalyze`
+performs it, as a `Write` would, sample annotation table included, and renders it. The write holds
+the rows in its own `ordering`, so an explain's must be the same, or the run raises `InvalidAction`.
+
+### Writing
+
+```python
+union = hail_df.formulations.union(ctx, dataset)
+
+write = hail_df.Write(
+    "out/combined.parquet", "parquet", "zstd(3)", union.ordering, union.layout, annotate_samples=True
+)
+backend.start(ctx, union.frame, write).wait().rows_written
+```
+
+- `output_path` is a local path or a `gs://` URL naming one file, with the format's extension. A
+  path without it, with a trailing slash, or with a hidden file name or one named like a sample
+  annotation table raises `InvalidAction`, since a later run could not read the file.
+- `output_format` is `parquet` or `vortex`, whatever the dataset is stored in.
+- `compression` is `None` for the format's default, or a mode the format takes: for Parquet a codec
+  such as `snappy` or `zstd(3)`, for Vortex `standard` or `compact`.
+- `ordering` is what the run holds the rows in and what the file's metadata records.
+- `layout` is an `OutputLayout`, usually the ordered frame's. `OutputLayout.FILE_PER_PARTITION` raises
+  `InvalidAction` until per-partition ordering assertions exist.
+
+With `annotate_samples`, the [sample annotation table](adr/0018-declare-a-multi-sample-input-tables-samples-in-a-sample-annotation-table.md)
+is written after the data, beside it, as `<stem>.samples.<ext>`. It covers the union of the sample
+sets of the input tables the plan's scans read, whichever others the dataset has, so a plan over
+some input tables gets exactly their samples, and the output opens as a dataset's input table. A
+write that fails leaves no table. Every write removes the table an earlier write left at that path
+first, so one without `annotate_samples` leaves none. A write annotating samples whose plan reads no
+input tables raises `InvalidAction`.
+
+### Measured writes
+
+```python
+grouped = hail_df.formulations.grouped_merge(ctx, dataset, 2)
+
+run = backend.start(
+    ctx,
+    grouped.frame,
+    hail_df.MeasuredWrite(write, "metrics", grouped.formulation),
+)
+outcome = run.wait()
+outcome.rows_written
+outcome.unrecorded_metrics  # what the run metrics table has no column for
+```
+
+A measured write records the run as `run.run_id` under the metrics directory, in the tables a CLI
+measured write fills, described in [the combiner doc](combiner.md):
+
+- `runs/<run_id>.parquet`, the run record. Its `formulation`, `groups` and `split_points` come from
+  the Action's `formulation`. Its `dataset_path`, `input_format`, `row_ordering`, `input_tables` and
+  `samples` come from the plan's scan descriptions, so they can't be misstated. `input_tables` counts
+  the input tables the plan reads, and `samples` the union of their sample sets.
+- `metrics/<run_id>.parquet`, the run metrics, for a completed run.
+
+The plan must read exactly one dataset, one path, input format and row ordering, or the run raises
+`InvalidAction` before it starts. A run id that already has a run record there fails the run and
+replaces nothing, raising `BackendError` from `wait`.
+
+The record's `status` is `completed` or `failed`. A failed run is recorded before the exception is
+raised, and before its runtimes are torn down: its record has the settings and `run_ns`, and
+`input_tables` and `samples` once its scans have reopened, but no `rows_written` or `execute_ns`, and
+it has no run metrics. If that record can't be written, the run's own failure is still what's raised.
+A failure to record a run that did complete raises `BackendError`, and the output stays written.
+
+`peak_rss_bytes` is the whole process's peak so far. A process running several runs reads no one
+run's peak from it, unlike the CLI, which runs one per process.
 
 ### Settings
 
@@ -198,7 +269,7 @@ take. `start` raises `InvalidAction` before the run begins; a run that fails rai
 try:
     outcome = backend.start(ctx, frame, hail_df.Collect(dataset.ordering)).wait()
 except hail_df.InvalidAction:
-    ...  # versions, a setting, an empty ordering, a write on an explain, or a Python UDF in the plan
+    ...  # versions, a setting, an empty ordering, a write it can't perform, or a Python UDF in the plan
 except hail_df.BackendError:
     ...  # anything else, such as an order the plan could hold only by an inserted sort
 ```
@@ -209,7 +280,8 @@ raises `InvalidAction`: Python UDFs aren't part of the MVP.
 
 Passing something that is not an Action, or a setting whose name or value is not a string, raises
 `TypeError` in Python, before the backend sees the call. A string the backend can't take, an unknown
-setting or a value that doesn't parse, raises `InvalidAction`.
+setting, a value that doesn't parse, an unknown output format or a compression mode the format
+doesn't take, raises `InvalidAction`.
 
 ## What a run does
 
@@ -224,13 +296,24 @@ was encoded is read. Before the logical optimizer, every sort the frontend wrote
 established order, and the Action's ordering becomes an ordering assertion at the root, so the
 optimizer holds it with a merge tree.
 
-The backend's Actions so far:
+The backend's Actions:
 
 - `Collect { ordering }` returns `Outcome::Rows`, the rows in `ordering` and their schema.
-- `Explain { ordering }` returns `Outcome::Plan`, the plan of a run that drains the rows: the decoded
-  frontend plan as a `frontend_plan` section beside the logical and physical plans.
-- `ExplainAnalyze { ordering }` runs the plan, draining the rows, and returns `Outcome::Plan`: those
-  sections and a `Plan with Metrics` section.
+- `Explain { ordering, write }` returns `Outcome::Plan`, the plan of a run that drains the rows or
+  performs the write: the decoded frontend plan as a `frontend_plan` section beside the logical and
+  physical plans.
+- `ExplainAnalyze { ordering, write }` runs that plan and returns `Outcome::Plan`: those sections and
+  a `Plan with Metrics` section.
+- `Write(write)` returns `Outcome::RowsWritten`. `Write::new` makes the checks a write can make
+  alone, and holds the rows as an explain's write does: the sink writes the ordering as file metadata
+  and keeps no requirement of its own, since the root assertion holds it.
+- `MeasuredWrite { write, metrics_directory, formulation }` returns `Outcome::Measured`, the rows
+  written and the names of the metrics the run metrics table has no column for. It refuses a recorded
+  run id first, then writes, then records, all before the pipeline runner tears down the run's
+  runtimes.
+
+The run asks the object-store resolver for the paths its plan reads and for those its Action names:
+the output path and the metrics directory.
 
 `Backend::builtin_plan(dataset, formulation, versions)` builds a Rust formulation's frame with its
 plan builder, swaps each scan of an input table for the scan description the opened dataset handed
@@ -241,13 +324,13 @@ Every failure is a `BackendError` with a stable `ErrorCode`:
 
 | Code | Name | Raised for |
 | --- | --- | --- |
-| `InvalidAction` | `invalid_action` | versions other than the backend's, an unknown or malformed setting, an empty ordering, a formulation with no built-in plan, a payload outside the `DFPYCHN` frame or framed at another version, an inlined Python UDF (`DFPYUD*`) |
+| `InvalidAction` | `invalid_action` | versions other than the backend's, an unknown or malformed setting, an empty ordering, an explain whose write holds another ordering, an unknown output format, a compression mode the format doesn't take, an output path that names no readable file, a file-per-partition write, a write annotating samples over no input tables, a measured write not over exactly one dataset, a formulation with no built-in plan, a payload outside the `DFPYCHN` frame or framed at another version, an inlined Python UDF (`DFPYUD*`) |
 | `OrderingAssertionFailed` | `ordering_assertion_failed` | a plan the root assertion could hold only by a sort the backend inserted |
 | `RunCancelled` | `run_cancelled` | a cancelled run |
 | `Backend` | `backend_error` | anything else |
 
 Invalid actions fail `start` before the run begins; an ordering assertion fails `wait`, before the
-plan executes.
+plan executes. A repeated run id in a measured write has the `backend_error` code and fails `wait`.
 
 ## Inside the package
 

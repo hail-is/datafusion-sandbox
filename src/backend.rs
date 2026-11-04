@@ -14,6 +14,12 @@
 //! holds the plan in the Action's ordering with an ordering assertion at its root, every sort the
 //! frontend wrote an established order, before the logical optimizer sees it.
 //!
+//! A [`Write`] puts the rows at an output path, and the sample annotation table of the input tables
+//! the plan's scans read beside them when it asks for one (ADR 0018). [`Action::MeasuredWrite`]
+//! also records the run under a metrics directory, taking the dataset's facts from the plan's scan
+//! descriptions, so a frontend can't misstate them. It records how the run ended, failed included,
+//! before the run's runtimes are torn down.
+//!
 //! The backend reaches object stores only through the [`ObjectStoreResolver`] it is built with:
 //! [`ResolveFromUrls`] in production, or a suite's in-memory stores. Every call that touches a
 //! store runs through the pipeline runner.
@@ -34,14 +40,16 @@ pub mod scan_reopening;
 mod tests;
 
 use crate::{
-    format::InputFormat,
+    format::{InputFormat, OutputFormat},
     formulation::Formulation,
-    metrics_directory::FormulationRecord,
+    metrics_directory::{Coverage, FormulationRecord, MetricsDirectory, RunFacts, Started},
+    ordered_frame::OutputLayout,
     ordering_assertion::{self, AssertionScope, OrderingAssertionFailed},
     pipeline::{self, PipelineOptions},
     row_ordering::{RowOrdering, SortColumn},
-    sink,
-    stored::dataset::Dataset,
+    sink::{self, ExecutedSink},
+    stored::dataset::{Dataset, sample_annotation_table::write_marked},
+    write::{WriteTarget, check_one_file_path},
 };
 use codec::Codec;
 use scan_description::{DescribedScan, ScanDescription};
@@ -64,9 +72,11 @@ use datafusion_proto::{
     bytes::logical_plan_from_bytes_with_extension_codec, logical_plan::LogicalExtensionCodec,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     error::Error,
-    fmt, mem,
+    fmt,
+    future::Future,
+    mem,
     num::NonZeroUsize,
     slice,
     sync::{Arc, Mutex},
@@ -309,10 +319,12 @@ impl Backend {
     /// # Errors
     ///
     /// Returns an [`ErrorCode::InvalidAction`] error, before the run starts, if `versions` are not
-    /// the backend's, a setting is unknown or malformed, the Action's ordering is empty, or the
-    /// plan carries a payload framed at another wire version or an inlined Python function; and
-    /// an [`ErrorCode::Backend`] error if the bytes are not otherwise a plan the backend can
-    /// decode, the resolver can't serve the datasets the plan reads, or the run can't start.
+    /// the backend's, a setting is unknown or malformed, the Action's ordering is empty, an explain
+    /// holds its rows in another ordering than the write it renders, the plan carries a payload
+    /// framed at another wire version or an inlined Python function, a write annotating samples
+    /// reads no input tables, or a measured write's plan doesn't read exactly one dataset; and an
+    /// [`ErrorCode::Backend`] error if the bytes are not otherwise a plan the backend can decode,
+    /// the resolver can't serve the paths the plan and the Action name, or the run can't start.
     pub fn start(
         &self,
         plan_bytes: &[u8],
@@ -321,32 +333,37 @@ impl Backend {
         run_id: Option<String>,
         versions: Versions,
     ) -> Result<Run, BackendError> {
+        let started = Started::now();
         versions.check()?;
         let settings = RunSettings::parse(settings)?;
         action.check()?;
         let plan = decode(plan_bytes)?;
         let descriptions = scan_reopening::descriptions(&plan)?;
+        action.check_reads(&descriptions)?;
         let paths = descriptions
             .iter()
             .map(|description| description.dataset_path.as_str())
+            .chain(action.paths())
             .collect::<Vec<_>>();
         let options = self
             .object_stores
             .pipeline_options(settings.threads, &paths)?;
         let run_id = run_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let verify_order = self.verify_order;
-        let thread =
-            thread::Builder::new()
-                .name(format!("hail_df run {run_id}"))
-                .spawn(move || {
-                    pipeline::run(
-                        move |ctx| async move {
-                            execute(ctx, plan, action, settings, verify_order).await
-                        },
-                        options,
-                    )
-                })
-                .map_err(|error| BackendError::from(DataFusionError::External(Box::new(error))))?;
+        let execution = Execution {
+            plan,
+            descriptions,
+            action,
+            settings,
+            verify_order: self.verify_order,
+            run_id: run_id.clone(),
+            started,
+        };
+        let thread = thread::Builder::new()
+            .name(format!("hail_df run {run_id}"))
+            .spawn(move || {
+                pipeline::run(move |ctx| async move { execution.run(ctx).await }, options)
+            })
+            .map_err(|error| BackendError::from(DataFusionError::External(Box::new(error))))?;
         Ok(Run { run_id, thread })
     }
 }
@@ -459,38 +476,158 @@ impl LogicalExtensionCodec for KeepingRefusal {
     }
 }
 
-/// Runs `plan` on `ctx` as `action` asks, under `settings`, checking the order of its rows at run
-/// time if it should `verify_order`.
-async fn execute(
-    ctx: SessionContext,
+/// One run, as [`Backend::start`] checked it: `plan`, reading `descriptions`, performing `action`
+/// under `settings`, checking the order of its rows at run time if it should `verify_order`.
+struct Execution {
     plan: LogicalPlan,
+    descriptions: Vec<ScanDescription>,
     action: Action,
     settings: RunSettings,
     verify_order: bool,
-) -> Result<Outcome> {
-    settings.apply(&ctx, verify_order);
-    let frontend_plan = plan.display_indent().to_string();
-    let plan = pipeline::until_cancelled(&ctx, scan_reopening::reopen(&ctx, plan)).await?;
-    let frame = DataFrame::new(ctx.state(), plan);
-    let schema = Arc::clone(frame.schema().inner());
-    let held = ordering_assertion::hold(frame, action.ordering(), AssertionScope::OnePartition)?;
-    match action {
-        Action::Collect { .. } => {
-            let (frame, sink) = sink::collect(held)?;
-            pipeline::until_cancelled(&ctx, frame.collect()).await?;
-            Ok(Outcome::Rows {
-                schema,
-                batches: sink.take(),
-            })
-        }
-        Action::Explain { .. } => {
-            pipeline::until_cancelled(&ctx, explain(&frontend_plan, sink::drain(held)?, false))
+    run_id: String,
+    started: Started,
+}
+
+impl Execution {
+    async fn run(self, ctx: SessionContext) -> Result<Outcome> {
+        self.settings.apply(&ctx, self.verify_order);
+        let plan = self.plan;
+        match self.action {
+            Action::Collect { ordering } => {
+                pipeline::until_cancelled(&ctx, async {
+                    let rows = HeldRows::plan(&ctx, plan, &ordering).await?;
+                    let (frame, sink) = sink::collect(rows.frame)?;
+                    frame.collect().await?;
+                    Ok(Outcome::Rows {
+                        schema: rows.schema,
+                        batches: sink.take(),
+                    })
+                })
                 .await
-        }
-        Action::ExplainAnalyze { .. } => {
-            pipeline::until_cancelled(&ctx, explain(&frontend_plan, sink::drain(held)?, true)).await
+            }
+            Action::Explain { ordering, write } => {
+                pipeline::until_cancelled(&ctx, async {
+                    let rows = HeldRows::plan(&ctx, plan, &ordering).await?;
+                    let frame = match write {
+                        Some(write) => write.sink_frame(rows.frame)?,
+                        None => sink::drain(rows.frame)?,
+                    };
+                    explain(&rows.frontend_plan, frame, false).await
+                })
+                .await
+            }
+            Action::ExplainAnalyze { ordering, write } => {
+                pipeline::until_cancelled(&ctx, async {
+                    let rows = HeldRows::plan(&ctx, plan, &ordering).await?;
+                    if let Some(write) = write {
+                        let frame = write.sink_frame(rows.frame)?;
+                        let analyzed = explain(&rows.frontend_plan, frame, true);
+                        write.marked(&ctx, &rows.sample_set, analyzed).await
+                    } else {
+                        let frame = sink::drain(rows.frame)?;
+                        explain(&rows.frontend_plan, frame, true).await
+                    }
+                })
+                .await
+            }
+            Action::Write(write) => {
+                pipeline::until_cancelled(&ctx, async {
+                    let rows = HeldRows::plan(&ctx, plan, &write.ordering).await?;
+                    let executed = write.execute(&ctx, rows).await?;
+                    Ok(Outcome::RowsWritten(executed.rows_written))
+                })
+                .await
+            }
+            Action::MeasuredWrite {
+                write,
+                metrics_directory,
+                formulation,
+            } => {
+                let facts = run_facts(
+                    self.started,
+                    &self.descriptions,
+                    formulation,
+                    self.settings.threads,
+                )?;
+                let run = metrics_directory.unrecorded(&ctx, &self.run_id).await?;
+                let input_tables = self.descriptions.len();
+                let measured = facts
+                    .measure(
+                        &ctx,
+                        run,
+                        (&write.target).into(),
+                        Box::pin(async {
+                            let rows = HeldRows::plan(&ctx, plan, &write.ordering).await?;
+                            let coverage = Coverage {
+                                input_tables,
+                                samples: rows.sample_set.len(),
+                            };
+                            Ok((coverage, rows))
+                        }),
+                        |rows| Box::pin(write.execute(&ctx, rows)),
+                    )
+                    .await?;
+                Ok(Outcome::Measured {
+                    rows_written: measured.rows_written,
+                    unrecorded_metrics: measured.unrecorded_metrics,
+                })
+            }
         }
     }
+}
+
+/// A run's rows, ready for its sink.
+struct HeldRows {
+    /// The plan as the frontend wrote it, rendered.
+    frontend_plan: String,
+    /// The rows, held in the Action's ordering over one partition.
+    frame: DataFrame,
+    schema: SchemaRef,
+    /// The union of the sample sets of the input tables the rows come from.
+    sample_set: Vec<String>,
+}
+
+impl HeldRows {
+    /// Reopens `plan`'s scans through `ctx` and holds its rows in `ordering`.
+    async fn plan(
+        ctx: &SessionContext,
+        plan: LogicalPlan,
+        ordering: &[SortColumn],
+    ) -> Result<Self> {
+        let frontend_plan = plan.display_indent().to_string();
+        let reopened = scan_reopening::reopen(ctx, plan).await?;
+        let frame = DataFrame::new(ctx.state(), reopened.plan);
+        let schema = Arc::clone(frame.schema().inner());
+        Ok(Self {
+            frontend_plan,
+            frame: ordering_assertion::hold(frame, ordering, AssertionScope::OnePartition)?,
+            schema,
+            sample_set: reopened.sample_set,
+        })
+    }
+}
+
+/// The facts of a measured run over the one dataset `descriptions` read, which
+/// [`Action::check_reads`] has checked is one.
+fn run_facts(
+    started: Started,
+    descriptions: &[ScanDescription],
+    formulation: FormulationRecord,
+    threads: NonZeroUsize,
+) -> Result<RunFacts> {
+    let Some(dataset) = descriptions.first() else {
+        return Err(DataFusionError::Internal(
+            "a measured write started with no scans to record a dataset from".to_string(),
+        ));
+    };
+    Ok(RunFacts {
+        started,
+        formulation,
+        row_ordering: dataset.row_ordering.to_string(),
+        dataset_path: dataset.dataset_path.clone(),
+        input_format: dataset.input_format.name().to_string(),
+        threads: threads.get(),
+    })
 }
 
 /// The plan text of `frame`: `frontend_plan`, then its logical and physical plans, then, when
@@ -530,35 +667,208 @@ async fn explain(frontend_plan: &str, frame: DataFrame, analyze: bool) -> Result
 /// order. A plan that could meet the assertion only by a
 /// sort the backend inserted fails before it executes, with
 /// [`ErrorCode::OrderingAssertionFailed`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Action {
     /// Collect the rows, in `ordering`, into the Outcome.
     Collect { ordering: Vec<SortColumn> },
-    /// Render the plan of a run that drains the rows in `ordering`, without running it: the
-    /// frontend plan as decoded, then the logical and physical plans.
-    Explain { ordering: Vec<SortColumn> },
-    /// Run the plan, draining the rows in `ordering`, and render what [`Action::Explain`] renders,
-    /// then its physical plan with per-operator metrics.
-    ExplainAnalyze { ordering: Vec<SortColumn> },
+    /// Render the plan of a run that drains the rows in `ordering`, or performs `write`, whose
+    /// ordering must be the same, without running it: the frontend plan as decoded, then the
+    /// logical and physical plans. Nothing is written or removed.
+    Explain {
+        ordering: Vec<SortColumn>,
+        write: Option<Write>,
+    },
+    /// Run the plan, draining the rows in `ordering` or performing `write`, whose ordering must be
+    /// the same, and render what [`Action::Explain`] renders, then its physical plan with
+    /// per-operator metrics.
+    ExplainAnalyze {
+        ordering: Vec<SortColumn>,
+        write: Option<Write>,
+    },
+    /// Perform the write.
+    Write(Write),
+    /// Perform `write`, and record the run under `metrics_directory` with `formulation`: a run
+    /// record, whose status says how it ended, and for a completed run its run metrics.
+    ///
+    /// The record takes its dataset path, input format, row ordering, input table count and sample
+    /// count from the plan's scan descriptions. The plan must read exactly one dataset: one
+    /// dataset path, input format and row ordering. A run id that already has a run record there
+    /// fails the run and records nothing; see [`MetricsDirectory`].
+    MeasuredWrite {
+        write: Write,
+        metrics_directory: MetricsDirectory,
+        formulation: FormulationRecord,
+    },
 }
 
 impl Action {
     /// The ordering the Action holds the rows in.
     fn ordering(&self) -> &[SortColumn] {
-        let (Self::Collect { ordering }
-        | Self::Explain { ordering }
-        | Self::ExplainAnalyze { ordering }) = self;
-        ordering
+        match self {
+            Self::Collect { ordering }
+            | Self::Explain { ordering, .. }
+            | Self::ExplainAnalyze { ordering, .. } => ordering,
+            Self::Write(write) | Self::MeasuredWrite { write, .. } => &write.ordering,
+        }
+    }
+
+    /// The write the Action performs or renders, if any.
+    const fn write(&self) -> Option<&Write> {
+        match self {
+            Self::Collect { .. } => None,
+            Self::Explain { write, .. } | Self::ExplainAnalyze { write, .. } => write.as_ref(),
+            Self::Write(write) | Self::MeasuredWrite { write, .. } => Some(write),
+        }
     }
 
     /// Checks what the Action asks for before a run starts.
     fn check(&self) -> Result<(), BackendError> {
-        if self.ordering().is_empty() {
+        let ordering = self.ordering();
+        if ordering.is_empty() {
             return Err(BackendError::invalid_action(
                 "the Action's ordering has no sort columns, and a run holds its rows in at least one",
             ));
         }
+        if let Some(write) = self.write()
+            && write.ordering != ordering
+        {
+            return Err(BackendError::invalid_action(&format!(
+                "the Action holds its rows in {ordering:?}, and its write records {:?}: \
+                 an explain renders the write it was given",
+                write.ordering
+            )));
+        }
         Ok(())
+    }
+
+    /// Checks what the Action needs of the scans the plan reads.
+    fn check_reads(&self, descriptions: &[ScanDescription]) -> Result<(), BackendError> {
+        if self.write().is_some_and(|write| write.annotate_samples) && descriptions.is_empty() {
+            return Err(BackendError::invalid_action(
+                "the write annotates samples, and the plan reads no input tables to take them from",
+            ));
+        }
+        if !matches!(self, Self::MeasuredWrite { .. }) {
+            return Ok(());
+        }
+        let datasets = descriptions
+            .iter()
+            .map(|description| {
+                (
+                    &description.dataset_path,
+                    &description.input_format,
+                    &description.row_ordering,
+                )
+            })
+            .collect::<HashSet<_>>();
+        if datasets.len() != 1 {
+            return Err(BackendError::invalid_action(&format!(
+                "a measured write's run record describes one dataset, and the plan reads {}",
+                datasets.len()
+            )));
+        }
+        Ok(())
+    }
+
+    /// The paths the Action itself names, besides those the plan reads.
+    fn paths(&self) -> Vec<&str> {
+        let output = self.write().map(|write| write.target.output_path.as_str());
+        let metrics = match self {
+            Self::MeasuredWrite {
+                metrics_directory, ..
+            } => Some(metrics_directory.path()),
+            _ => None,
+        };
+        output.into_iter().chain(metrics).collect()
+    }
+}
+
+/// A write of a plan's rows to one file, as an Action asks for it.
+///
+/// The ordering is the one the file's metadata records, and every Action holding the write holds
+/// the rows in it. With `annotate_samples`, the sample annotation table written beside the file
+/// covers the union of the sample sets of the input tables the plan's scans read. A data write that
+/// fails leaves no table, and one without `annotate_samples` leaves none, removing an earlier
+/// write's (ADR 0018).
+#[derive(Clone, Debug)]
+pub struct Write {
+    target: WriteTarget,
+    ordering: Vec<SortColumn>,
+    annotate_samples: bool,
+}
+
+impl Write {
+    /// A write of the rows to `output_path` in the output format named `output_format`, with
+    /// `compression` or the format's default, recording `ordering`, in `layout`, as above.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorCode::InvalidAction`] error if `output_format` is not an output format's
+    /// name, it doesn't accept `compression`, `output_path` doesn't name a file a later run could
+    /// read as [`check_one_file_path`] says, or `layout` is one file per partition, which waits for
+    /// per-partition assertions.
+    pub fn new(
+        output_path: String,
+        output_format: &str,
+        compression: Option<&str>,
+        ordering: Vec<SortColumn>,
+        layout: OutputLayout,
+        annotate_samples: bool,
+    ) -> Result<Self, BackendError> {
+        if layout == OutputLayout::FilePerPartition {
+            return Err(BackendError::invalid_action(
+                "the backend writes one file until per-partition ordering assertions exist, and \
+                 this write asks for one file per partition",
+            ));
+        }
+        let refused = |error: DataFusionError| BackendError::invalid_action(&error.to_string());
+        let output_format = output_format.parse::<OutputFormat>().map_err(refused)?;
+        check_one_file_path(&output_path, &output_format).map_err(refused)?;
+        let output_format = match compression {
+            Some(compression) => output_format
+                .with_compression(compression)
+                .map_err(refused)?,
+            None => output_format,
+        };
+        Ok(Self {
+            target: WriteTarget {
+                output_path,
+                output_format,
+            },
+            ordering,
+            annotate_samples,
+        })
+    }
+
+    /// The frame that writes `rows`, held in this write's ordering, when executed.
+    fn sink_frame(&self, rows: DataFrame) -> Result<DataFrame> {
+        self.target
+            .sink_frame(rows, &self.ordering, OutputLayout::SingleFile)
+    }
+
+    /// Runs `data_write`, this write's rows going to its file, and writes the sample annotation
+    /// table of `sample_set` beside the file if this write annotates samples.
+    async fn marked<T>(
+        &self,
+        ctx: &SessionContext,
+        sample_set: &[String],
+        data_write: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        write_marked(
+            ctx,
+            &self.target,
+            OutputLayout::SingleFile,
+            self.annotate_samples.then_some(sample_set),
+            data_write,
+        )
+        .await
+    }
+
+    /// Writes `rows`, then any sample annotation table, and returns the data write's execution.
+    async fn execute(&self, ctx: &SessionContext, rows: HeldRows) -> Result<ExecutedSink> {
+        let frame = self.sink_frame(rows.frame)?;
+        self.marked(ctx, &rows.sample_set, sink::execute_and_retain(frame))
+            .await
     }
 }
 
@@ -572,6 +882,15 @@ pub enum Outcome {
     },
     /// An explain's or an explain analyze's plan text.
     Plan(String),
+    /// The number of rows a write wrote.
+    RowsWritten(u64),
+    /// The number of rows a measured write wrote, and what it could not record: the names of the
+    /// metrics its plan reported that the run metrics table has no column for, sorted and without
+    /// repeats.
+    Measured {
+        rows_written: u64,
+        unrecorded_metrics: Vec<String>,
+    },
 }
 
 /// A run's settings: string values by key, every key in the `hail_df.` namespace.

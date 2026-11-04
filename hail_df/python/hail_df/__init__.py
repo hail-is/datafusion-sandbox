@@ -11,11 +11,16 @@ from hail_df.backend import (
     FormulationRecord,
     InputTable,
     InvalidAction,
+    MeasuredWrite,
+    MeasuredWritten,
+    OutputLayout,
     PlanText,
     Rows,
+    RowsWritten,
     Run,
     ScanDescription,
     SortColumn,
+    Write,
 )
 from hail_df.context import context
 
@@ -29,11 +34,16 @@ __all__ = [
     "FormulationRecord",
     "InputTable",
     "InvalidAction",
+    "MeasuredWrite",
+    "MeasuredWritten",
+    "OutputLayout",
     "PlanText",
     "Rows",
+    "RowsWritten",
     "Run",
     "ScanDescription",
     "SortColumn",
+    "Write",
     "context",
     "formulations",
 ]

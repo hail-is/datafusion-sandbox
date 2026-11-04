@@ -43,6 +43,25 @@ fn parsing_an_unknown_input_format_name_names_the_supported_ones() {
     );
 }
 
+#[test]
+fn an_output_format_parses_from_its_name() {
+    for format in [OutputFormat::PARQUET, OutputFormat::VORTEX] {
+        let parsed = format.name().parse::<OutputFormat>().unwrap();
+        assert_eq!(parsed.name(), format.name());
+    }
+}
+
+#[test]
+fn parsing_an_unknown_output_format_name_names_the_supported_ones() {
+    let message = "csv".parse::<OutputFormat>().unwrap_err().to_string();
+
+    assert!(message.contains("'csv'"), "{message}");
+    assert!(
+        message.contains("parquet") && message.contains("vortex"),
+        "{message}"
+    );
+}
+
 /// A Parquet file records each column chunk's codec but not its level, so the claim is that the
 /// file is written with the codec its compression mode names.
 #[test]

@@ -1,13 +1,24 @@
 """`Backend.builtin_plan`, and its parity with the same formulation written in Python: the matrix
-is every formulation with a built-in plan, both formats, the three settings maps, and the Actions
-that have landed."""
+is every formulation with a built-in plan, both formats, the three settings maps, and `Explain`,
+`Collect`, `Write` and `MeasuredWrite`."""
 
 import re
 
 import hail_df
+import pyarrow.parquet as pq
 import pytest
 from conftest import ROWS, SAMPLE_SETS, plan_sections, write_single_sample_dataset
-from hail_df import Collect, Explain, FormulationRecord, InvalidAction, formulations
+from hail_df import (
+    Collect,
+    Explain,
+    FormulationRecord,
+    InvalidAction,
+    MeasuredWrite,
+    MeasuredWritten,
+    RowsWritten,
+    Write,
+    formulations,
+)
 
 UNION = FormulationRecord("union")
 
@@ -89,6 +100,128 @@ def test_the_python_and_built_in_plans_collect_the_same_rows_in_the_same_order(
     assert built_in.rows.equals(from_python)
     samples = sum(len(sample_set) for sample_set in SAMPLE_SETS)
     assert from_python.num_rows == len(ROWS) * samples
+
+
+def annotated_write(ordered, directory, input_format) -> Write:
+    return Write(
+        str(directory / f"g.{input_format}"),
+        input_format,
+        None,
+        ordered.ordering,
+        ordered.layout,
+        annotate_samples=True,
+    )
+
+
+def written_files(directory) -> dict[str, bytes]:
+    return {entry.name: entry.read_bytes() for entry in directory.iterdir()}
+
+
+def assert_writes_alike(tmp_path, input_format) -> None:
+    """The files the Python plan left under `tmp_path/python` are those the built-in plan left under
+    `tmp_path/built-in`, byte for byte, and hold the data and its sample annotation table."""
+    from_python = written_files(tmp_path / "python")
+    assert set(from_python) == {f"g.{input_format}", f"g.samples.{input_format}"}
+    assert from_python == written_files(tmp_path / "built-in")
+
+
+def test_the_python_and_built_in_plans_explain_a_write_to_the_same_physical_plan_with_no_sort(
+    backend, dataset, ctx, formulation, settings, input_format, tmp_path
+):
+    ordered = formulation(ctx, dataset)
+    write = annotated_write(ordered, tmp_path / "out", input_format)
+    action = Explain(ordered.ordering, write)
+
+    from_python = backend.start(ctx, ordered.frame, action, settings=settings).wait()
+    built_in = backend.start(
+        ctx, backend.builtin_plan(dataset, ordered.formulation), action, settings=settings
+    ).wait()
+
+    physical_plan = plan_sections(from_python.text)["physical_plan"]
+    assert physical_plan == plan_sections(built_in.text)["physical_plan"]
+    assert "DataSinkExec" in physical_plan
+    assert "OrderingAssertionExec" in physical_plan
+    assert "SortExec" not in from_python.text
+    assert "SortExec" not in built_in.text
+
+
+def test_the_python_and_built_in_plans_write_byte_identical_files(
+    backend, dataset, ctx, formulation, settings, input_format, tmp_path
+):
+    ordered = formulation(ctx, dataset)
+
+    from_python = backend.start(
+        ctx,
+        ordered.frame,
+        annotated_write(ordered, tmp_path / "python", input_format),
+        settings=settings,
+    ).wait()
+    built_in = backend.start(
+        ctx,
+        backend.builtin_plan(dataset, ordered.formulation),
+        annotated_write(ordered, tmp_path / "built-in", input_format),
+        settings=settings,
+    ).wait()
+
+    samples = sum(len(sample_set) for sample_set in SAMPLE_SETS)
+    assert from_python == built_in == RowsWritten(len(ROWS) * samples)
+    assert_writes_alike(tmp_path, input_format)
+
+
+def executed_plan(metrics, run_id, masked) -> list[tuple]:
+    """The operators a measured run executed, from its run metrics, with its output path masked."""
+    columns = ["node", "parent", "depth", "operator", "display"]
+    run_metrics = pq.read_table(metrics / "metrics" / f"{run_id}.parquet", columns=columns)
+    return sorted(
+        (*(row[column] for column in columns[:-1]), row["display"].replace(masked, "<out>"))
+        for row in run_metrics.to_pylist()
+    )
+
+
+def test_the_python_and_built_in_plans_measure_alike_with_byte_identical_files(
+    backend, dataset, ctx, formulation, settings, input_format, tmp_path
+):
+    ordered = formulation(ctx, dataset)
+    metrics = tmp_path / "metrics"
+
+    def measured(name):
+        write = annotated_write(ordered, tmp_path / name, input_format)
+        return MeasuredWrite(write, str(metrics), ordered.formulation)
+
+    from_python = backend.start(
+        ctx, ordered.frame, measured("python"), settings=settings, run_id="python"
+    ).wait()
+    built_in = backend.start(
+        ctx,
+        backend.builtin_plan(dataset, ordered.formulation),
+        measured("built-in"),
+        settings=settings,
+        run_id="built-in",
+    ).wait()
+
+    assert isinstance(from_python, MeasuredWritten)
+    assert from_python == built_in
+    assert_writes_alike(tmp_path, input_format)
+    python_plan = executed_plan(metrics, "python", str(tmp_path / "python"))
+    assert python_plan == executed_plan(metrics, "built-in", str(tmp_path / "built-in"))
+    operators = {row[3] for row in python_plan}
+    assert "DataSinkExec" in operators
+    assert "SortExec" not in operators
+    facts = [
+        "status",
+        "formulation",
+        "groups",
+        "split_points",
+        "dataset_path",
+        "input_format",
+        "row_ordering",
+        "input_tables",
+        "samples",
+        "rows_written",
+    ]
+    python_record = pq.read_table(metrics / "runs" / "python.parquet").select(facts)
+    built_in_record = pq.read_table(metrics / "runs" / "built-in.parquet").select(facts)
+    assert python_record.equals(built_in_record)
 
 
 # Worked by hand from the spec: contiguous, count-balanced, larger groups first, and clamped to one

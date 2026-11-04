@@ -419,10 +419,10 @@ def test_an_explain_with_no_ordering_raises_invalid_action(backend, dataset, act
 
 
 @pytest.mark.parametrize("action", [Explain, ExplainAnalyze])
-def test_an_explain_given_a_write_raises_invalid_action_until_writes_land(backend, dataset, action):
+def test_an_explain_given_something_that_is_no_write_raises_type_error(backend, dataset, action):
     ctx = hail_df.context()
 
-    with pytest.raises(InvalidAction, match="write"):
+    with pytest.raises(TypeError, match="write must be a Write"):
         backend.start(ctx, union_frame(ctx, dataset), action(dataset.ordering, "a write"))
 
 
@@ -487,5 +487,5 @@ def test_starting_bytes_that_are_no_plan_raises_backend_error_not_invalid_action
 def test_starting_something_that_is_no_action_raises_type_error(backend, dataset):
     ctx = hail_df.context()
 
-    with pytest.raises(TypeError, match="Collect, Explain or ExplainAnalyze"):
+    with pytest.raises(TypeError, match="Collect, Explain, ExplainAnalyze, Write or MeasuredWrite"):
         backend.start(ctx, union_frame(ctx, dataset), "collect")
