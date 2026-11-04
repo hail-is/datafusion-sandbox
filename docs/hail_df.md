@@ -152,6 +152,39 @@ cross as they are, and give the same Outcome. `settings` is the settings map bel
 waits, so other Python threads keep running. Waiting again hands back the same result. Dropping a
 `Run` leaves the run going.
 
+A run id names one going run of its `Backend`: `start` raises `InvalidAction` for an id whose run is
+still going. Once that run has ended the id is free again, apart from a measured write's rule below.
+
+### Cancelling a run
+
+```python
+run = backend.start(ctx, union.frame, hail_df.Collect(union.ordering), run_id="run-a")
+
+backend.cancel("run-a")
+try:
+    outcome = run.wait()    # the Outcome, if the run had already completed
+except hail_df.RunCancelled:
+    ...                     # a cancelled run has no Outcome
+```
+
+`Backend.cancel(run_id)` cancels the going run with that id, whether or not a `Run` for it is left. A
+run that already completed keeps its Outcome. Cancelling an id with no run, or one whose run has
+ended, is not an error.
+
+Ctrl-C during `Run.wait()` in the main thread cancels the run, waits for it to end, and raises
+`KeyboardInterrupt`, so a measured write has recorded itself even if the interrupt ends the script.
+The run's `wait` then raises `RunCancelled`. A second Ctrl-C raises `KeyboardInterrupt` at once and
+leaves the cancelled run to end in the background. Signals reach only the main thread, so a `wait` in
+another thread is not interrupted, and only `Backend.cancel` stops its run. `wait` checks for signals
+about every 50 ms. An exception from any signal handler you installed cancels the run the same way; a
+handler that doesn't raise leaves it going.
+
+A cancelled run stops its work at once, but `wait` returns only when the run's threads have stopped,
+and they stop where the plan yields. Scanning, merging and writing yield often. A large hash join's
+fan-out beneath an aggregate doesn't, so such a run can take many seconds to end after its cancel,
+though its run record is written at once. Treat a cancelled write's output path as unwritten: what
+remains of an interrupted write is up to the store.
+
 ### Actions
 
 An Action is a frozen dataclass. Each takes plain sort columns, such as a dataset's or an ordered
@@ -232,10 +265,11 @@ The plan must read exactly one dataset, one path, input format and row ordering,
 `InvalidAction` before it starts. A run id that already has a run record there fails the run and
 replaces nothing, raising `BackendError` from `wait`.
 
-The record's `status` is `completed` or `failed`. A failed run is recorded before the exception is
-raised, and before its runtimes are torn down: its record has the settings and `run_ns`, and
-`input_tables` and `samples` once its scans have reopened, but no `rows_written` or `execute_ns`, and
-it has no run metrics. If that record can't be written, the run's own failure is still what's raised.
+The record's `status` is `completed`, `failed` or `cancelled`. A failed or cancelled run is recorded
+before the exception is raised, and before its runtimes are torn down, however soon after `start` it
+was cancelled: its record has the settings and `run_ns`, and `input_tables` and `samples` once its
+scans have reopened, but no `rows_written` or `execute_ns`, and it has no run metrics. If that record
+can't be written, the run's own failure is still what's raised.
 A failure to record a run that did complete raises `BackendError`, and the output stays written.
 
 `peak_rss_bytes` is the whole process's peak so far. A process running several runs reads no one
@@ -262,20 +296,23 @@ settings = {"hail_df.target_partitions": "8", "hail_df.repartition_file_min_size
 
 ### Errors
 
-Every failure raises `BackendError`, or its subclass `InvalidAction` for a call the backend doesn't
-take. `start` raises `InvalidAction` before the run begins; a run that fails raises from `wait`:
+Every failure raises `BackendError`, or one of its subclasses: `InvalidAction` for a call the backend
+doesn't take, and `RunCancelled` for a cancelled run. `start` raises `InvalidAction` before the run
+begins; a run that fails or is cancelled raises from `wait`:
 
 ```python
 try:
     outcome = backend.start(ctx, frame, hail_df.Collect(dataset.ordering)).wait()
 except hail_df.InvalidAction:
-    ...  # versions, a setting, an empty ordering, a write it can't perform, or a Python UDF in the plan
+    ...  # versions, a setting, an empty ordering, a write it can't perform, a run id still going, or a Python UDF in the plan
+except hail_df.RunCancelled:
+    ...  # the run was cancelled
 except hail_df.BackendError:
     ...  # anything else, such as an order the plan could hold only by an inserted sort
 ```
 
 The message of each starts with the error code in the table below. The `ordering_assertion_failed`
-and `run_cancelled` codes raise plain `BackendError` for now. A Python UDF inlined into a frame
+code raises plain `BackendError` for now. A Python UDF inlined into a frame
 raises `InvalidAction`: Python UDFs aren't part of the MVP.
 
 Passing something that is not an Action, or a setting whose name or value is not a string, raises
@@ -324,7 +361,7 @@ Every failure is a `BackendError` with a stable `ErrorCode`:
 
 | Code | Name | Raised for |
 | --- | --- | --- |
-| `InvalidAction` | `invalid_action` | versions other than the backend's, an unknown or malformed setting, an empty ordering, an explain whose write holds another ordering, an unknown output format, a compression mode the format doesn't take, an output path that names no readable file, a file-per-partition write, a write annotating samples over no input tables, a measured write not over exactly one dataset, a formulation with no built-in plan, a payload outside the `DFPYCHN` frame or framed at another version, an inlined Python UDF (`DFPYUD*`) |
+| `InvalidAction` | `invalid_action` | versions other than the backend's, an unknown or malformed setting, an empty ordering, an explain whose write holds another ordering, an unknown output format, a compression mode the format doesn't take, an output path that names no readable file, a file-per-partition write, a write annotating samples over no input tables, a measured write not over exactly one dataset, a run id whose run is still going, a formulation with no built-in plan, a payload outside the `DFPYCHN` frame or framed at another version, an inlined Python UDF (`DFPYUD*`) |
 | `OrderingAssertionFailed` | `ordering_assertion_failed` | a plan the root assertion could hold only by a sort the backend inserted |
 | `RunCancelled` | `run_cancelled` | a cancelled run |
 | `Backend` | `backend_error` | anything else |

@@ -422,3 +422,33 @@ fn the_fixture_without_alleles_discovers_as_one_sample_under_the_locus_ordering(
 
     assert_eq!(dataset.sample_set(), ["sample-a"]);
 }
+
+/// A fixture's gated view is its store at its URL, for a session the test doesn't build: reads of
+/// the dataset's files wait for the gate, and reads beside them don't.
+#[test]
+fn a_fixture_s_gated_view_holds_reads_of_its_dataset_until_released() {
+    let fixture = fixture::dataset_fixture(FixtureFormat::Parquet, LocusRepresentation::Packed);
+    let (gated, gate) = fixture.with_gated_reads();
+    let file = object_store::path::Path::from(format!(
+        "{}/{}",
+        fixture.table_path().prefix(),
+        sample_table_files(SAMPLES[0], FixtureFormat::Parquet)[0]
+    ));
+    let store = Arc::clone(gated.store());
+
+    let held = block_on(async {
+        tokio::select! {
+            biased;
+            read = store.get(&file) => {
+                read.unwrap();
+                false
+            }
+            () = gate.reached() => true,
+        }
+    });
+
+    assert!(held);
+    assert_eq!(gated.url(), &fixture.table_path().object_store());
+    gate.release();
+    block_on(store.get(&file)).unwrap();
+}

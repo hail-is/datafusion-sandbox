@@ -113,6 +113,22 @@ def plan_sections(text: str) -> dict[str, str]:
     return {name: "\n".join(plan) for name, plan in sections.items()}
 
 
+def write_large_dataset(root: Path, rows_per_table: int) -> Path:
+    """Writes a Parquet dataset of two input tables of `rows_per_table` rows each under `root`, for
+    a test that needs a run to last, and returns its path."""
+    rows = pa.table(
+        [
+            pa.repeat("chr01", rows_per_table),
+            pa.array(range(1, rows_per_table + 1), pa.int32()),
+            pa.repeat("A,G", rows_per_table),
+        ],
+        schema=pa.schema(ROW_FIELDS),
+    )
+    write_table(rows, root / "s=HG02230" / "a.parquet", "parquet")
+    write_table(rows, root / "s=NA18534" / "a.parquet", "parquet")
+    return root
+
+
 @pytest.fixture(params=FORMATS)
 def input_format(request) -> str:
     return request.param

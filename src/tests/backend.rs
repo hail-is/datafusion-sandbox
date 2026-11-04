@@ -3,9 +3,11 @@
 //!
 //! The tests here open datasets and read back plan bytes' scan descriptions; `runs` starts plan
 //! bytes and waits for their Outcomes; `builtin_plans` starts a built-in formulation's plan bytes;
-//! `writes` writes a plan's rows to in-memory stores of their own, measured or not.
+//! `writes` writes a plan's rows to in-memory stores of their own, measured or not; `cancellation`
+//! holds runs open at a gated store to cancel them.
 
 mod builtin_plans;
+mod cancellation;
 mod runs;
 mod writes;
 

@@ -36,10 +36,7 @@ use pyo3::{
     prelude::*,
     types::{PyBytes, PyCapsule},
 };
-use std::{
-    ffi::CStr,
-    sync::{Arc, LazyLock},
-};
+use std::{ffi::CStr, sync::Arc, time::Duration};
 
 create_exception!(
     hail_df,
@@ -55,6 +52,13 @@ create_exception!(
      malformed Action, or a plan carrying a payload it refuses."
 );
 
+create_exception!(
+    hail_df,
+    RunCancelled,
+    BackendError,
+    "A run that was cancelled. It has no Outcome."
+);
+
 fn backend_error(error: &impl ToString) -> PyErr {
     BackendError::new_err(error.to_string())
 }
@@ -64,7 +68,8 @@ fn backend_error(error: &impl ToString) -> PyErr {
 fn raised(error: &backend::BackendError) -> PyErr {
     match error.code() {
         ErrorCode::InvalidAction => InvalidAction::new_err(error.to_string()),
-        ErrorCode::OrderingAssertionFailed | ErrorCode::RunCancelled | ErrorCode::Backend => {
+        ErrorCode::RunCancelled => RunCancelled::new_err(error.to_string()),
+        ErrorCode::OrderingAssertionFailed | ErrorCode::Backend => {
             BackendError::new_err(error.to_string())
         }
     }
@@ -191,8 +196,14 @@ impl PyBackend {
             self.0
                 .start(plan_bytes, action, &settings, run_id, versions)
         })
-        .map(PyRun::new)
+        .map(PyRun)
         .map_err(|e| raised(&e))
+    }
+
+    /// Cancels the going run named `run_id`. An id no run has, or one whose run has ended, is not
+    /// an error.
+    fn cancel(&self, run_id: &str) {
+        self.0.cancel(run_id);
     }
 }
 
@@ -312,50 +323,58 @@ fn sort_columns(ordering: Vec<(String, bool, bool)>) -> Vec<SortColumn> {
         .collect()
 }
 
-/// How a run ended, once it has.
-type Ended = Result<Outcome, backend::BackendError>;
+/// How long a wait runs with the interpreter released before it next checks for signals: about as
+/// long as Ctrl-C can take to reach a run.
+const SIGNAL_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
-/// A started run. Every `wait` hands back what the first one waited for.
+/// A started run. Every `wait` hands back the same.
 #[pyclass(name = "Run", frozen)]
-struct PyRun {
-    run_id: String,
-    ended: LazyLock<Ended, Box<dyn FnOnce() -> Ended + Send>>,
-}
-
-impl PyRun {
-    fn new(run: Run) -> Self {
-        Self {
-            run_id: run.run_id().to_string(),
-            ended: LazyLock::new(Box::new(move || run.wait())),
-        }
-    }
-}
+struct PyRun(Run);
 
 #[pymethods]
 impl PyRun {
     #[getter]
     fn run_id(&self) -> &str {
-        &self.run_id
+        self.0.run_id()
     }
 
     /// Blocks until the run ends, with the interpreter released, and hands back its Outcome: the
     /// rows of a collect, the plan text of an explain as a string, the rows a write wrote as an
     /// integer, or the rows a measured write wrote and the names of the metrics it could not record
     /// as a tuple.
+    ///
+    /// It checks for signals while it waits. When a signal's handler raises, as Ctrl-C's does, it
+    /// cancels the run and raises that once the run has ended, so that a cancelled measured write
+    /// has recorded itself by the time a script dies of it. A second such exception stops it
+    /// waiting for that.
     fn wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        match py.detach(|| LazyLock::force(&self.ended)) {
-            Ok(Outcome::Rows { schema, batches }) => PyRows {
-                schema: Arc::clone(schema),
-                batches: batches.clone(),
+        let mut interrupted = None;
+        let ended = loop {
+            if let Err(signalled) = py.check_signals() {
+                self.0.cancel();
+                if interrupted.is_some() {
+                    return Err(signalled);
+                }
+                interrupted = Some(signalled);
             }
-            .into_bound_py_any(py),
+            if let Some(ended) = py.detach(|| self.0.wait_timeout(SIGNAL_CHECK_INTERVAL)) {
+                break ended;
+            }
+        };
+        if let Some(signalled) = interrupted {
+            return Err(signalled);
+        }
+        match ended {
+            Ok(Outcome::Rows { schema, batches }) => {
+                PyRows { schema, batches }.into_bound_py_any(py)
+            }
             Ok(Outcome::Plan(plan)) => plan.into_bound_py_any(py),
             Ok(Outcome::RowsWritten(rows_written)) => rows_written.into_bound_py_any(py),
             Ok(Outcome::Measured {
                 rows_written,
                 unrecorded_metrics,
-            }) => (*rows_written, unrecorded_metrics.clone()).into_bound_py_any(py),
-            Err(error) => Err(raised(error)),
+            }) => (rows_written, unrecorded_metrics).into_bound_py_any(py),
+            Err(error) => Err(raised(&error)),
         }
     }
 }
@@ -568,6 +587,7 @@ fn capsule_value<T: Clone>(capsule: &Bound<'_, PyAny>, name: &'static CStr) -> P
 fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("BackendError", m.py().get_type::<BackendError>())?;
     m.add("InvalidAction", m.py().get_type::<InvalidAction>())?;
+    m.add("RunCancelled", m.py().get_type::<RunCancelled>())?;
     m.add_class::<PyAction>()?;
     m.add_class::<PyBackend>()?;
     m.add_class::<PyCodec>()?;
