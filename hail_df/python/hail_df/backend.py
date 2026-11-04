@@ -9,7 +9,13 @@ from typing import NamedTuple
 import pyarrow as pa
 
 from hail_df import _native
-from hail_df._native import BackendError, InvalidAction, RunCancelled, ScanDescription
+from hail_df._native import (
+    BackendError,
+    InvalidAction,
+    OrderingAssertionFailed,
+    RunCancelled,
+    ScanDescription,
+)
 from hail_df.datafusion import DATAFUSION_MAJOR, WIRE_VERSION, DataFrame, SessionContext
 
 __all__ = [
@@ -24,6 +30,7 @@ __all__ = [
     "InvalidAction",
     "MeasuredWrite",
     "MeasuredWritten",
+    "OrderingAssertionFailed",
     "OutputLayout",
     "PlanText",
     "Rows",

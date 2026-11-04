@@ -3,6 +3,8 @@
 //! Every test here plans with the run-time order check on, so a plan whose assertion passes but
 //! whose rows arrive out of order fails as it executes.
 
+mod markers;
+
 use crate::{
     locus::LocusRepresentation,
     ordering_assertion::{self, AssertionScope, OrderingAssertionFailed},

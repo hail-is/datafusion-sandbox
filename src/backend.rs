@@ -323,14 +323,16 @@ impl Backend {
     ///
     /// The plan's functions resolve by name from the backend's registry. The run reopens each scan
     /// as the sorted-table scan of its input table, listing the input table's files when it does,
-    /// holds the plan in the Action's ordering, and runs it through the pipeline runner.
+    /// holds the plan in the Action's ordering and at each ordering assertion's marker, and runs
+    /// it through the pipeline runner.
     ///
     /// # Errors
     ///
     /// Returns an [`ErrorCode::InvalidAction`] error, before the run starts, if `versions` are not
     /// the backend's, a setting is unknown or malformed, the Action's ordering is empty, an explain
     /// holds its rows in another ordering than the write it renders, the plan carries a payload
-    /// framed at another wire version or an inlined Python function, a write annotating samples
+    /// framed at another wire version or an inlined Python function or an ordering assertion's
+    /// marker that [`ordering_assertion::check_markers`] refuses, a write annotating samples
     /// reads no input tables, a measured write's plan doesn't read exactly one dataset, or a run
     /// under `run_id` is still going; and an
     /// [`ErrorCode::Backend`] error if the bytes are not otherwise a plan the backend can decode,
@@ -348,6 +350,8 @@ impl Backend {
         let settings = RunSettings::parse(settings)?;
         action.check()?;
         let plan = decode(plan_bytes)?;
+        ordering_assertion::check_markers(&plan)
+            .map_err(|error| BackendError::invalid_action(&error.to_string()))?;
         let descriptions = scan_reopening::descriptions(&plan)?;
         action.check_reads(&descriptions)?;
         let paths = descriptions
@@ -486,12 +490,14 @@ fn builtin_formulation(record: &FormulationRecord) -> Result<Formulation, Backen
 }
 
 /// The plan `plan_bytes` encode, decoded with the backend's [codec] on a session of the shared
-/// configuration, whose registry the plan's functions resolve from. Every scan is a placeholder.
+/// configuration, whose registry the plan's functions resolve from, the marker of an ordering
+/// assertion among them. Every scan is a placeholder.
 ///
 /// The decoder flattens some of the codec's errors into text, so a failed decoding fails with the
 /// codec's first [`ErrorCode::InvalidAction`] error, if it had one.
 fn decode(plan_bytes: &[u8]) -> Result<LogicalPlan> {
     let ctx = SessionContext::new_with_config(pipeline::session_config());
+    ctx.register_udf(ordering_assertion::assert_ordered_udf());
     let codec = KeepingRefusal::default();
     logical_plan_from_bytes_with_extension_codec(plan_bytes, &ctx.task_ctx(), &codec)
         .map_err(|error| codec.take().unwrap_or(error))
@@ -1192,7 +1198,8 @@ impl Versions {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ErrorCode {
     /// The call asked for something the backend doesn't take: versions other than its own,
-    /// an unknown setting, a malformed Action, or a plan carrying a payload it refuses.
+    /// an unknown setting, a malformed Action, or a plan carrying a payload it refuses or an
+    /// ordering assertion's marker it can't read.
     InvalidAction,
     /// The plan could meet an ordering assertion only by a sort the backend inserted.
     OrderingAssertionFailed,

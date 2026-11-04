@@ -13,6 +13,7 @@ from hail_df.backend import (
     InvalidAction,
     MeasuredWrite,
     MeasuredWritten,
+    OrderingAssertionFailed,
     OutputLayout,
     PlanText,
     Rows,
@@ -23,7 +24,7 @@ from hail_df.backend import (
     SortColumn,
     Write,
 )
-from hail_df.context import context
+from hail_df.context import assert_ordered, context
 
 __all__ = [
     "Backend",
@@ -37,6 +38,7 @@ __all__ = [
     "InvalidAction",
     "MeasuredWrite",
     "MeasuredWritten",
+    "OrderingAssertionFailed",
     "OutputLayout",
     "PlanText",
     "Rows",
@@ -46,6 +48,7 @@ __all__ = [
     "ScanDescription",
     "SortColumn",
     "Write",
+    "assert_ordered",
     "context",
     "formulations",
 ]

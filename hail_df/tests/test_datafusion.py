@@ -35,9 +35,11 @@ def test_it_exports_the_names_of_the_datafusion_wheel_the_package_uses():
     import datafusion.expr
 
     assert hail_df.datafusion.DataFrame is datafusion.DataFrame
+    assert hail_df.datafusion.ScalarUDF is datafusion.ScalarUDF
     assert hail_df.datafusion.SessionContext is datafusion.SessionContext
     assert hail_df.datafusion.SortExpr is datafusion.expr.SortExpr
     assert hail_df.datafusion.col is datafusion.col
+    assert hail_df.datafusion.lit is datafusion.lit
 
 
 def test_it_states_the_versions_the_wheel_speaks_which_every_backend_call_checks():

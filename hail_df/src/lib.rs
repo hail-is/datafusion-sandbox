@@ -17,7 +17,7 @@ use datafusion::{
 };
 use datafusion_ffi::{
     execution::FFI_TaskContextProvider, proto::logical_extension_codec::FFI_LogicalExtensionCodec,
-    table_provider::FFI_TableProvider,
+    table_provider::FFI_TableProvider, udf::FFI_ScalarUDF,
 };
 use datafusion_sandbox::{
     backend::{
@@ -28,6 +28,7 @@ use datafusion_sandbox::{
     },
     metrics_directory::{FormulationRecord, MetricsDirectory},
     ordered_frame::OutputLayout,
+    ordering_assertion::assert_ordered_udf,
     row_ordering::SortColumn,
 };
 use pyo3::{
@@ -49,7 +50,16 @@ create_exception!(
     InvalidAction,
     BackendError,
     "A call the backend doesn't take: versions other than its own, an unknown setting, a \
-     malformed Action, or a plan carrying a payload it refuses."
+     malformed Action, or a plan carrying a payload it refuses or an ordering assertion's marker \
+     it can't read."
+);
+
+create_exception!(
+    hail_df,
+    OrderingAssertionFailed,
+    BackendError,
+    "A plan that could hold an ordering assertion only by a sort the backend inserted, or through \
+     a node that keeps no input's order. Raised before the plan executes."
 );
 
 create_exception!(
@@ -63,15 +73,13 @@ fn backend_error(error: &impl ToString) -> PyErr {
     BackendError::new_err(error.to_string())
 }
 
-/// The exception for `error`, by its code. The codes with no exception of their own yet raise
-/// `BackendError`.
+/// The exception for `error`, by its code.
 fn raised(error: &backend::BackendError) -> PyErr {
     match error.code() {
         ErrorCode::InvalidAction => InvalidAction::new_err(error.to_string()),
         ErrorCode::RunCancelled => RunCancelled::new_err(error.to_string()),
-        ErrorCode::OrderingAssertionFailed | ErrorCode::Backend => {
-            BackendError::new_err(error.to_string())
-        }
+        ErrorCode::OrderingAssertionFailed => OrderingAssertionFailed::new_err(error.to_string()),
+        ErrorCode::Backend => BackendError::new_err(error.to_string()),
     }
 }
 
@@ -574,6 +582,28 @@ impl PyCodec {
     }
 }
 
+/// The function of an ordering assertion's marker, for `datafusion`'s `ScalarUDF.from_pycapsule`.
+#[pyclass(name = "AssertOrdered", frozen)]
+struct PyAssertOrdered;
+
+#[pymethods]
+impl PyAssertOrdered {
+    #[new]
+    const fn new() -> Self {
+        Self
+    }
+
+    /// The function as an FFI function, which crosses plan bytes by name.
+    #[expect(clippy::unused_self, reason = "Python calls it as a method")]
+    fn __datafusion_scalar_udf__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
+        PyCapsule::new_with_value(
+            py,
+            FFI_ScalarUDF::from(Arc::new(assert_ordered_udf())),
+            c"datafusion_scalar_udf",
+        )
+    }
+}
+
 /// A clone of the `T` that `capsule`, named `name`, holds.
 fn capsule_value<T: Clone>(capsule: &Bound<'_, PyAny>, name: &'static CStr) -> PyResult<T> {
     let capsule = capsule.cast::<PyCapsule>()?;
@@ -587,8 +617,13 @@ fn capsule_value<T: Clone>(capsule: &Bound<'_, PyAny>, name: &'static CStr) -> P
 fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("BackendError", m.py().get_type::<BackendError>())?;
     m.add("InvalidAction", m.py().get_type::<InvalidAction>())?;
+    m.add(
+        "OrderingAssertionFailed",
+        m.py().get_type::<OrderingAssertionFailed>(),
+    )?;
     m.add("RunCancelled", m.py().get_type::<RunCancelled>())?;
     m.add_class::<PyAction>()?;
+    m.add_class::<PyAssertOrdered>()?;
     m.add_class::<PyBackend>()?;
     m.add_class::<PyCodec>()?;
     m.add_class::<PyInputTableScan>()?;

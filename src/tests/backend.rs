@@ -4,10 +4,12 @@
 //! The tests here open datasets and read back plan bytes' scan descriptions; `runs` starts plan
 //! bytes and waits for their Outcomes; `builtin_plans` starts a built-in formulation's plan bytes;
 //! `writes` writes a plan's rows to in-memory stores of their own, measured or not; `cancellation`
-//! holds runs open at a gated store to cancel them.
+//! holds runs open at a gated store to cancel them; `ordering_markers` starts plan bytes carrying
+//! an ordering assertion's marker.
 
 mod builtin_plans;
 mod cancellation;
+mod ordering_markers;
 mod runs;
 mod writes;
 

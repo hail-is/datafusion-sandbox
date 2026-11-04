@@ -7,15 +7,21 @@
 //! or within each, so the optimizer builds a merge tree beneath them rather than a sort: the same
 //! requirement a sink placed until ADR 0022 moved it to an assertion at the root.
 //!
-//! [`hold`] places an assertion at the root of a frame and wraps every sort in it in an
-//! established order. The check runs in `check_invariants` on the final physical plan, so a failed
-//! assertion is an error raised before execution: [`OrderingAssertionFailed`], found beneath
-//! whatever context the planner wraps it in. The check walks down from the assertion along the
-//! edges on which nodes keep their input's order, through every input of a union or a merge. It
-//! fails on a sort, accepts an established order and the sort beneath it, and stops at another
-//! assertion, which checks its own subtree. It fails closed on any node with inputs that keeps
-//! none of their orders. A scan is a leaf, so a scan that reorders whole files by their statistics
-//! is not a sort.
+//! A frontend states an assertion mid-plan with a **marker**, a stock-shaped filter that crosses
+//! plan bytes by name: `Filter(assert_ordered(<key column>, '<direction>', …))`, with each
+//! direction one of `ASC NULLS LAST`, `ASC NULLS FIRST`, `DESC NULLS LAST` and `DESC NULLS FIRST`.
+//! [`hold`] reads it from the plan as written, before the logical optimizer can move or merge the
+//! filter.
+//!
+//! [`hold`] places an assertion at the root of a frame, replaces every marker in it with an
+//! assertion, and wraps every sort in it in an established order. The check runs in
+//! `check_invariants` on the final physical plan, so a failed assertion is an error raised before
+//! execution: [`OrderingAssertionFailed`], found beneath whatever context the planner wraps it in.
+//! The check walks down from the assertion along the edges on which nodes keep their input's order,
+//! through every input of a union or a merge. It fails on a sort, accepts an established order and
+//! the sort beneath it, and stops at another assertion, which checks its own subtree. It fails
+//! closed on any node with inputs that keeps none of their orders. A scan is a leaf, so a scan that
+//! reorders whole files by their statistics is not a sort.
 //!
 //! With [`verify_order`] on a session, every assertion and established order also checks at run
 //! time that its rows arrive in its order, failing execution at the first that does not. It
@@ -28,6 +34,7 @@ use datafusion::{
     arrow::{
         array::ArrayRef,
         compute::SortOptions,
+        datatypes::DataType,
         row::{OwnedRow, RowConverter, SortField},
     },
     catalog::Session,
@@ -40,8 +47,9 @@ use datafusion::{
         session_state::SessionStateBuilder,
     },
     logical_expr::{
-        Expr, Extension, LogicalPlan, Sort, SortExpr, UserDefinedLogicalNode,
-        UserDefinedLogicalNodeCore, physical_planning_context::PhysicalPlanningContext,
+        ColumnarValue, Expr, Extension, Filter, LogicalPlan, ScalarFunctionArgs, ScalarUDF,
+        ScalarUDFImpl, Signature, Sort, SortExpr, UserDefinedLogicalNode,
+        UserDefinedLogicalNodeCore, Volatility, physical_planning_context::PhysicalPlanningContext,
     },
     physical_expr::{LexRequirement, OrderingRequirements, PhysicalSortRequirement},
     physical_plan::{
@@ -74,8 +82,10 @@ pub enum AssertionScope {
     EachPartition,
 }
 
-/// `frame` held in `ordering` by an ordering assertion at its root over `scope`, with every sort
-/// in it wrapped in an established order.
+/// `frame` held in `ordering` by an ordering assertion at its root over `scope`.
+///
+/// Every marker in it, subqueries included, becomes an assertion over one partition where the plan
+/// wrote it, and every sort becomes an established order.
 ///
 /// The frame's session state gains a query planner that plans both nodes; it replaces the
 /// session's own, which in this crate is always `DataFusion`'s default. Hold a frame once, as it
@@ -83,7 +93,8 @@ pub enum AssertionScope {
 ///
 /// # Errors
 ///
-/// Returns a planning error if `ordering` is empty.
+/// Returns a planning error if `ordering` is empty, or if [`check_markers`] refuses a marker in the
+/// frame.
 pub fn hold(frame: DataFrame, ordering: &[SortColumn], scope: AssertionScope) -> Result<DataFrame> {
     if ordering.is_empty() {
         return Err(DataFusionError::Plan(
@@ -91,22 +102,36 @@ pub fn hold(frame: DataFrame, ordering: &[SortColumn], scope: AssertionScope) ->
         ));
     }
     let (state, plan) = frame.into_parts();
-    let established = plan
-        .transform_up(|node| {
-            let LogicalPlan::Sort(Sort { expr, .. }) = &node else {
+    check_markers(&plan)?;
+    let with_held_nodes = plan
+        .transform_up_with_subqueries(|node| {
+            let held_node = if let LogicalPlan::Filter(Filter {
+                predicate, input, ..
+            }) = &node
+                && let Some(args) = marker_arguments(predicate)
+            {
+                held(
+                    input.as_ref().clone(),
+                    marker_ordering(args)?,
+                    Kind::Asserted,
+                    AssertionScope::OnePartition,
+                )
+            } else if let LogicalPlan::Sort(Sort { expr, .. }) = &node {
+                let ordering = expr.clone();
+                held(
+                    node,
+                    ordering,
+                    Kind::Established,
+                    AssertionScope::OnePartition,
+                )
+            } else {
                 return Ok(Transformed::no(node));
             };
-            let ordering = expr.clone();
-            Ok(Transformed::yes(held(
-                node,
-                ordering,
-                Kind::Established,
-                AssertionScope::OnePartition,
-            )))
+            Ok(Transformed::yes(held_node))
         })?
         .data;
     let plan = held(
-        established,
+        with_held_nodes,
         ordering.iter().map(SortColumn::sort_expression).collect(),
         Kind::Asserted,
         scope,
@@ -115,6 +140,42 @@ pub fn hold(frame: DataFrame, ordering: &[SortColumn], scope: AssertionScope) ->
         .with_query_planner(Arc::new(HoldingQueryPlanner))
         .build();
     Ok(DataFrame::new(state, plan))
+}
+
+/// The function of an ordering assertion's marker, under the name `assert_ordered`.
+#[must_use]
+pub fn assert_ordered_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(AssertOrdered {
+        signature: Signature::variadic_any(Volatility::Immutable),
+    })
+}
+
+/// Checks that every marker in `plan` is a filter's whole predicate and reads as an ordering.
+///
+/// [`hold`] can then replace each with an assertion where the plan wrote it. A call of the function
+/// anywhere else would hold nothing, so it is refused rather than left in the plan.
+///
+/// # Errors
+///
+/// Returns a planning error naming the first marker that isn't so.
+pub fn check_markers(plan: &LogicalPlan) -> Result<()> {
+    plan.apply_with_subqueries(|node| {
+        if let LogicalPlan::Filter(Filter { predicate, .. }) = node
+            && let Some(args) = marker_arguments(predicate)
+        {
+            marker_ordering(args)?;
+            return Ok(TreeNodeRecursion::Continue);
+        }
+        for expr in node.expressions() {
+            if expr.exists(|expr| Ok(marker_arguments(expr).is_some()))? {
+                return Err(DataFusionError::Plan(format!(
+                    "{ASSERT_ORDERED} must be the whole predicate of a filter, not part of: {expr}"
+                )));
+            }
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+    Ok(())
 }
 
 /// `config` with the run-time order check on: every assertion and established order planned on a
@@ -156,6 +217,84 @@ impl fmt::Display for OrderingAssertionFailed {
 }
 
 impl Error for OrderingAssertionFailed {}
+
+/// The name the marker's function crosses a plan's bytes by.
+const ASSERT_ORDERED: &str = "assert_ordered";
+
+/// The marker's function. It marks a plan and computes nothing.
+#[derive(Debug, Eq, Hash, PartialEq)]
+struct AssertOrdered {
+    signature: Signature,
+}
+
+impl ScalarUDFImpl for AssertOrdered {
+    fn name(&self) -> &str {
+        ASSERT_ORDERED
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, _: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        Err(DataFusionError::Execution(format!(
+            "{ASSERT_ORDERED} marks a plan for the backend's ordering pass and computes nothing"
+        )))
+    }
+}
+
+/// The arguments of `expr` if it is a call of the marker's function.
+fn marker_arguments(expr: &Expr) -> Option<&[Expr]> {
+    match expr {
+        Expr::ScalarFunction(call) if call.func.name() == ASSERT_ORDERED => Some(&call.args),
+        _ => None,
+    }
+}
+
+/// The ordering a marker's arguments state: pairs of a key column and its direction.
+fn marker_ordering(args: &[Expr]) -> Result<Vec<SortExpr>> {
+    let (pairs, rest) = args.as_chunks::<2>();
+    if pairs.is_empty() || !rest.is_empty() {
+        return Err(DataFusionError::Plan(format!(
+            "{ASSERT_ORDERED} takes pairs of a key column and its direction, got {} arguments",
+            args.len()
+        )));
+    }
+    pairs
+        .iter()
+        .map(|[key, direction]| {
+            if !matches!(key, Expr::Column(_)) {
+                return Err(DataFusionError::Plan(format!(
+                    "{ASSERT_ORDERED} takes key columns, not {key}"
+                )));
+            }
+            let (ascending, nulls_first) = marker_direction(direction)?;
+            Ok(SortExpr::new(key.clone(), ascending, nulls_first))
+        })
+        .collect()
+}
+
+/// Whether the direction `expr` states is ascending, and whether its nulls sort first.
+fn marker_direction(expr: &Expr) -> Result<(bool, bool)> {
+    let text = match expr {
+        Expr::Literal(value, _) => value.try_as_str().flatten(),
+        _ => None,
+    };
+    match text {
+        Some("ASC NULLS LAST") => Ok((true, false)),
+        Some("ASC NULLS FIRST") => Ok((true, true)),
+        Some("DESC NULLS LAST") => Ok((false, false)),
+        Some("DESC NULLS FIRST") => Ok((false, true)),
+        _ => Err(DataFusionError::Plan(format!(
+            "{ASSERT_ORDERED} takes a direction of ASC or DESC, then NULLS FIRST or NULLS LAST, \
+             as a string literal, not {expr}"
+        ))),
+    }
+}
 
 /// What a held node is: an assertion, which checks the plan beneath it, or an established order,
 /// which accepts the sort beneath it.
